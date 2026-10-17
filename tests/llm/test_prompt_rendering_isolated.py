@@ -1,0 +1,257 @@
+"""Offline rendering regression tests; no application/trader module import.
+
+Only audited source AST nodes are executed. All runtime paths are temporary;
+file opens outside the sandbox, sockets and child processes are forbidden.
+"""
+import ast
+import builtins
+import copy
+import datetime
+import io
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from contextlib import ExitStack
+from pathlib import Path
+from typing import Any, Dict, List
+from unittest.mock import Mock, patch
+
+import scripts.prompt_library as prompts
+# 纯配置数据模块（import 时只读 .env，早于 IO 栅栏安装）：风控提示词函数引用的
+# 全部大写常量由此注入沙箱命名空间，新增风控参数无需再改本测试。
+import scripts.risk_constants as risk_constants
+
+# Read code only, before installing the runtime IO fence.
+PROJECT = Path(__file__).resolve().parents[2]
+# 结构优化阶段 4：主脑的提示词函数已部分搬进 scripts/brain/。原先按**单文件**
+# ast.parse 再按函数名取节点，搬走即 StopIteration。现按「主脑域源码集」定位
+# （tests/source_scan.find_function_node 会顺带断言"同名节点唯一"，防止搬家
+# 留下同名残壳）。见该函数的 docstring。
+from tests import source_scan  # noqa: E402
+
+BRAIN_FACADE = PROJECT / "scripts" / "ai_brain_trader.py"
+BRAIN_DOMAIN = dict(pkg_name="brain")
+
+# 必须在**安装 IO 栅栏之前**（即模块导入期）读盘并解析 —— 见本文件 Sandbox.setUp
+# 里的 guarded open：那里会把所有项目内路径的 open 全部拦掉。
+_CONSTRUCT_NODE, _CONSTRUCT_PATH = source_scan.find_function_node(
+    BRAIN_FACADE, "construct_full_market_prompt", **BRAIN_DOMAIN)
+_BUDGET_NODE, _BUDGET_PATH = source_scan.find_function_node(
+    BRAIN_FACADE, "build_risk_budget_text", **BRAIN_DOMAIN)
+_EXTRA_NODES = {
+    name: source_scan.find_function_node(BRAIN_FACADE, name, **BRAIN_DOMAIN)[0]
+    for name in ("_sl_atr_mult_for",)
+}
+
+# 2026-09-30 提示词体系重构：提示词正文**只存** `data/prompt_library.json`，代码里
+# 只剩只读输出 JSON Schema。旧沙箱把 `BASELINE_FILE` 指向一个**不存在**的临时路径，
+# 靠 `_default()` 空库回退拿"代码常量里的正文"——现在那样会拿到**空提示词**
+# （断言要么假红，要么对空串真空通过）。故改为把真基线复制进沙箱当只读种子。
+# ⚠️ 必须在安装 IO 栅栏**之前**（模块导入期）读盘，见本文件 Sandbox.setUp 的 guarded open。
+_BASELINE_SRC = PROJECT / "data" / "prompt_library.json"
+_REAL_BASELINE_TEXT = _BASELINE_SRC.read_text(encoding="utf-8")
+
+APP_TREE = ast.parse((PROJECT / "astra_backend/app.py").read_text())
+OLD_TREE = ast.parse((PROJECT / "tests/ops/test_control_plane_v2.py").read_text())
+
+
+class Sandbox(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        # 真基线种子：`BASELINE_FILE` 随后被 patch 到 `self.root / "library.json"`，
+        # 先写入再装栅栏，沙箱里的 `get_profile` / `active_profile` 才拿得到真正文。
+        (self.root / "library.json").write_text(_REAL_BASELINE_TEXT, encoding="utf-8")
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(prompts, "ROOT", self.root))
+        self.stack.enter_context(patch.object(prompts, "BASELINE_FILE", self.root / "library.json"))
+        self.stack.enter_context(patch.object(prompts, "LOCAL_FILE", self.root / "library.local.json"))
+        original_open, original_io_open, original_os_open = builtins.open, io.open, os.open
+
+        def check(path):
+            if isinstance(path, int):
+                return
+            resolved = Path(path).resolve()
+            if not resolved.is_relative_to(self.root):
+                raise AssertionError(f"Non-sandbox file access blocked: {resolved}")
+
+        def guarded(fn):
+            def call(path, *args, **kwargs):
+                check(path)
+                return fn(path, *args, **kwargs)
+            return call
+
+        for obj, name, original in ((builtins, "open", original_open), (io, "open", original_io_open), (os, "open", original_os_open)):
+            self.stack.enter_context(patch.object(obj, name, guarded(original)))
+        for obj, name in ((socket, "socket"), (socket, "create_connection"), (subprocess, "Popen"), (os, "system")):
+            self.stack.enter_context(patch.object(obj, name, side_effect=AssertionError("Network/process blocked")))
+        shield = types.ModuleType("scripts.evolution_shield")
+        self.memory = Mock(return_value="隔离心法")
+        shield.render_trading_memory = self.memory
+        self.stack.enter_context(patch.dict(sys.modules, {"scripts.evolution_shield": shield}))
+        self.profile = {"name": "隔离策略", "pipelines": {"trading_user": [{"id": "u", "title": "自定义", "source": "custom", "enabled": True, "content": "余额={{account_balance}} 持仓={{account_positions}} 挂单={{pending_orders}}"}]}}
+        node = _CONSTRUCT_NODE
+        # 批2 P1-1：风险预算小节已抽成 build_risk_budget_text（内含 min() 口径），
+        # 隔离执行时把该 AST 节点一并注入，并注入它引用的两个 risk_constants 函数
+        # （大写常量仍走下面的统一注入，保持"新增风控参数无需改本测试"）。
+        budget_node = _BUDGET_NODE
+        self.ns = dict(List=List, Dict=Dict, Any=Any, datetime=datetime, os=os, json=json,
+                       __version__="0.0.0-sandbox",
+                       safe_float=lambda x: float(x or 0), active_profile=lambda: prompts.resolve_profile(self.profile),
+                       apply_module_layout=prompts.apply_module_layout,
+                       effective_single_asset_margin=risk_constants.effective_single_asset_margin,
+                       effective_daily_loss_limit=risk_constants.effective_daily_loss_limit,
+                       AI_MEMORY_MD_FILE=str(self.root / "memory.md"), AI_MEMORY_FILE=str(self.root / "memory.json"),
+                       NEWS_SENTIMENT_FILE=str(self.root / "news.json"),
+                       # 下面两个是被 exec 的节点按**全局名**解析的主脑私有函数。
+                       # 本测试刻意不 import trader 模块（隔离），故同样从领域 AST
+                       # 取节点注入 —— 它们只被"按名解析"，不参与本测试的实际调用
+                       # （用例传 packages=[]，函数体不会执行）。OKX-only 迁移后
+                       # `_xvenue_prompt_line` 已从主脑域删除，故不再注入。
+                       _sl_atr_mult_for=_EXTRA_NODES["_sl_atr_mult_for"])
+        self.ns.update({k: v for k, v in vars(risk_constants).items() if k.isupper()})
+        exec(compile(ast.Module(body=[budget_node, node], type_ignores=[]), "scripts/ai_brain_trader.py", "exec"), self.ns)
+        self.construct = self.ns["construct_full_market_prompt"]
+
+
+class RenderingTests(Sandbox):
+    def test_compile_preserves_slots_and_enabled_order(self):
+        modules = self.profile["pipelines"]["trading_user"]
+        modules += [{"content": "disabled {{timezone}}", "enabled": False}, {"content": "{{unknown}}"}]
+        result = prompts.compile_modules(modules)
+        self.assertIn("{{account_positions}}", result)
+        self.assertTrue(result.endswith("{{unknown}}"))
+        self.assertNotIn("disabled", result)
+
+    def test_resolve_without_base_preserves_placeholders_and_input(self):
+        before = copy.deepcopy(self.profile)
+        result = prompts.resolve_profile(self.profile)
+        self.assertIn("{{account_balance}}", result["trading_user"])
+        self.assertEqual(before, self.profile)
+        self.memory.assert_not_called()
+
+    def test_final_custom_resolved_uses_explicit_values(self):
+        result = prompts.apply_module_layout("BASE", prompts.resolve_profile(self.profile), "trading_user", "x", context={"account_balance": "321.09 USDT", "account_positions": "SOL long 3张", "pending_orders": "order-42 @ 101"})
+        for text in ("BASE", "321.09 USDT", "SOL long 3张", "order-42 @ 101"):
+            self.assertIn(text, result)
+        self.assertNotIn("{{account_", result)
+        self.memory.assert_not_called()
+
+    def test_unresolved_custom_layout_also_works(self):
+        self.assertIn("余额=0", prompts.apply_module_layout("", self.profile, "trading_user", "x", context={"account_balance": 0}))
+
+    def test_missing_account_never_becomes_empty(self):
+        text = prompts.apply_module_layout("", self.profile, "trading_user", "x", context={})
+        for key in ("account_balance", "account_positions", "pending_orders"):
+            self.assertIn(f"[MISSING_CONTEXT:{key}]", text)
+        self.assertNotIn("空仓", text)
+        self.assertNotIn("挂单池为空", text)
+
+    def test_none_is_missing_zero_is_known(self):
+        self.assertEqual(prompts.render_variables("{{account_balance}}/{{pending_orders}}", {"account_balance": 0, "pending_orders": None}), "0/[MISSING_CONTEXT:pending_orders]")
+
+    def test_unknown_is_marked_even_if_context_supplies_it(self):
+        self.assertEqual(prompts.render_variables("{{typo}}", {"typo": "fake"}), "[UNKNOWN_VARIABLE:typo]")
+
+    def test_unknown_module_is_rejected_on_validation(self):
+        self.profile["pipelines"]["trading_user"][0]["content"] = "{{typo}}"
+        self.assertFalse(prompts.validate_profile(self.profile)["valid"])
+
+    def test_preview_preserves_slots_without_side_effects(self):
+        text = prompts.apply_module_layout("{{timezone}}", self.profile, "trading_user", "x")
+        self.assertIn("{{timezone}}", text)
+        self.assertIn("{{pending_orders}}", text)
+        self.memory.assert_not_called()
+
+    def test_single_pass_does_not_reinterpret_runtime_text(self):
+        context = {"account_balance": "{{pending_orders}}", "pending_orders": "MUST_NOT_RECURSE"}
+        with patch.object(prompts, "render_variables", wraps=prompts.render_variables) as render:
+            text = prompts.apply_module_layout("", {"trading_user": "{{account_balance}}"}, "trading_user", "x", context=context)
+        self.assertEqual(text, "{{pending_orders}}")
+        self.assertEqual(render.call_count, 1)
+
+    def test_base_layout_single_pass_and_live_nested_values(self):
+        base = "【账户】\n【余额】\n321.09\n\n【新增实时】\nfresh"
+        layout = [{"title": "账户", "source": "base", "content": "旧摘要"}, {"title": "额外", "source": "custom", "content": "{{pending_orders}}"}]
+        with patch.object(prompts, "render_variables", wraps=prompts.render_variables) as render:
+            text = prompts.apply_module_layout(base, {"pipelines": {"trading_user": layout}}, "trading_user", "x", context={"pending_orders": "{{account_balance}}"})
+        self.assertIn("321.09", text)
+        self.assertIn("fresh", text)
+        self.assertIn("{{account_balance}}", text)
+        self.assertNotIn("旧摘要", text)
+        self.assertEqual(render.call_count, 1)
+
+    def test_storage_roundtrip_retains_slots(self):
+        profile = prompts._clean_profile(self.profile, "custom-test")
+        prompts.save_library({"version": 2, "profiles": {"custom-test": profile}, "active_profile_id": "custom-test", "revisions": []})
+        disk = json.loads(prompts.LOCAL_FILE.read_text())   # 写侧已改为本地文件（2026-09）
+        for value in (disk["profiles"]["custom-test"]["trading_user"], prompts.active_profile()["trading_user"]):
+            self.assertIn("{{account_balance}}", value)
+            self.assertIn("{{account_positions}}", value)
+            self.assertIn("{{pending_orders}}", value)
+        self.memory.assert_not_called()
+
+    def test_legacy_storage_roundtrip_retains_slots(self):
+        prompts.save_library({"active_style": "custom", "custom": {"trading_user": "{{account_balance}}"}})
+        self.assertEqual(prompts.active_profile()["trading_user"], "{{account_balance}}")
+
+    def test_actual_construct_and_system_share_runtime(self):
+        context = {}
+        text = self.construct([], "1/6", [{"instId": "SOL-USDT-SWAP", "side": "long", "pos": "3"}], [{"instId": "SOL-USDT-SWAP", "ordId": "order-42", "px": "101", "sz": "2"}], "2026-09-05 12:00", 321.09, runtime_context_out=context)
+        system = prompts.apply_module_layout("RULES", {"trading_system": "{{account_balance}} {{account_positions}} {{pending_orders}}"}, "trading_system", "x", context=context)
+        for value in (text, system):
+            for expected in ("321.09 USDT", "SOL-USDT-SWAP", "order-42"):
+                self.assertIn(expected, value)
+            self.assertNotIn("100% 现金空仓", value)
+        self.memory.assert_called_once_with(str(self.root / "memory.md"), str(self.root / "memory.json"))
+
+    def test_actual_construct_missing_context_is_unknown(self):
+        text = self.construct([])
+        for key in ("account_balance", "account_positions", "pending_orders"):
+            self.assertIn(f"[MISSING_CONTEXT:{key}]", text)
+        self.assertNotIn("100% 现金空仓", text)
+        self.assertNotIn("挂单池为空", text)
+
+    def test_actual_construct_known_empty_and_zero(self):
+        text = self.construct([], "0/6", [], [], usdt_available=0)
+        self.assertIn("0.00 USDT", text)
+        self.assertIn("100% 现金空仓", text)
+        self.assertIn("挂单池为空", text)
+
+    def test_append_layer_does_not_render_early(self):
+        self.assertIn("{{account_balance}}", prompts.append_layer("BASE", "{{account_balance}}", "x"))
+
+    def test_committee_original_expression_preserves_base_modules(self):
+        assignment = next(n for n in ast.walk(APP_TREE) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "test_sys" for t in n.targets) and isinstance(n.value, ast.IfExp))
+        mods = [{"source": "base", "title": "规则", "content": "规则 {{market_matrix}} {{account_balance}}"}]
+        result = eval(compile(ast.Expression(body=assignment.value), "astra_backend/app.py", "eval"), {
+            "sys_mods": mods, "prof": {"name": "测试"}, "test_market": "隔离行情",
+            "compile_modules": prompts.compile_modules, "apply_module_layout": prompts.apply_module_layout,
+        })
+        self.assertIn("规则 隔离行情", result)
+        self.assertIn("[MISSING_CONTEXT:account_balance]", result)
+
+    def test_sandbox_blocks_files_network_and_processes(self):
+        with self.assertRaises(AssertionError):
+            Path("/blocked-business-data").read_text()
+        with self.assertRaises(AssertionError):
+            socket.create_connection(("example.invalid", 443))
+        with self.assertRaises(AssertionError):
+            subprocess.run(["forbidden"])
+
+
+# Reuse the six existing layout tests, without their unrelated production imports.
+old_class = next(n for n in OLD_TREE.body if isinstance(n, ast.ClassDef) and n.name == "PromptModuleTests")
+old_class.bases = [ast.Name(id="Sandbox", ctx=ast.Load())]
+ast.fix_missing_locations(old_class)
+exec(compile(ast.Module(body=[old_class], type_ignores=[]), "tests/ops/test_control_plane_v2.py", "exec"), globals())
+
+if __name__ == "__main__":
+    unittest.main()

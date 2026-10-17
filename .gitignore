@@ -1,0 +1,186 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Sensitive & Secret Credentials (CRITICAL)
+.env
+.env.local
+# file_locks.file_lock() 的锁文件：.env 的锁名是 ..env.lock（仓根会出现，属运行时产物）
+..env.lock
+.env.lock
+.okx/
+.agents/
+agent/
+.claude/
+.qwenpaw/
+.mcp
+skill.json
+skills-lock.json
+.skill.json.lock
+agent.json
+.bootstrap_completed
+AGENTS.md
+SOUL.md
+PROFILE.md
+MEMORY.md
+HEARTBEAT.md
+.bypy/
+*.pem
+*.key
+*.secret
+id_rsa
+id_rsa.pub
+token.json
+credentials.json
+.astra-admin-bootstrap
+
+# Live Real-Money Ledger & Private DBs (CRITICAL)
+#
+# ⚠️ 运行态数据一律不跟踪 —— 且**永远不要用 `git add -f` 破例**。
+# 2026-09 实测事故：`data/prompt_library.json`（提示词方案库）曾被 -f 强加进来，
+# 于是用户一在后台改提示词就把工作区弄脏；而后台「更新」有一道
+# 「工作区存在未提交修改 ⇒ 409 拒绝更新」的闸（astra_backend/routers/system.py），
+# 用户为了更新只能丢弃改动 —— 丢弃的正是他自己的提示词。
+# 现在提示词库拆成「出厂基线（跟踪）+ 用户改动（本规则忽略）」两个文件。
+data/*.json
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.sqlite
+data/*.xlsx
+data/*.csv
+data/*.lock
+data/*.tmp
+data/*.bak
+data/*.enc
+data/*.txt
+data/*.md
+# 2026-09-30 补：`data/scale_out_events.jsonl`（分批止盈事件流水，交易进程**只追加**）
+# 一直不在任何规则里 —— 它是纯运行时证据，进仓库只会带来"莫名其妙的改动"。
+# 按扩展名列举的老问题（见下条 2026-09- 的注释）再犯一次，故这次连扩展名一起补。
+data/*.jsonl
+data/.*secret_key
+# 2026-09 新增：上面是按**扩展名**列举的，于是**没有扩展名**的运行时产物会漏网。
+# 实测：`data/.astra_gateway_heartbeat`（worker 每秒重写的存活心跳）就这么被 `git add -A`
+# 收进了提交 —— 机器状态入库，正是本文件反复记过的那类事故。故补一条按前缀的兜底。
+data/.astra_*
+# ⚠️ 过渡期守卫（2026-09-27 r20 → astra 全量改名）：改名**之前**写入的运行态文件
+#    （`.r20_gateway_heartbeat` / `.r20_gateway.lock` / `.r20_watchdog.lock` …）
+#    在数据迁移跑完之前仍躺在磁盘上。它们**没有扩展名**，一旦旧规则被改名带走，
+#    `git add -A` 就会把它们加进仓库 —— 本仓已经因为同类形态（无扩展名文件绕过
+#    扩展名白名单）提交过一次心跳文件。故旧形态必须同时被忽略。
+#    何时可删：确认所有实例都已完成迁移、磁盘上不再有 `.r20_*` 之后。
+data/.r20_*
+# 迁移工具旧版本把配置留档写成了 `data/<名>.pre-astra` —— 多一段后缀的名字匹配
+# 不上 `data/*.json`，实测被 `git add -A` 收进过仓库。新版本已改到 .archive/，
+# 这里同时挡住残留。
+data/*.pre-astra
+data/credentials/
+data/policy_archives/
+trading.html
+OPEN_SOURCE_CONTROL_TODO.md
+CONTROL_PLANE_V2_TODO.md
+!data/.gitkeep
+
+# Live Logs & Backups & PIDs
+logs/
+backups/
+*.log
+*.tar.gz
+*.zip
+*.pid
+*_TODO.md
+ASTRA_V600_PREVIEW_TODO.md
+.github_device_pending.json
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Browser screenshots and temp artifacts
+browser_screenshot_*.png
+dashboard_*.png
+linux_do_*.png
+baidu_auth_*.png
+admin_*.png
+refined_*.png
+tab_*.png
+current_*.png
+!docs/images/*.png
+fix_*.py
+ui_patch.py
+refine_*.py
+light_theme_*.py
+premium_ui.py
+chats.json
+jobs.json
+credentials.yaml
+history.db*
+checkpoints/
+digest/
+drivers/
+media/
+mem_agent/
+mem_metadata/
+RELEASE_NOTES_*.md
+mem_session/
+memory/
+sessions/
+skills/
+tool_results/
+linux_do_post_draft.html
+linux_do_promo_card*.html
+*_TODO.md
+state/
+
+# 推广文案与历史归档：仅本地保留，永不入库
+promo_local/
+.archive/
+plan_local/
+
+# 网关运行态数据库（本地运行产物，永不入库）
+data/astra_gateway.sqlite3*
+data/*.sqlite3
+
+# 崩溃转储：本机 core_pattern=core + ulimit -c unlimited ⇒ 任何崩溃都会在仓库根丢一个
+# ~190M 的 core 文件，曾被我一次 git add -A 误提交。按后缀一概忽略。
+# ⚠️ 第一百五十五刀修正：原先写成裸 `core`（未锚定）⇒ git 的"路径组件"匹配会连带忽略
+# **任何**名为 core 的目录，包括 `tests/core/` —— 于是本会话新增的 5 个门文件
+# （live_artifact_shape / day_key / numeric_coercion / timestamp_unit / atomic_write_invariant）
+# 一直**没被提交**，而本地全量测试照常通过（测试跑的是工作树，不是提交树）。
+# 现锚定到仓库根，且只匹配崩溃转储的两种形态：
+/core
+/core.[0-9]*
+
+# 观测栈的令牌文件（内容 = ASTRA_ADMIN_TOKEN）：绝不入库，只走文件挂载
+deploy/observability/metrics_token

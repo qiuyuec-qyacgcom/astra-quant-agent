@@ -1,0 +1,21 @@
+/** 登录页 */
+export const zhAdminLogin = {
+  title: 'AstraQuant 控制台',
+  desc: '输入管理员凭据进入系统配置面',
+  username: '用户名',
+  password: '密码',
+  submit: '登录',
+  submitting: '验证中…',
+  failed: '登录失败',
+  rateHint: '连续多次失败将暂时锁定账户，保障系统安全',
+  backToScreen: '返回实盘看板',
+  secured: '会话凭据仅存于本机浏览器',
+  showPwd: '显示密码',
+  hidePwd: '隐藏密码',
+  panelTitle: '管理控制台',
+  panelDesc: '配置交易引擎、决策主脑、数据管道与物理风控门禁；下单执行不在控制台内发生。',
+  factVersion: '版本',
+  factSession: '会话',
+  factAudit: '审计',
+  auditValue: '登录行为全部计入审计日志',
+};

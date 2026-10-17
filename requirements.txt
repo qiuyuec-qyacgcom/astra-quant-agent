@@ -1,0 +1,15 @@
+# AstraQuant Dependencies
+# Pinned for strict reproducibility & zero supply chain drift
+
+fastapi==0.141.1
+uvicorn==0.52.4
+jinja2==3.1.6
+requests==2.34.2
+pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<3.0.0
+openpyxl>=3.1.0
+cryptography>=42.0.0
+httpx==0.28.1
+python-multipart>=0.0.9
+pydantic>=2.7.0,<3.0.0
+websockets>=12.0

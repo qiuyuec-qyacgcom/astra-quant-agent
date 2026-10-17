@@ -1,0 +1,1159 @@
+/* =========================================================================
+   Components · AstraQuant 专业量化交易终端控件语汇
+   -------------------------------------------------------------------------
+   设计纪律：
+     · 分隔靠精细发丝描边 + 白色 alpha 半透磨砂分层，不靠投影堆叠
+     · 暗色卡片质感来自 inset 1px 顶刃微高光与双倒角，不是外发光
+     · 全站无装饰性杂乱渐变 / 无恶俗 glow / 无低质感点阵背景
+     · 色彩遵循极简低饱和：品牌翡翠绿与衍生品盈亏语义色
+     · 圆角遵循硬件仪器梯度：微件 6 / 控件 10 / 卡片 16 / 浮层 20
+   ========================================================================= */
+
+/* =========================================================================
+   1 · 面板与分层卡片
+   ========================================================================= */
+.card,
+.dsh-card,
+.section {
+  background-color: var(--ds-color-bg-surface-card);
+  background-image: var(--grad-surface);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.card:hover {
+  border-color: var(--ds-color-border-hover);
+  box-shadow: var(--ds-shadow-card-hover);
+}
+.card,
+.dsh-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.card-flat {
+  background-color: var(--ds-color-bg-surface-card);
+  background-image: var(--grad-surface);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-card);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+/* 卡片头：统一 44px 基线高度 */
+.card-head,
+.dsh-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  flex-wrap: wrap;
+  min-height: 44px;
+  padding: var(--sp-5) var(--sp-7);
+  border-bottom: 1px solid var(--ds-color-border-default);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%), var(--ds-color-bg-surface-inset);
+}
+.card-title,
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--track-title);
+  color: var(--ds-color-text-primary);
+}
+.card-sub {
+  font-size: var(--text-3xs);
+  color: var(--ds-color-text-placeholder);
+  margin-top: 2px;
+  max-width: 76ch;
+  line-height: var(--leading-dense);
+}
+
+/* 批 88：**卡体内**「标题下的说明行」（`<p>` 紧跟标题 / `</header>` 之后）。
+   实测 NotifyPage / PluginsPage / PromptStudioPage 各写一份，前两份**逐字节相同**，
+   第三份只差 `margin-top`（6px vs 4px）。取值取多数决，第三份的 6px 归一到 4px。
+   （2026-09-30 后台精简：PluginsPage 已删除，现存用户为 NotifyPage / PromptStudioPage / RiskPage。）
+   与 `.card-sub` 的区别是**位置与可读性**：`.card-sub` 属于 `.card-head` 副标题
+   （`text-placeholder` + 2px + 1.45 行高），本原件属于正文区的说明段
+   （`text-description` + 4px + 1.6 行高）。 */
+.panel-desc {
+  margin-top: 4px;
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+  color: var(--ds-color-text-description);
+}
+/* 嵌套子面板 */
+.dsh-card-sub {
+  background-color: var(--ds-color-bg-surface-2);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset;
+  /* 只声明真的会变的两件事：`transform` 原先挂在过渡表里，但 `:hover` 从不设
+     它 —— 属于「声明了却永不触发」的死过渡属性，读代码时容易误以为有位移动效。 */
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.dsh-card-sub:hover {
+  border-color: var(--ds-color-border-hover);
+  box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.08);
+}
+
+/* =========================================================================
+   2 · 按钮
+   —— 控件语义：primary = 微锻造主动作；ghost/secondary = 磨砂玻璃；quiet = 纯文字
+   ========================================================================= */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--h-md);
+  padding: 0 12px;
+  border-radius: var(--r-ctl);
+  border: 1px solid transparent;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-primary {
+  background: linear-gradient(180deg, var(--ds-btn-primary-bg) 0%, var(--ds-color-brand-deep) 100%);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--ds-btn-primary-text);
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.28), 0 2px 8px -1px rgba(16, 185, 129, 0.35);
+}
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--ds-btn-primary-hover-bg) 0%, var(--ds-btn-primary-bg) 100%);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: var(--ds-btn-primary-text);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.38), 0 4px 16px -2px rgba(16, 185, 129, 0.5);
+  transform: translateY(-0.5px);
+}
+
+.btn-ghost {
+  background-color: var(--ds-btn-secondary-bg);
+  border-color: var(--ds-btn-secondary-border);
+  color: var(--ds-btn-secondary-text);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--ds-btn-secondary-hover-bg);
+  border-color: var(--ds-btn-secondary-hover-border);
+  color: var(--ds-color-text-primary);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.12), 0 4px 12px -2px rgba(0, 0, 0, 0.3);
+  transform: translateY(-0.5px);
+}
+
+.btn-quiet {
+  background-color: transparent;
+  border-color: transparent;
+  color: var(--ds-color-text-description);
+}
+.btn-quiet:hover:not(:disabled) {
+  background-color: var(--ds-btn-ghost-hover-bg);
+  border-color: var(--ds-btn-ghost-hover-border);
+  color: var(--ds-color-text-primary);
+}
+
+.btn-danger {
+  background-color: var(--down-bg);
+  border-color: var(--down-line);
+  color: var(--down);
+}
+.btn-danger:hover:not(:disabled) {
+  background-color: var(--down);
+  border-color: var(--down);
+  color: #fff;
+}
+
+/* 语义修饰：作用在 ghost / quiet 这类轻量按钮上，只把「文字 + 悬停」转向语义色，
+   不铺满底色（铺满红底是 .btn-danger 的职责）。用于行内危险动作图标按钮，
+   例如「删除该模型」「移除回退项」「恢复备份」。
+   ⚠️ 批 13 补：此前多个页面写了 .is-danger / .is-warn 但样式表里并无定义，
+   这些修饰当时是**静默无效**的（危险动作退化成中性灰），补上后即生效。 */
+.btn-quiet.is-danger,
+.btn-ghost.is-danger {
+  color: var(--down);
+}
+.btn-quiet.is-danger:hover:not(:disabled),
+.btn-ghost.is-danger:hover:not(:disabled) {
+  background-color: var(--down-bg);
+  border-color: var(--down-line);
+  color: var(--down);
+}
+.btn-quiet.is-warn,
+.btn-ghost.is-warn {
+  color: var(--warn);
+}
+.btn-quiet.is-warn:hover:not(:disabled),
+.btn-ghost.is-warn:hover:not(:disabled) {
+  background-color: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.btn-sm {
+  height: var(--h-sm);
+  padding: 0 10px;
+  font-size: var(--text-3xs);
+}
+.btn-icon {
+  width: var(--h-md);
+  padding: 0;
+}
+.btn-icon.btn-sm {
+  width: var(--h-sm);
+}
+
+/* =========================================================================
+   3 · 表单控件
+   ========================================================================= */
+.field,
+.input,
+select.input,
+textarea.input {
+  width: 100%;
+  height: var(--h-md);
+  padding: 0 10px;
+  background-color: var(--ds-color-bg-input);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-xs);
+  color: var(--ds-color-text-primary);
+  outline: none;
+  transition: background-color var(--dur-fast), border-color var(--dur-fast);
+}
+/* 批 122：textarea.field 必须恢复 height: auto 与上下 padding，
+   此前只声明了 textarea.input，导致全站使用 class="field" 的 textarea 全部被强制压成 30px 单行缝隙 */
+textarea.field,
+textarea.input {
+  height: auto;
+  min-height: calc(var(--h-md) * 2);
+  padding: 8px 10px;
+  line-height: var(--leading-dense);
+}
+.field::placeholder,
+.input::placeholder {
+  color: var(--ds-color-text-placeholder);
+}
+.field:hover:not(:disabled),
+.input:hover:not(:disabled) {
+  background-color: var(--ds-color-bg-input-hover);
+  border-color: var(--ds-color-border-input);
+}
+.field:focus,
+.input:focus {
+  background-color: var(--ds-color-bg-input);
+  border-color: var(--ds-color-border-input-focus);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+/* —— 复合输入框（无边框 input 嵌在有边框包裹层里）——
+   批 22：全站有 6 个这类输入框（审计/网关/风控/模型连接的搜索与数字输入、
+   席位名内联编辑），它们都写了 `outline: none`（否则框内再套一个环），
+   但包裹层此前**没有任何焦点样式** —— 键盘 Tab 进去完全看不到焦点在哪，
+   鼠标点进去也没有反馈。给包裹层加 .focus-ring，复用 .input:focus 的同一套视觉。 */
+.focus-ring:focus-within {
+  border-color: var(--ds-color-border-input-focus);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+.field:disabled,
+.input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* =========================================================================
+   4 · 徽章 / 胶囊 / 状态点
+   —— 状态一律「小圆点 + 文字」或「低饱和底 + 同色字」，禁止 glow
+   ========================================================================= */
+.badge,
+.chip,
+.dsh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--ds-color-border-default);
+  background-color: var(--ds-color-bg-surface-2);
+  color: var(--ds-color-text-description);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: border-color var(--dur-fast), background-color var(--dur-fast);
+}
+.badge-up,
+.dsh-pill.up {
+  color: var(--up);
+  border-color: var(--up-line);
+  background-color: var(--up-bg);
+}
+.badge-down,
+.dsh-pill.down {
+  color: var(--down);
+  border-color: var(--down-line);
+  background-color: var(--down-bg);
+}
+.badge-warn,
+.dsh-pill.warn {
+  color: var(--warn);
+  border-color: var(--warn-line);
+  background-color: var(--warn-bg);
+}
+.dsh-pill.brand {
+  color: var(--brand);
+  border-color: var(--astra-brand-line);
+  background-color: var(--astra-brand-bg);
+}
+.dsh-pill.active {
+  color: var(--ds-color-text-primary);
+  border-color: var(--ds-color-border-subtle);
+  background-color: var(--ds-color-bg-surface-1);
+}
+
+/* 状态点：实心小圆，运行中带呼吸，不用阴影发光 */
+.dsh-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  display: inline-block;
+  flex-shrink: 0;
+  background-color: var(--ds-color-text-placeholder);
+}
+.dsh-status-dot.active {
+  background-color: var(--up);
+  animation: astra-pulse-dot 2s ease-in-out infinite;
+}
+.dsh-status-dot.warn {
+  background-color: var(--warn);
+}
+.dsh-status-dot.error {
+  background-color: var(--down);
+}
+.dsh-status-dot.brand {
+  background-color: var(--brand);
+}
+.dsh-status-dot.idle {
+  background-color: var(--ds-color-text-placeholder);
+}
+
+/* =========================================================================
+   5 · 分段控件与标签页
+   ========================================================================= */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  /* 批 114：窄屏/外语下分段条溢出父级时自适应横向滚动，不撑出整页也不被卡片硬切 */
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px;
+  background-color: var(--ds-color-bg-surface-2);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  user-select: none;
+}
+.seg::-webkit-scrollbar {
+  display: none;
+}
+.seg button {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  /* 批 18：22 → 24px，全站分段控件统一到可点下限（此前低于 24px 命中区） */
+  height: 24px;
+  padding: 0 10px;
+  /* 同心圆角：内层 = 外层 − 容器内边距（10 − 2 = 8）。
+     原来写死 `--r-xs`(6px)：外层 10px、内边距 2px，同心值应是 8px，
+     差这 2px 就是选中态四角那圈肉眼可见的偏心室隔。改用算式推导，
+     以后改 `.seg` 的圆角或内边距，内层自动跟着走，不需要第二个字面值。 */
+  border-radius: calc(var(--r-ctl) - var(--sp-1));
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ds-color-text-description);
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.seg button:hover:not(.seg-on) {
+  color: var(--ds-color-text-primary);
+  background-color: var(--ds-color-bg-hover);
+}
+.seg button.seg-on {
+  background-color: var(--ds-color-bg-surface-card);
+  color: var(--ds-color-text-primary);
+  border-color: var(--ds-color-border-hover);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  font-weight: 600;
+}
+.seg-lg button {
+  height: 28px;
+  padding: 0 12px;
+  font-size: var(--text-xs);
+}
+
+/* 批 94：删除已死的 `.tabs` 家族（5 条规则）——
+   全仓没有任何 `class="tabs"`（唯一的近似命中的是 `activeTab` / `tab.key` 这类
+   标识符，以及 i18n 的 `nav.tabs.*` 键）。旧设计遗留，与批 88 删 `.page-head`、
+   批 78 删 `.trace` 同一处理。 */
+
+/* =========================================================================
+   6 · 表格
+   ========================================================================= */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+  text-align: left;
+}
+.table th {
+  background-color: var(--ds-color-bg-surface-inset);
+  color: var(--ds-color-text-placeholder);
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  padding: var(--ds-space-2) var(--ds-space-3);
+  border-bottom: 1px solid var(--ds-color-border-default);
+  white-space: nowrap;
+}
+.table td {
+  height: var(--row-h);
+  padding: 0 var(--ds-space-3);
+  border-bottom: 1px solid var(--ds-color-border-default);
+  color: var(--ds-color-text-secondary);
+  line-height: var(--leading-dense);
+}
+.table tbody tr {
+  transition: background-color var(--dur-fast);
+}
+.table tbody tr:hover td {
+  background-color: var(--ds-color-bg-hover);
+}
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+/* 数值列右对齐 + 等宽 */
+.table .col-num {
+  text-align: right;
+  font-family: var(--ds-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 批 90：**键值行**（一行「标签 … 值」，底部分隔线）单一事实源。
+   用「跨文件近似规则聚类」实测出 5 条规则其实是**同一个组件** ——
+   除 padding 外逐字节相同（`display:flex; align-items:center;
+   justify-content:space-between; gap: var(--ds-space-3);
+   border-bottom: 1px solid var(--ds-color-border-default)`）：
+
+   | 规则 | padding | 实测行高 |
+   |---|---|---|
+   | `.ag-kv-row`（AgentsPage，11 个） | 10px 16px | 40px |
+   | `.ab-comp`（AboutPage，3 个） | 10px 16px | 40px |
+   | `.bk-kv-row`（BackupPage，2 个） | **12px** 16px | **44px** ← 离群 |
+   | ~~`.vc-env`（凭证卡，已随「全站收口 OKX」删除）~~ | 8px 12px | 36px |
+   | `.ps-history-row`（PromptStudioPage，v-for） | **10px 0** | — |
+
+   同一个组件在四个页面渲染出 **36 / 40 / 44** 三种行高。
+   取值取多数决（10px / 16px，16 个可见元素中 14 个已是此值），
+   唯一的形态差异留作 delta（见 `.ps-history-row` 的注释）。 */
+.kv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: 10px var(--ds-space-4);
+  border-bottom: 1px solid var(--ds-color-border-default);
+}
+/* 批 90：末行不画底边框。AgentsPage / BackupPage / AboutPage / PromptStudioPage
+   **各自都写过这一条**（`border-bottom: 0`）—— 收进原件，避免改类名时静默丢掉
+   「末行不封口」的行为（本批实测就丢过一次：三页末行从 0px 变回 1px）。
+   ⚠️ 不要删：删了末行会多一条封口线。 */
+.kv-row:last-child {
+  border-bottom: 0;
+}
+
+/* =========================================================================
+   7 · 页面骨架
+   -------------------------------------------------------------------------
+   批 88：删除 `.page-head` 家族（`.page-head` / `h1` / `.page-desc` / `.page-actions`，
+   24 行）—— 全站（.vue/.ts/任意扩展名）**零引用**。页头现在统一由
+   `components/admin/PageHeader.vue` 提供（70 处引用），它的说明行是 `.ph-desc`，
+   与已删的 `.page-head .page-desc` 是同角色同字号（`--text-xs` + `text-description`
+   + `max-width: 80ch`），仅 margin-top 6px vs 4px —— 死掉的那份是旧设计的遗留。
+   ========================================================================= */
+
+/* 工具栏：筛选 / 搜索 / 视图切换 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--ds-space-2);
+  flex-wrap: wrap;
+  padding: var(--ds-space-2) 0;
+}
+
+/* =========================================================================
+   8 · 数据展示
+   ========================================================================= */
+
+/* 键值行 */
+.kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: 6px 0;
+  font-size: var(--text-xs);
+}
+.kv dt {
+  color: var(--ds-color-text-description);
+  flex-shrink: 0;
+}
+.kv dd {
+  color: var(--ds-color-text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 批 94：删除已死的 `.meter` 家族（5 条规则）——
+   全仓搜 `meter` 只命中英文单词（如 `para**meter**s`），无任何模板/脚本用法。 */
+
+/* =========================================================================
+   9 · 轨迹与日志面板
+   ========================================================================= */
+.log-panel {
+  background-color: var(--ds-color-bg-surface-inset);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-ctl);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.6;
+  overflow: auto;
+}
+
+/* 批 92：`.log-panel` 的**嵌入式（flush）**变体。
+   实测 6 处用法分两派：
+     · 保留原件外观（1px 边框 + 8px 圆角 + inset 底色）：`.ab-git`、`.rf-list`；
+     · 贴在 `.card` 内部时把自己的边框/圆角/底色全部关掉：4 处。
+   而这 4 处是**各自手写**的，其中 3 处逐条相同
+   （`.ag-calls` / `.au-rows` / `.pv-audit` 都写 `border: 0; border-radius: 0;
+   background-color: transparent;`），第 4 处（`.evo-insight-panel`）**漏掉了圆角**
+   —— 手写重复必然漂移，与批 90 键值行同因。收进原件一个具名变体。 */
+.log-panel.is-flush {
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+.dsh-log-entry {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--ds-space-3);
+  padding: 4px var(--ds-space-3);
+  border-radius: var(--r-xs);
+  transition: background-color var(--dur-fast);
+}
+.dsh-log-entry:hover {
+  background-color: var(--ds-color-bg-hover);
+}
+
+/* ---------------------------------------------------------------------------
+   统计带（band）与表单字段栈（field-stack）—— 各一处全站单一事实源
+   ---------------------------------------------------------------------------
+   批 81：两个族各自被 14 个页面重写了一遍。
+
+   `band`：`<section class="card X-band">` 里的响应式网格 ——
+   **14 个文件的 block 逐字节相同**（1 列 → ≥640px 2 列 → ≥1280px 4 列），
+   共 56 条规则。`RiskPage` 的 `.rk-band` 是**另一种刻度**（1 → 2 → 3 → 6 列，
+   因为它有 6 个统计格），故不并入。
+
+   `field-stack`：`<label class="X-field">` 的「标签 + 输入」竖排栈 ——
+   12 个文件同形，但**漂移**出三种写法：
+     · `gap` 有 6px(10 个) / 8px(2 个) 两种；
+     · `min-width: 0` **只有 6 个文件有**，另 6 个没有 —— 缺了它的字段在
+       flex/grid 父级里无法收缩，长内容会顶破容器（与批 80 的 `shrink-0`
+       属同一类"flex 子项不收缩"缺陷）。
+   取多数且更紧凑的一档（6px，与既有 `--sp-3` 刻度一致）并把 `min-width: 0` 补齐。
+   `ProviderListView` 的 `.pv-field` 是**面板**（带 `.pv-field-head` / `-row`），
+   不是表单字段，不并入。
+--------------------------------------------------------------------------- */
+.band {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 640px) {
+  .band {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1280px) {
+  .band {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   统计单元（fact cell）—— 全站单一事实源
+   ---------------------------------------------------------------------------
+   批 79：13 个后台页面各自重写了一份完全同构的「统计单元」——
+   `.X-fact` / `.X-fact-label` / `.X-fact-value` / `.X-fact-foot` / `.X-fact-sub`
+   外加 `:first-child` 与两个媒体的头发丝网格。结构逐字节相同，合计约 150 条
+   规则 / 560 行，散落在 13 个 `<style scoped>` 里。
+
+   更糟的是**字阶已经漂移**：
+     · `.X-fact-value` 8 个页面 `--text-md` / 6 个页面 `--text-lg`；
+     · `.X-fact-foot`  7 个页面 `--text-4xs` / 7 个页面 `--text-3xs`（平局）；
+     · `font-variant-numeric: tabular-nums` 只有 6/14 个页面开着。
+
+   已确认统一到**更紧凑的一档**：数值 `--text-md`(14px) + 脚注 `--text-4xs`(11px)
+   —— 脚注比标签 `--text-3xs`(11.5px) 小一档，层次正确。
+   `tabular-nums` 补全：全站其它数字位（`.table .col-num` / `.kv dd`）本来就开着，
+   统计单元没开会让数字随取值横向抖动。
+   ⚠️ 批 95：原注释还举了 `.stat dd` 为例 —— 该家族（`.stat`/`.stat-label`/
+   `.stat-value`/`.stat-foot`）已被确认零引用并删除，故从举例中去掉。
+
+   页面侧只保留真正的 delta（`RiskPage` 的 `.rk-fact` 是另一种组件 ——
+   单行省略 + 常驻左框，**不**并入本原件）。
+--------------------------------------------------------------------------- */
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--ds-space-4);
+  border-top: 1px solid var(--ds-color-border-default);
+}
+.fact:first-child {
+  border-top: 0;
+}
+@media (min-width: 640px) {
+  .fact:nth-child(2) {
+    border-top: 0;
+  }
+  .fact:nth-child(even) {
+    border-left: 1px solid var(--ds-color-border-default);
+  }
+}
+@media (min-width: 1280px) {
+  .fact {
+    border-top: 0;
+  }
+  .fact + .fact {
+    border-left: 1px solid var(--ds-color-border-default);
+  }
+}
+.fact-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ds-color-text-placeholder);
+}
+.fact-value {
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: var(--track-display);
+  line-height: 1.25;
+  color: var(--ds-color-text-primary);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fact-value.is-up {
+  color: var(--up);
+}
+.fact-value.is-down {
+  color: var(--down);
+}
+.fact-value.is-warn {
+  color: var(--warn);
+}
+.fact-value.is-off {
+  color: var(--ds-color-text-placeholder);
+}
+.fact-value.is-accent {
+  color: var(--ds-color-brand);
+}
+.fact-sub {
+  font-size: var(--text-xs);
+  color: var(--ds-color-text-placeholder);
+}
+.fact-foot {
+  font-size: var(--text-4xs);
+  color: var(--ds-color-text-placeholder);
+  /* 批 91：脚注与数值行的口径对齐（**声明性修正，非可见修复**）。
+     实测 25 条路由：`.fact-value` 含数字 41 处**全部**声明了 tabular-nums，
+     而 `.fact-foot` 含数字 18 处里 7 处没声明 —— 同一个统计单元两行口径不一致
+     （「1 启用」「20 / 200」「65%」「10 ~ 1800 秒」都在脚注行）。
+     ⚠️ 但**本环境下这不会改变任何像素**：离屏探针实测实际渲染字体
+     （Inter 栈）的 `1` 与 `8` 十连宽**本来就相等**（140px vs 140px，差 0），
+     而且 `tabular-nums` 在本浏览器对 Georgia / Times 也**完全无效**
+     （两者差 19.14px / 7.34px，开关该属性前后一模一样）。
+     保留此声明是为了**口径一致 + 换字体时兜底**，不要据此宣称修了抖动。 */
+  font-variant-numeric: tabular-nums;
+}
+.fact-foot.is-up {
+  color: var(--up);
+}
+.fact-foot.is-down {
+  color: var(--down);
+}
+
+/* ---------------------------------------------------------------------------
+   26px 方形图标盒 —— 全站单一事实源
+   ---------------------------------------------------------------------------
+   批 78：此前 6 个页面各自写了一份**逐字节相同**的 9 属性规则
+   （`.ag-icon` / `.bk-archive-icon` / `.cn-avatar` / `.nf-cat-icon` /
+   `.pl-icon` / `.pol-unit-icon`），另有 1 份危险色变体（`.dz-icon`）。
+   改一次盒径要改 7 个地方，且已经出现漂移（盒内图标 13 / 14 / 15px 三种）。
+
+   现收口为 `.icon-box`：各页模板挂上它，只有差异（危险配色、大号变体）
+   才另写 delta 规则。盒内图标统一 14px —— 多数决，且与 `.btn-sm` 的
+   图标契约同值。
+
+   同时删除本节上方**全站零引用**的死 CSS（`.trace` / `.trace-step` /
+   `.trace-marker` 及其 4 个语义变体，共 48 行）：实测 `src/` 下任何
+   `.vue` / `.ts` 都不引用它们。
+--------------------------------------------------------------------------- */
+.icon-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-1);
+  color: var(--ds-color-text-description);
+  flex-shrink: 0;
+}
+
+/* 批 87：大号 32px 变体。此前供应商列表/详情各自手写了 32px 与 34px 两套
+   （`.pd-avatar`/`.pd-model-icon` 32px、`.pv-avatar` 34px），同一枚字母组合头像
+   在列表与详情里差 2px；尺寸取值收敛到本变体，与 `.state-block .state-icon` 一致。 */
+.icon-box.is-md {
+  width: 32px;
+  height: 32px;
+}
+
+/* 批 87：字母组合（monogram）盒 —— 内容是文字不是图标，故不加描边以外的图标契约。
+   `.pv-avatar` 曾多带一条 `letter-spacing: 0.02em`，而它的孪生 `.pd-avatar` 没有，
+   同一枚头像在列表与详情里字距不同；现统一为原件的默认字距。 */
+.icon-box.is-mono {
+  border: 1px solid var(--ds-color-border-default);
+  font-size: var(--text-4xs);
+  font-weight: 600;
+}
+
+/* =========================================================================
+   10 · 状态占位：加载 / 空 / 报错
+   —— 三态统一骨架，所有页面共用，禁止各页自造
+   ========================================================================= */
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ds-space-2);
+  padding: var(--ds-space-7) var(--ds-space-4);
+  text-align: center;
+  color: var(--ds-color-text-placeholder);
+}
+.state-block .state-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-1);
+  color: var(--ds-color-text-description);
+}
+.state-block .state-title {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--ds-color-text-secondary);
+}
+.state-block .state-desc {
+  font-size: var(--text-3xs);
+  max-width: 52ch;
+  line-height: var(--leading-body);
+}
+/* 批 80：错误状态块此前**只有卡片外观没有边框** —— 13 个页面各自补了一份
+   三属性 delta（`border` + `border-radius` + `background-color`），
+   另有 3 个页面（SecurityPage / AdminSysPage / DecisionsPage）**什么也没补**，
+   于是同一个错误状态在 13 个页面是带框卡片、在 3 个页面是裸块。
+   其中 DataGate 那份还用着遗留 token `--surface-2`(#1c202b) 而非
+   设计 token `--ds-color-bg-surface-card`(#151821)。
+   现把这三条并入 `.state-block.is-error` 本体，13 份 delta 全部删除，
+   3 个孤儿页随之对齐。 */
+.state-block.is-error {
+  border: 1px solid var(--down-line);
+  border-radius: var(--r-card);
+  background-color: var(--ds-color-bg-surface-card);
+}
+.state-block.is-error .state-icon {
+  background-color: var(--down-bg);
+  color: var(--down);
+}
+.state-block.is-error .state-title {
+  color: var(--down);
+}
+
+/* 骨架屏：低对比柔和 shimmer，非高亮扫光 */
+.skeleton {
+  border-radius: var(--r-xs);
+  background-color: var(--ds-color-bg-surface-1);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--ds-color-bg-surface-2) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: astra-skeleton 1.6s ease-in-out infinite;
+}
+@keyframes astra-skeleton {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+.skeleton-text {
+  height: 10px;
+  margin: 4px 0;
+}
+.skeleton-row {
+  height: var(--row-h);
+  border-radius: 0;
+}
+/* 批 82：骨架的「形状」此前由各页**内联** style 表达（`height: 16px` ×11、
+   `width: 6px; height: 6px; border-radius: 50%`、`width: 24px; height: 24px`），
+   共 13 处绕过 token 的裸 px。与既有 `.skeleton-row` 同一约定收口为形状类；
+   各页仍按需内联 `width: N%`（那是**有意的随机宽度**，不是 token）。 */
+.skeleton-value {
+  height: var(--ds-space-4);
+}
+.skeleton-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+}
+.skeleton-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-xs);
+}
+
+/* =========================================================================
+   11 · 辅助
+   ========================================================================= */
+kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-xs);
+  background-color: var(--ds-color-bg-surface-2);
+  color: var(--ds-color-text-placeholder);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-4xs);
+  line-height: 1;
+}
+.scroll-area {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* =========================================================================
+   12 · 共享语汇补全
+   -------------------------------------------------------------------------
+   审计发现（2026-09-16）：下列类名被基础组件与页面引用，但在样式表中
+   **从未定义**，长期以无样式裸元素渲染。此处按既有调用点的语义补齐，
+   使对话框 / 抽屉 / 开关 / 代码块 / 状态点 恢复应有的形态。
+   受影响调用点：BaseDialog · BaseDrawer · ToastHost ·
+   ChartWorkstation · BaseSwitch · BaseCodeBlock · PeekDrawer ·
+   ConfirmHost · SettingsPopover · SecurityPage · CouncilPage 等。
+   ========================================================================= */
+
+/* 浮层面板：对话框 / 抽屉 / 下拉 / 通知 */
+.float-panel {
+  background-color: var(--ds-color-bg-overlay);
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-float);
+  box-shadow: var(--shadow-float);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+/* 浮层内滚动区：独立滚动，滚动链不外溢到页面 */
+.scroll-y {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 表单标签（ConfirmHost / SettingsPopover） */
+.form-label {
+  display: block;
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ds-color-text-placeholder);
+}
+
+/* 代码 / 提示词预览块（BaseCodeBlock / PeekDrawer） */
+.code-block {
+  margin: 0;
+  padding: var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-code);
+  border: 1px solid var(--ds-color-border-default);
+  font-family: var(--ds-font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-dense);
+  color: var(--ds-color-text-secondary);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 开关（BaseSwitch：按钮自身即轨道，滑块走 ::after）
+   批 18：20 → 24px 高，对齐控件阶梯（24/30/36）与 WCAG 2.5.8 的 24px 命中下限。
+   全站 23 处开关本体此前都是 34×20，是页面上最小的一类可点目标。 */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ds-color-border-default);
+  border-radius: var(--r-pill);
+  background-color: var(--ds-color-bg-surface-1);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+/* 批 100：全站 16 个开关此前只有「点下去旋钮位移」这一种反馈，悬停毫无变化。
+   补一条极轻的边色变化（既有令牌 `--ds-color-border-hover`），
+   与 `.btn` / `.seg` / `.dsh-log-entry` 一样在悬停时给出可点信号。
+
+   ⚠️ 必须显式写 `:not([aria-checked="true"])`：开着的时候
+   `.switch[aria-checked="true"]` 与本规则**同权重**，靠「谁在后面谁赢」
+   决定结果 —— 行为正确但**依赖书写顺序**，改一处顺序就会静默失效。
+   写成 `:not(...)` 后意图明确，且与全站既有语汇
+   `.seg button:hover:not(.seg-on)` 完全一致：**选中态不因悬停变样**。 */
+.switch:hover:not(:disabled):not([aria-checked="true"]) {
+  border-color: var(--ds-color-border-hover);
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  background-color: var(--ds-color-text-placeholder);
+  transform: translateY(-50%);
+  transition: left var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+.switch[aria-checked='true'] {
+  background-color: var(--ds-color-brand);
+  border-color: var(--ds-color-brand);
+}
+.switch[aria-checked='true']::after {
+  left: 20px;
+  background-color: #fff;
+}
+.switch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 小状态圆点（SecurityPage / CouncilPage / AboutModal） */
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background-color: var(--ds-color-text-placeholder);
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.dot-up {
+  background-color: var(--up);
+}
+
+/* 文字色调工具类 */
+.t-faint {
+  color: var(--ds-color-text-placeholder);
+}
+.t-muted {
+  color: var(--ds-color-text-description);
+}
+.t-label {
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ds-color-text-placeholder);
+}
+
+/* 徽章补充色调 */
+.badge-accent {
+  color: var(--brand);
+  border-color: var(--astra-brand-line);
+  background-color: var(--astra-brand-bg);
+}
+.badge-info {
+  color: var(--info);
+  border-color: var(--info-line);
+  background-color: var(--info-bg);
+}
+
+/* =========================================================================
+   批 28 · 补两个「模板里在用、CSS 里没有」的类
+   -------------------------------------------------------------------------
+   用脚本把「模板静态 class」与「编译产物里的选择器」对差集后发现的真缺陷：
+   `.clickable`（4 处，可点击行）与 `.link`（1 处，关于弹窗的社区外链）
+   在模板里写了、全站却没有任何规则 —— 前者鼠标不变手型，后者就是普通文字。
+   ========================================================================= */
+/* "跳到主内容"（批 45）。默认移出视口（不是 display:none —— 那样不可聚焦），
+   键盘 Tab 到时从左上角滑入，用品牌色描边。 */
+.skip-link {
+  position: fixed;
+  top: var(--ds-space-2);
+  left: var(--ds-space-2);
+  z-index: var(--z-toast);
+  padding: var(--ds-space-2) var(--ds-space-3);
+  border-radius: var(--r-ctl);
+  background-color: var(--ds-color-bg-surface-1);
+  border: 1px solid var(--ds-color-border-strong);
+  color: var(--ds-color-text-primary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: var(--shadow-dialog);
+  transform: translateY(calc(-100% - var(--ds-space-3)));
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid var(--ds-color-brand);
+  outline-offset: 2px;
+}
+
+/* 可点击行/卡片（批 43）。
+ *
+ * 这些元素（`<tr>`、`<article>`、`<div>`）此前只有鼠标能操作：没有 `tabindex`，
+ * 键盘用户按 Tab 根本到不了，屏幕阅读器也不播报它是可操作的。
+ * 现在模板侧补 `tabindex="0"` ＋ `@keydown.enter/space`（见各消费点），
+ * 这里只负责**让焦点看得见**：全局 `:focus-visible` 的 `outline-offset: 2px`
+ * 在表格行上会画到相邻行里去，故行内负偏移。 */
+.clickable {
+  cursor: pointer;
+}
+.clickable:focus-visible {
+  outline: 2px solid var(--ds-color-brand);
+  outline-offset: -2px;
+  border-radius: var(--r-xs);
+}
+
+/* 可排序表头里的裸按钮：视觉与原来的 `<th>` 文本一致（无内边距/无底色）。 */
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  /* 批 99：命中区补齐 WCAG 2.5.8 的 24×24。
+     原来 `padding: 0` + 12px/16px 行高 → 按钮实测只有 **132×16**，
+     而所在 `th` 高 33px（padding 8px 12px）—— 表头上下各 8px 是**点不到的空白**。
+     用既有的 `--h-sm`（24px，正好是 AA 下限），不再自造数字。
+     代价：表头行 33px → 41px（唯一的可见变化，换来整格可点）。 */
+  min-height: var(--h-sm);
+  padding: 0;
+  border: 0;
+  background: none;
+  transition: color var(--dur-fast);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+/* 批 100：排序按钮此前**一点 hover 反馈都没有**（实测 computed style 零变化），
+   所在表头是整表唯一入口，用户看不出它可点。用全站既有语汇
+   （`.seg button:hover` 的 `--ds-color-text-primary`）补上。
+   transition 并进上面的基础规则里 —— 同一个类不要开两个块。 */
+.sort-btn:hover {
+  color: var(--ds-color-text-primary);
+}
+
+.sort-btn:focus-visible {
+  outline: 2px solid var(--ds-color-brand);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+.link {
+  color: var(--ds-color-brand);
+  text-decoration: none;
+}
+.link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

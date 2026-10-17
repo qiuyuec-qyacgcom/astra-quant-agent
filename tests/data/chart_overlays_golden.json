@@ -1,0 +1,464 @@
+{
+  "entry_long_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 100
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "solid",
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "多头入场"
+  },
+  "entry_long_en": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 100
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "solid",
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "Entry Long"
+  },
+  "entry_short_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 100
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "solid",
+        "size": 1.5,
+        "color": "#F43F5E"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#F43F5E"
+      }
+    },
+    "extendData": "空头入场"
+  },
+  "entry_short_en": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 100
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "solid",
+        "size": 1.5,
+        "color": "#F43F5E"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#F43F5E"
+      }
+    },
+    "extendData": "Entry Short"
+  },
+  "sl_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 95
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#F43F5E"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#F43F5E"
+      }
+    },
+    "extendData": "▼ 止损SL -5.0%"
+  },
+  "sl_en": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 95
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#F43F5E"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#F43F5E"
+      }
+    },
+    "extendData": "▼ SL -5.0%"
+  },
+  "sl_frac": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 95
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#F43F5E"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#F43F5E"
+      }
+    },
+    "extendData": "▼ 止损SL -5.7%"
+  },
+  "tp_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 110
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "▲ 止盈TP +10.0%"
+  },
+  "tp_en": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 110
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "▲ TP +10.0%"
+  },
+  "tp_frac": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 110
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "▲ 止盈TP +10.1%"
+  },
+  "tp1_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 105
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "▲ 止盈TP1 +5.0%"
+  },
+  "tp2_zh": {
+    "name": "priceLine",
+    "paneId": "candle_pane",
+    "points": [
+      {
+        "value": 110
+      }
+    ],
+    "styles": {
+      "line": {
+        "style": "dashed",
+        "dashedValue": [
+          6,
+          4
+        ],
+        "size": 1.5,
+        "color": "#10B981"
+      },
+      "text": {
+        "size": 11,
+        "color": "#e5e7eb",
+        "backgroundColor": "#10B981"
+      }
+    },
+    "extendData": "▲ 止盈TP2 +10.0%"
+  },
+  "plan_none": {
+    "tps": []
+  },
+  "plan_all": {
+    "tps": [
+      {
+        "name": "priceLine",
+        "paneId": "candle_pane",
+        "points": [
+          {
+            "value": 110
+          }
+        ],
+        "styles": {
+          "line": {
+            "style": "dashed",
+            "dashedValue": [
+              6,
+              4
+            ],
+            "size": 1.5,
+            "color": "#10B981"
+          },
+          "text": {
+            "size": 11,
+            "color": "#e5e7eb",
+            "backgroundColor": "#10B981"
+          }
+        },
+        "extendData": "▲ 止盈TP +10.0%"
+      }
+    ],
+    "entry": {
+      "name": "priceLine",
+      "paneId": "candle_pane",
+      "points": [
+        {
+          "value": 100
+        }
+      ],
+      "styles": {
+        "line": {
+          "style": "solid",
+          "size": 1.5,
+          "color": "#10B981"
+        },
+        "text": {
+          "size": 11,
+          "color": "#e5e7eb",
+          "backgroundColor": "#10B981"
+        }
+      },
+      "extendData": "多头入场"
+    },
+    "sl": {
+      "name": "priceLine",
+      "paneId": "candle_pane",
+      "points": [
+        {
+          "value": 95
+        }
+      ],
+      "styles": {
+        "line": {
+          "style": "dashed",
+          "dashedValue": [
+            6,
+            4
+          ],
+          "size": 1.5,
+          "color": "#F43F5E"
+        },
+        "text": {
+          "size": 11,
+          "color": "#e5e7eb",
+          "backgroundColor": "#F43F5E"
+        }
+      },
+      "extendData": "▼ 止损SL -5.0%"
+    }
+  },
+  "plan_entry_guard": {
+    "tps": [
+      {
+        "name": "priceLine",
+        "paneId": "candle_pane",
+        "points": [
+          {
+            "value": 110
+          }
+        ],
+        "styles": {
+          "line": {
+            "style": "dashed",
+            "dashedValue": [
+              6,
+              4
+            ],
+            "size": 1.5,
+            "color": "#10B981"
+          },
+          "text": {
+            "size": 11,
+            "color": "#e5e7eb",
+            "backgroundColor": "#10B981"
+          }
+        },
+        "extendData": "▲ 止盈TP +10.0%"
+      }
+    ],
+    "sl": {
+      "name": "priceLine",
+      "paneId": "candle_pane",
+      "points": [
+        {
+          "value": 95
+        }
+      ],
+      "styles": {
+        "line": {
+          "style": "dashed",
+          "dashedValue": [
+            6,
+            4
+          ],
+          "size": 1.5,
+          "color": "#F43F5E"
+        },
+        "text": {
+          "size": 11,
+          "color": "#e5e7eb",
+          "backgroundColor": "#F43F5E"
+        }
+      },
+      "extendData": "▼ 止损SL -5.0%"
+    }
+  },
+  "plan_sl_only": {
+    "tps": [],
+    "sl": {
+      "name": "priceLine",
+      "paneId": "candle_pane",
+      "points": [
+        {
+          "value": 95
+        }
+      ],
+      "styles": {
+        "line": {
+          "style": "dashed",
+          "dashedValue": [
+            6,
+            4
+          ],
+          "size": 1.5,
+          "color": "#F43F5E"
+        },
+        "text": {
+          "size": 11,
+          "color": "#e5e7eb",
+          "backgroundColor": "#F43F5E"
+        }
+      },
+      "extendData": "▼ 止损SL -5.0%"
+    }
+  }
+}

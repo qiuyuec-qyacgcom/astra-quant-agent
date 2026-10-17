@@ -1,0 +1,753 @@
+"""保护腿的**解析 / 覆盖核验 / 归属**共用工具（OKX 与看板共用）。
+
+## 这个模块今天是什么
+
+多所执行面拆除后，本模块**不再是"跨所看门狗"**，而是一组被主链与看板共用的
+保护腿工具（纯函数为主，IO 全部由调用方注入）：
+
+| 函数 | 用途 |
+|---|---|
+| `scan_protective_orders` | 覆盖核验：**纯函数**，无 IO、时间由 `now_s` 入参 |
+| `attribute_protective_orders` | 逐腿归属（本方标签 / 台账证据 / 人工腿不触碰） |
+| `select_legs_to_cancel_after_close` | 平仓后该撤哪些本方腿的判定 |
+| `read_ledger_rows` | 台账取证（只读；结构认不出 ⇒ None，绝不降级成"没有记录"） |
+| `leg_base` / `_row_text` / `trigger_px_type` / `protection_trigger_type_fields` | 腿字段解析（OKX 棘轮 `cloud_protection` 依赖 `_row_text`） |
+| `cancel_protective_leg` / `watchdog_debounce_step` | 撤腿能力探针 / 跨周期防抖纯函数 |
+
+已随多所拆除一并删除：`ensure_venue_protection`、`audit_cross_venue_protection`、
+`cancel_orphan_attributed_legs`、`watchdog_gap_key`（它们只服务外所看门狗）。
+
+## 三条安全铁律（沿用自云端棘轮的既有语义）
+
+1. **不可判定 ≠ 安全**：覆盖范围算不出来时返回 `None` 而不是 `True`，并且**绝不**
+   把自己不认识的腿当成自己的（人工挂的保护单不属于本系统，只登记不触碰）；
+2. **归属不可判定 ⇒ 不碰**：撤错不可逆，只有可证明是本方的腿才允许进入清理候选；
+3. **读不到 ≠ 没有**：读腿/读台账失败一律如实上报，不渲染成"干净"。
+
+> 本模块不读配置、不发请求、不写文件：所有 IO 由调用方（或测试）注入 ——
+> 与 `scripts/trader/` 其余模块同一纪律（子模块不得在 import 期绑定门面名字）。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+try:
+    from scripts.tag_markers import normalize_legacy_markers
+except ImportError:      # scripts/ 在 sys.path 上（双拼写铁律）
+    from tag_markers import normalize_legacy_markers
+
+__all__ = [
+    "DEFAULT_RENEW_WITHIN_S",
+    "attribute_protective_orders",
+    "select_legs_to_cancel_after_close",
+    "read_ledger_rows",
+    "scan_protective_orders",
+    "DEFAULT_WATCHDOG_DEBOUNCE_S",
+    "watchdog_debounce_step",
+]
+
+#: 默认提前续期窗口（24h；roadmap G8 的验收口径）
+DEFAULT_RENEW_WITHIN_S = 24 * 3600
+#: watchdog **防抖窗口**默认值（30 分钟）：缺口必须**持续**这么久才允许写单。
+#: 续期窗口是 24h，故 30 分钟远小于它 —— 防的是"瞬时口径波动被当成缺口"，
+#: 而不是拖延真实缺口（真实缺口在窗口内会一直出现，够时即动手）。
+DEFAULT_WATCHDOG_DEBOUNCE_S = 30 * 60
+#: 覆盖缺口容忍度（相对持仓量）：小于千分之一视为浮点噪音，不修
+DEFAULT_TOLERANCE_RATIO = 0.001
+#: 判定"这条腿属于本系统"的文本标记
+OUR_SL_MARKERS = ("astrasl", "stop")
+OUR_TP_MARKERS = ("astratp", "take_profit")
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num
+
+
+def _row_text(row: Dict[str, Any]) -> str:
+    """把交易所行里所有可能带标签的文本拼起来（与云端棘轮同一口径）。"""
+    order = row.get("order") if isinstance(row.get("order"), dict) else {}
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    parts = [
+        order.get("text"), initial.get("text"), row.get("text"),
+        row.get("type"), row.get("orderType"), raw.get("orderType"),
+        raw.get("type"), row.get("algoType"),
+        # 客户端订单号
+        row.get("clientAlgoId"), raw.get("clientAlgoId"),
+        row.get("clientOrderId"), raw.get("clientOrderId"),
+    ]
+    # ⚠️ 在这里归一旧归属标记：这是全部标记判定（`_leg_kind`、棘轮、孤儿清理）
+    #    唯一的文本来源，改一处即可让改名前后落在交易所上的腿都被认出来。
+    return normalize_legacy_markers(" ".join(str(p) for p in parts if p).lower())
+
+
+def _leg_kind(row: Dict[str, Any]) -> Optional[str]:
+    """`"sl"` / `"tp"` / None（None = 不是本系统的保护腿）。"""
+    text = _row_text(row)
+    if "astrasl" in text:
+        return "sl"
+    if "astratp" in text:
+        return "tp"
+    # 没有我们的标签时，只认明确的类型名
+    if "take_profit" in text:
+        return "tp"
+    if "stop" in text:
+        return "sl"
+    return None
+
+
+def _is_live(row: Dict[str, Any]) -> bool:
+    state = str(row.get("state") or row.get("status") or "live").lower()
+    return state in {"live", "effective", "open", "new", "active"}
+
+
+def _leg_size(row: Dict[str, Any]) -> Optional[float]:
+    """该腿覆盖的数量；`None` = 不可判定。"""
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    # 剩余量优先，其次下单量本身
+    for container in (row, raw, initial):
+        for key in ("left", "size_remaining", "remaining"):
+            num = _as_float(container.get(key))
+            if num is not None and num > 0:
+                return num
+    for container in (row, raw, initial):
+        for key in ("size", "quantity", "origQty", "qty", "amount"):
+            num = _as_float(container.get(key))
+            if num is not None and num > 0:
+                return num
+    return None
+
+
+def _is_full_close(row: Dict[str, Any]) -> bool:
+    """该腿语义是"平掉全部仓位"（如 `closePosition=true`）。"""
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    for container in (row, initial, raw):
+        for key in ("close", "is_close", "close_position", "closePosition"):
+            val = container.get(key)
+            if val is True or str(val).lower() in {"true", "1", "yes"}:
+                return True
+        if container.get("auto_size") or container.get("autoSize"):
+            return True
+    return False
+
+
+def _close_side_of(pos_side: str) -> str:
+    return "sell" if str(pos_side).lower().startswith("l") else "buy"
+
+
+def _row_close_side(row: Dict[str, Any]) -> Optional[str]:
+    for key in ("side", "order_side"):
+        val = str(row.get(key) or "").lower()
+        if val in {"buy", "sell"}:
+            return val
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    val = str(raw.get("side") or "").lower()
+    return val if val in {"buy", "sell"} else None
+
+
+def _trigger_price(row: Dict[str, Any]) -> Optional[float]:
+    """该腿的触发价（复用它，绝不重新定价）。"""
+    trigger = row.get("trigger") if isinstance(row.get("trigger"), dict) else {}
+    for candidate in (row.get("trigger_price"), row.get("triggerPrice"),
+                      trigger.get("price"), row.get("price")):
+        num = _as_float(candidate)
+        if num is not None and num > 0:
+            return num
+    return None
+
+
+def leg_base(row: Dict[str, Any]) -> str:
+    """该腿的**币种基名**。"""
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    for candidate in (initial.get("contract"), row.get("contract"), row.get("symbol"),
+                      row.get("base"), row.get("inst_id"), row.get("instId"),
+                      raw.get("symbol"), raw.get("contract")):
+        text = str(candidate or "").strip()
+        if text:
+            # 第一百八十五刀：不再自己拼一遍归一 —— 委派给唯一实现（见 `_base_of`）。
+            from astra_backend.exchanges.base import canonical_base
+            return canonical_base(text)
+    return ""
+
+
+def _leg_position_side(row: Dict[str, Any]) -> Optional[str]:
+    """该腿保护的**持仓方向**（`long`/`short`）；判不出 → `None`（不猜）。"""
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    for container in (initial, row, raw):
+        auto = str(container.get("auto_size") or container.get("autoSize") or "").lower()
+        if "close_long" in auto:
+            return "long"
+        if "close_short" in auto:
+            return "short"
+    for container in (initial, row, raw):
+        direction = str(container.get("direction") or "").lower()
+        if direction in ("long", "short") and container is not row:
+            return "short" if direction == "long" else "long"
+    close_side = _row_close_side(row)
+    if close_side == "buy":
+        return "short"
+    if close_side == "sell":
+        return "long"
+    return None
+
+
+def _to_seconds(value: Optional[float]) -> Optional[float]:
+    """把可能是**毫秒**的时间戳归一成秒。
+
+    ⚠️ 判据必须是 `< 1e11`（秒）而不是 `< 1e9`：epoch 秒本身已经 ~1.79e9，
+    用 1e9 当分界会把"秒"误判成"毫秒"、把时间除以 1000（本模块第一版就这么错过，
+    结果"还剩 7 天"被算成"已过期"）。
+
+    第一百八十八刀：判据与换算**只有一处实现**（`astra_backend.time_utils` 的
+    `EPOCH_MS_THRESHOLD` / `to_seconds` / `to_millis`）；本函数与
+    `dashboard_payload/multi_venue.py` 都已改为委派（此前四处各写一遍）。
+    """
+    # 第一百八十八刀：分界与换算**只有一处实现**（`astra_backend.time_utils`），此处委派。
+    from astra_backend.time_utils import to_seconds
+    return to_seconds(value)
+
+
+def _expiry(row: Dict[str, Any]) -> tuple:
+    """→ `(expires_at_s | None, state)`；state ∈ {"absolute","relative","never","unknown"}。"""
+    trigger = row.get("trigger") if isinstance(row.get("trigger"), dict) else {}
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+
+    gtd = _as_float(raw.get("goodTillDate") or row.get("goodTillDate"))
+    if gtd is not None and gtd > 0:
+        return _to_seconds(gtd), "absolute"
+
+    raw_exp = row.get("expiration")
+    if raw_exp in (None, ""):
+        raw_exp = trigger.get("expiration")
+    if raw_exp in (None, ""):
+        raw_exp = raw.get("expiration")
+    exp = _as_float(raw_exp)
+    if exp is not None:
+        if exp <= 0:
+            return None, "never"
+        from astra_backend.time_utils import EPOCH_MS_THRESHOLD
+        if exp >= EPOCH_MS_THRESHOLD:  # 绝对时间戳（毫秒）；分界取自唯一实现
+            return exp / 1000.0, "absolute"
+        if exp > 1e9:                  # 绝对时间戳（秒）
+            return exp, "absolute"
+        created = _to_seconds(_as_float(
+            row.get("create_time") or row.get("createTime") or row.get("cTime")
+            or raw.get("create_time") or raw.get("createTime") or raw.get("time")))
+        if created is None:
+            return None, "unknown"
+        return created + exp, "relative"
+
+    tif = str(row.get("timeInForce") or raw.get("timeInForce") or "").upper()
+    if tif == "GTC":
+        return None, "never"
+    return None, "unknown"
+
+
+_TRIGGER_TYPE_KEYS = ("tpTriggerPxType", "slTriggerPxType", "triggerPxType", "trigger_px_type")
+
+
+def trigger_px_type(row: Dict[str, Any]) -> Optional[str]:
+    """保护腿的**触发价类型**（OKX 专用：tp/slTriggerPxType → mark/last/index）。"""
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    for container in (row, raw):
+        for key in _TRIGGER_TYPE_KEYS:
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip().lower()
+        wt = container.get("workingType")
+        if isinstance(wt, str) and wt.strip():
+            return wt.strip().lower()
+    for container in (row, raw):
+        trig = container.get("trigger")
+        if isinstance(trig, dict) and trig.get("price_type") is not None:
+            return f"price_type:{trig.get('price_type')}"
+    return None
+
+
+def protection_trigger_type_fields(legs: Optional[Sequence[Dict[str, Any]]],
+                                   *, readable: bool = True) -> Dict[str, Any]:
+    """保护腿触发价类型 → 面板/提示词字段（**两个生产路径共用同一份三态语义**）。
+
+    三态（与"读不到 ≠ 没有"一致，且**绝不**用默认值顶替）：
+
+    | 情形 | 取值 |
+    |---|---|
+    | 取数失败（`readable=False`）| `"unknown"` —— 读不到，可能本来有 |
+    | 确实没有该类腿 | `None` —— 没有这东西 |
+    | 有腿但该所未上报类型 | `"unknown"` —— 腿在，但"按什么价触发"不可判定 |
+
+    顶级止损与止盈**各自**取值：同一条腿可能在修正后变成不同类型，
+    合并成一个字段就会说谎。
+    """
+    if not readable:
+        return {"protectionSlTriggerPxType": "unknown", "protectionTpTriggerPxType": "unknown"}
+    out: Dict[str, Any] = {"protectionSlTriggerPxType": None, "protectionTpTriggerPxType": None}
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        kind = str(leg.get("kind") or "").lower()
+        if kind not in ("sl", "tp"):
+            continue
+        val = leg.get("trigger_px_type") or trigger_px_type(leg)
+        key = "protectionSlTriggerPxType" if kind == "sl" else "protectionTpTriggerPxType"
+        if out[key] is None:
+            out[key] = val or "unknown"
+    return out
+
+
+def _norm_contract(text: Any) -> str:
+    """合约串归一：只留字母数字并大写（`BTC-USDT-SWAP` → `BTCUSDTSWAP`）。"""
+    return "".join(ch for ch in str(text or "").upper() if ch.isalnum())
+
+
+def _base_of(symbol: Any) -> str:
+    """从合约取币种（委派给 `canonical_base` 唯一实现）。"""
+    from astra_backend.exchanges.base import canonical_base
+    return canonical_base(str(symbol or ""))
+
+
+def _leg_contracts(row: Dict[str, Any]) -> List[str]:
+    """该腿行里所有**可能表示合约**的串（归一后）。用于"这腿是不是本仓合约"的判断。"""
+    initial = row.get("initial") if isinstance(row.get("initial"), dict) else {}
+    out = []
+    for value in (row.get("contract"), row.get("symbol"), row.get("inst_id"), row.get("instId"),
+                  initial.get("contract"), initial.get("symbol")):
+        norm = _norm_contract(value)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def _leg_matches_base(row: Dict[str, Any], base: str) -> bool:
+    """这条腿是否属于 `base` 这个币种。
+
+    ⚠️ 用"归一后 **前缀相等**"而不是原来的"原始串子串包含"：
+    子串包含会把 `WBTCUSDT`（包装币）当成 `BTC` 的腿；前缀相等不会。
+    两种常见形态都覆盖：`base="BTC"` ↔ `BTCUSDT`；`base="BTCUSDT"` ↔ `BTC_USDT`。
+    """
+    if not base:
+        return True
+    for norm in _leg_contracts(row):
+        if norm == base or norm.startswith(base) or base.startswith(norm):
+            return True
+    return False
+
+
+def scan_protective_orders(rows: Optional[Sequence[Dict[str, Any]]], *,
+                           symbol: str,
+                           pos_side: str,
+                           position_size: float,
+                           now_s: float,
+                           renew_within_s: float = DEFAULT_RENEW_WITHIN_S,
+                           tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO,
+                           require_symbol_match: bool = False) -> Dict[str, Any]:
+    """纯判定：给一批交易所保护单行，回答"覆盖够不够、哪些腿要续期"。
+
+    - 只统计**本系统**的腿（`astrasl`/`astratp` 标签或明确类型名）；
+    - 只统计方向正确（平仓方向）且 live 的腿；
+    - `symbol` 默认不参与过滤（调用方通常已按合约查询）；`require_symbol_match=True`
+      时才要求行内合约串包含币种，供"一次拉全量"的调用方使用。
+    """
+    base = _base_of(symbol)
+    want_close_side = _close_side_of(pos_side)
+    size = max(0.0, float(position_size or 0.0))
+
+    ours: List[Dict[str, Any]] = []
+    foreign = 0
+    covered = 0.0
+    full_close_leg = False
+    coverage_unknown = False
+    expiring: List[Dict[str, Any]] = []
+    expired: List[Dict[str, Any]] = []
+    expiry_unknown: List[Dict[str, Any]] = []
+    live_sl_seen = False
+
+    for row in (rows or []):
+        if not isinstance(row, dict) or not _is_live(row):
+            continue
+        kind = _leg_kind(row)
+        if kind is None:
+            foreign += 1
+            continue
+        if require_symbol_match and base and not _leg_matches_base(row, base):
+            continue
+        leg_pos_side = _leg_position_side(row)
+        if leg_pos_side is not None and pos_side and leg_pos_side != pos_side:
+            continue
+
+        leg = {
+            "id": str(row.get("id") or row.get("algo_id") or row.get("algoId")
+                      or row.get("order_id") or row.get("ordId") or ""),
+            "kind": kind,
+            "trigger_price": _trigger_price(row),
+            # 第一百六十七刀：触发价类型（读不到 ⇒ None，由展示层披露成 unknown）
+            "trigger_px_type": trigger_px_type(row),
+        }
+        expires_at, exp_state = _expiry(row)
+        leg["expires_at"] = expires_at
+        leg["remaining_s"] = None if expires_at is None else round(expires_at - float(now_s), 1)
+        leg["expiry_state"] = exp_state
+        ours.append(leg)
+
+        # 已过期 ⇒ 不是覆盖
+        _leg_expired = (exp_state in ("relative", "absolute") and expires_at is not None
+                        and expires_at <= float(now_s))
+
+        if kind == "sl":
+            if _is_full_close(row) and not _leg_expired:
+                full_close_leg = True
+            leg_size = _leg_size(row)
+            if leg_size is None and not _is_full_close(row):
+                coverage_unknown = True
+            elif leg_size is not None and not _leg_expired:
+                covered += leg_size
+            if not _leg_expired:
+                live_sl_seen = True
+
+        if exp_state in ("relative", "absolute"):
+            assert expires_at is not None
+            if expires_at <= float(now_s):
+                expired.append(leg)
+            elif expires_at - float(now_s) <= float(renew_within_s):
+                expiring.append(leg)
+        elif exp_state == "unknown":
+            # 没有到期字段：可能是"永不过期"之外的形态，也可能只是取数缺字段。
+            # 不可判定 ⇒ 只登记，不擅自续期（续期是有成本的写操作），但也不当作安全。
+            expiry_unknown.append(leg)
+
+    if full_close_leg:
+        covered = max(covered, size)
+        coverage_unknown = False
+    missing = max(0.0, size - covered)
+    tolerance = max(1e-12, size * float(tolerance_ratio))
+    coverage_ok: Optional[bool]
+    if coverage_unknown:
+        coverage_ok = None
+    else:
+        coverage_ok = missing <= tolerance
+    #: ⚠️ 不能写成 `any(kind == "sl")`：那会把**已过期**的腿算成"有活止损"（本刀实测的假安心）。
+    #: 口径：`expiry_state == "never"`（**显式** 0 / GTC ⇒ 明确"撤销前一直有效"）算活；
+    #: 到期时间**已过**（absolute/relative 且 <= now）算死；
+    #: `unknown`（**取数缺字段**，说不准）**算活但计入 `needs_verify`** —— 交易所列着它，
+    #: 只是我们无法断言它的到期，按"不可判定≠安全"必须要求复验。
+    has_live_sl = live_sl_seen
+
+    return {
+        "ours": ours,
+        "foreign_count": foreign,
+        "has_live_sl": has_live_sl,
+        "covered_size": None if coverage_unknown else round(covered, 8),
+        "missing_size": None if coverage_unknown else round(missing, 8),
+        "coverage_ok": coverage_ok,
+        "expiring": expiring,
+        "expired": expired,
+        "expiry_unknown": expiry_unknown,
+        # 判定给调用方的三个"要不要动"：
+        "needs_repair": (not has_live_sl) or coverage_ok is False,
+        "needs_renew": bool(expiring or expired),
+        "needs_verify": bool(expiry_unknown) or coverage_ok is None,
+    }
+
+
+def attribute_protective_orders(positions: Optional[Sequence[Dict[str, Any]]],
+                               legs: Optional[Sequence[Dict[str, Any]]],
+                               ledger_rows: Optional[Sequence[Dict[str, Any]]] = None,
+                               *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO
+                               ) -> Dict[str, Any]:
+    """逐腿归属：这条保护腿是**给当前哪个仓**挂的？纯判定，无 IO。
+
+    危害（判据，不是"要不要撤"）：
+    1. **虚假安全感**：`scan_protective_orders` 按币种+平仓方向+数量算覆盖 ⇒ 给新仓算覆盖时，
+       旧仓遗留的腿会被算成"已有保护"；
+    2. **会减新仓**：这些腿是 `reduceOnly` 条件单 ⇒ 同币再开仓后，价格触及**旧触发价**时
+       会**真的减掉新仓**的一部分。
+
+    ## 归属证据分三档（诚实区分"证明是我们的"与"看起来像我们的"）
+
+    | evidence | 含义 | 可否自动清理 |
+    |---|---|---|
+    | `tag` | 带本系统标签（`t-astrasl/t-astratp`）⇒ **可证明**是我们的 | ✅ |
+    | `ledger` | 无标签，但台账有**同向同量**记录 ⇒ 高度可能 | ✅ |
+    | `None` | 两者都没有 ⇒ **归属不可判定** | ❌ 绝不自动撤（可能是用户手单） |
+
+    ## 分桶
+
+    | state | 含义 |
+    |---|---|
+    | `matched` | 有活动仓，腿保护它（整仓平腿 或 张数与仓量相符） |
+    | `size_mismatch` | 有活动仓，但张数不符（且非整仓平）⇒ 多半旧仓遗留 |
+    | `side_mismatch` | 有活动仓，但腿保护的是**另一个方向** ⇒ 来自已反手的旧仓 |
+    | `orphan_attributed` | 无活动仓，但证据为 `tag`/`ledger` |
+    | `orphan_unattributed` | 无活动仓且无证据 ⇒ 不可判定 |
+    | `unparsed` | 连币种都读不出的行 ⇒ 单独登记（**不得**伪装成"不可判定孤儿"） |
+    | `foreign` | 无本系统保护腿特征（标签/类型名都不匹配） |
+
+    ⚠️ 本函数**不做任何撤销**；`cleanup_candidates` 只是"若要清理，这些是可归因项"。
+    """
+    tol = max(0.0, float(tolerance_ratio or 0.0))
+    pos_by_base: Dict[str, Dict[str, Any]] = {}
+    pos_count_by_base: Dict[str, int] = {}
+    for p in (positions or []):
+        if not isinstance(p, dict):
+            continue
+        base = leg_base({"symbol": p.get("base") or p.get("symbol") or "",
+                            "inst_id": p.get("inst_id") or p.get("instId") or ""})
+        if base:
+            # 第一百八十三刀：同币**多仓**（对冲模式 / 异常数据）时 `setdefault` 只留第一个
+            # ⇒ 归属会把腿全对到那一个仓位上，另一侧**静默消失**。改为"留首个 + 记数"，
+            # 并在报告里披露 `ambiguous_positions`（读得到却只用一个 ⇒ 必须说出来）。
+            pos_count_by_base[base] = pos_count_by_base.get(base, 0) + 1
+            pos_by_base.setdefault(base, p)
+
+    def _ledger_evidence(base: str, want_pos_side: Optional[str], size: float) -> Optional[Dict[str, Any]]:
+        """台账里同币、同向、同量的记录（含已平）→ 证据（可能为 None）。"""
+        for r in reversed(list(ledger_rows or [])):
+            if not isinstance(r, dict):
+                continue
+            r_base = leg_base({"symbol": r.get("inst") or r.get("symbol") or r.get("name") or ""})
+            if r_base != base:
+                continue
+            r_side = str(r.get("side") or "").strip().lower()
+            r_side = {"空": "short", "多": "long"}.get(r_side, r_side)
+            if r_side in ("sell",):
+                r_side = "short"
+            elif r_side in ("buy",):
+                r_side = "long"
+            if want_pos_side and r_side and r_side != want_pos_side:
+                continue
+            r_sz = _as_float(r.get("sz") if r.get("sz") is not None else r.get("size"))
+            if r_sz is None or size <= 0:
+                continue
+            if abs(abs(r_sz) - size) <= max(1e-6, size * tol):
+                return {"id": r.get("id"), "status": r.get("status"), "sz": r_sz,
+                        "side": r.get("side")}
+        return None
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "matched": [], "size_mismatch": [], "side_mismatch": [],
+        "orphan_attributed": [], "orphan_unattributed": [], "unparsed": [], "foreign": []}
+
+    for row in (legs or []):
+        if not isinstance(row, dict):
+            continue
+        if _leg_kind(row) is None:
+            buckets["foreign"].append({"reason": "无本系统保护腿特征（标签/类型名都不匹配）"})
+            continue
+        base = leg_base(row)
+        if not base:
+            buckets["unparsed"].append({"reason": "读不出币种（各所字段位置不同）",
+                                        "id": str(row.get("id") or row.get("algo_id") or "")})
+            continue
+        kind = _leg_kind(row)
+        full_close = _is_full_close(row)
+        size = abs(_as_float(_leg_size(row)) or 0.0)
+        leg_side = _leg_position_side(row)
+        tagged = ("astrasl" in _row_text(row)) or ("astratp" in _row_text(row))
+        entry = {"symbol": base, "kind": kind, "protects": leg_side,
+                 "size": size, "full_close": bool(full_close),
+                 "trigger_price": _trigger_price(row),
+                 "id": str(row.get("id") or row.get("algo_id") or row.get("algoId")
+                           or row.get("order_id") or "")}
+
+        pos = pos_by_base.get(base)
+        if pos is not None:
+            pos_side = str(pos.get("side") or "").lower() or None
+            pos_size = abs(_as_float(pos.get("size_signed") or pos.get("pos")) or 0.0)
+            if leg_side and pos_side and leg_side != pos_side:
+                buckets["side_mismatch"].append(dict(entry, position_side=pos_side,
+                                                     position_size=pos_size))
+                continue
+            if full_close:
+                buckets["matched"].append(dict(entry, position_size=pos_size))
+                continue
+            same = size > 0 and pos_size > 0 and abs(size - pos_size) <= max(1e-6, pos_size * tol)
+            (buckets["matched"] if same else buckets["size_mismatch"]).append(
+                dict(entry, position_size=pos_size))
+            continue
+
+        # 无活动仓 → 孤儿；证据优先级 tag > ledger > 无
+        if tagged:
+            buckets["orphan_attributed"].append(dict(entry, evidence="tag"))
+            continue
+        ev = _ledger_evidence(base, leg_side, size)
+        if ev is not None:
+            buckets["orphan_attributed"].append(dict(entry, evidence="ledger", ledger=ev))
+        else:
+            buckets["orphan_unattributed"].append(entry)
+
+    cleanup = (buckets["orphan_attributed"] + buckets["size_mismatch"]
+               + buckets["side_mismatch"])
+    return {
+        **buckets,
+        #: 同币多仓（>1 行）的币种：腿会被对到**首个**仓位上 ⇒ 可能张冠李戴，须人工复核
+        "ambiguous_positions": sorted(b for b, n in pos_count_by_base.items() if n > 1),
+        "counts": {k: len(v) for k, v in buckets.items()},
+        #: 可安全清理的候选（**仅当**调用方要清理时）：可归因孤儿 + 旧量/旧向腿
+        "cleanup_candidates": cleanup,
+        #: 需要人看但不能自动动的（归属不可判定 / 读不出的行）
+        "needs_human": buckets["orphan_unattributed"] + buckets["unparsed"],
+        "legs_total": sum(len(v) for v in buckets.values()),
+        "orphan_total": len(buckets["orphan_attributed"]) + len(buckets["orphan_unattributed"]),
+    }
+
+
+def select_legs_to_cancel_after_close(closed_position: Optional[Dict[str, Any]],
+                                      legs: Optional[Sequence[Dict[str, Any]]],
+                                      ledger_rows: Optional[Sequence[Dict[str, Any]]] = None,
+                                      *, tolerance_ratio: float = DEFAULT_TOLERANCE_RATIO
+                                      ) -> Dict[str, Any]:
+    """**平仓已核验归零之后**，挑出该撤的腿（纯选择，不发单）。
+
+    为什么是"平仓后"而不是"清理任务"：遗留腿的产生源头就是**平仓路径从不撤腿**
+    （实测 `close_position` 只提交市价全平，`cancel_protective_orders` 仅 `scale_out` 用过）。
+    在源头补上，才不会一边清理一边继续产生。
+
+    ## 只撤"能证明是这一笔的"，其余一律不碰
+
+    - `matched`：腿保护的就是刚平掉的那个仓（张数相符，或 `auto_size` 整仓平）⇒ 撤；
+    - `orphan_attributed` 且证据 `tag`（`t-astrasl/t-astratp`）⇒ **可证明是我们的** ⇒ 撤；
+    - `size_mismatch` / `side_mismatch`：**同一合约上属于别的仓**的历史腿 ——
+      平掉 A 仓不等于 B 仓的腿该撤，故**只报告不撤**（留给归属审计）；
+    - `orphan_unattributed` / `unparsed` / `foreign`：**绝不撤**（可能是用户手单）。
+
+    ⚠️ 前提由调用方保证：**已经核验该合约没有剩余仓位**。本函数不做该核验，
+    因为它不发单、也不读交易所 —— 调用方若在未归零时调用，会把还在保护中的腿撤掉。
+    """
+    r = attribute_protective_orders([closed_position] if closed_position else [],
+                                   legs, ledger_rows,
+                                   tolerance_ratio=tolerance_ratio)
+    out: List[Dict[str, Any]] = []
+    for leg in r["matched"]:
+        out.append({"id": leg.get("id"), "symbol": leg.get("symbol"), "kind": leg.get("kind"),
+                    "reason": "matched"})
+    for leg in r["orphan_attributed"]:
+        if str(leg.get("evidence")) == "tag":
+            out.append({"id": leg.get("id"), "symbol": leg.get("symbol"), "kind": leg.get("kind"),
+                        "reason": "tag"})
+    ids = [x["id"] for x in out if x.get("id")]
+    return {
+        "to_cancel": out,
+        "ids": ids,
+        "not_touched": {
+            "size_mismatch": r["size_mismatch"],
+            "side_mismatch": r["side_mismatch"],
+            "orphan_unattributed": r["orphan_unattributed"],
+            "unparsed": r["unparsed"],
+            "foreign": r["foreign"],
+        },
+        "counts": {
+            "to_cancel": len(out),
+            "not_touched": sum(len(r[k]) for k in
+                               ("size_mismatch", "side_mismatch", "orphan_unattributed",
+                                "unparsed", "foreign")),
+        },
+        "attribution": r,
+    }
+
+
+def read_ledger_rows(path: Any, *, log: Any = print) -> Optional[List[Dict[str, Any]]]:
+    """读台账行，**只**供归属取证（本模块其余部分保持无 IO，此处是显式例外）。
+
+    ## 三态（与"读不到 ≠ 没有"一致，且方向必须**偏保守**）
+
+    | 情形 | 返回 | 归属后果 |
+    |---|---|---|
+    | 文件不存在 | `None` | 不产生 `ledger` 证据 ⇒ 腿留在 `orphan_unattributed` ⇒ **绝不自动撤** |
+    | 不可读 / JSON 坏 / 不是列表 | `None` + 告警 | 同上（fail-closed：读不到就不产生证据）|
+    | 正常 | 行列表 | `ledger` 档证据可用（同币同向同量 ⇒ 高度可能是本方）|
+
+    为什么保守方向是"不产生证据"而不是"当成空台账"：把读失败当"没有台账记录"，会把本可
+    证明归属的腿降级为"归属不可判定"；反过来把读失败当"都是我们的"，则会**撤掉用户手单**。
+    两害相权，取"什么也不做"。
+    """
+    try:
+        fp = Path(path)
+    except Exception:
+        return None
+    if not fp.exists():
+        return None
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"[台账取证] warn 读不到台账（{type(exc).__name__}: {exc}）⇒ 本轮不产生 ledger 证据")
+        return None
+    if isinstance(data, dict):
+        # ⚠️ 不能写成 `data.get("trades") or data.get("rows") or []`：那会把"结构不认识的 dict"
+        # 悄悄变成**空台账**（＝"确实没有记录"），于是本可证明归属的腿被降级成不可判定。
+        # 结构认不出来 ⇒ 与"读不到"同档：不产生证据（本门用例抓到的正是这一处）。
+        inner = data.get("trades")
+        if inner is None:
+            inner = data.get("rows")
+        if inner is None:
+            log("[台账取证] warn 台账是 dict 但没有 trades/rows 列表 ⇒ 本轮不产生 ledger 证据")
+            return None
+        data = inner
+    if not isinstance(data, list):
+        log("[台账取证] warn 台账结构不是列表 ⇒ 本轮不产生 ledger 证据")
+        return None
+    return [r for r in data if isinstance(r, dict)]
+
+
+def cancel_protective_leg(ad: Any, leg_id: Any, *, symbol: Any = None) -> bool:
+    """按**能力探针**撤一条保护腿；撤不动返回 False（不抛）。"""
+    leg_id = str(leg_id or "")
+    if not leg_id:
+        return False
+    if hasattr(ad, "cancel_price_order"):
+        ad.cancel_price_order(leg_id)
+        return True
+    if hasattr(ad, "cancel_algo_order"):
+        ad.cancel_algo_order(algo_id=leg_id)
+        return True
+    if symbol is not None and hasattr(ad, "cancel_order"):
+        ad.cancel_order(symbol, leg_id)
+        return True
+    return False
+
+
+def watchdog_debounce_step(state: Optional[Dict[str, Any]],
+                           report: Optional[Dict[str, Any]], *,
+                           now_s: float, debounce_s: float):
+    """跨周期防抖一步（**纯函数**：无 I/O、无时间读取 —— `now_s` 由调用方给）。
+
+    观察项 = 审计层"本来会做"的动作（`would`）。真模式下 `actions` 与 `would` **同源**
+    （同一套判定，只是 `dry_run` 决定写不写），故用 `would` 做观察不需要额外取数。
+
+    `state`：`{gap_key: first_seen_ts}`；`gap_key` = `venue|inst|stage`（稳定身份：
+    `detail` 是逐周期措辞（含"距到期 1.2 天"这类会变的数字），**不能进键** ——
+    否则同一个缺口每周期都算"新缺口"，防抖永不成立）。
+    - 新缺口：记 `now_s`；本周期**未再出现**的缺口：丢弃（缺口愈合 ⇒ 状态自清，不攒垃圾）；
+    - 返回 `(new_state, observed_keys, qualified_keys)`：`qualified_keys` 只含
+      "已持续 ≥ `debounce_s`" 的缺口 —— **只有它们**允许触发真实写单那一轮。
+
+    方向纪律：`debounce_s <= 0` 视为**不防抖**（立即合格）—— 这是显式的运营选择，
+    不是默认值（默认见 `DEFAULT_WATCHDOG_DEBOUNCE_S`）。
+    """
+    _state = dict(state or {})
+    observed: List[str] = []
+    for item in (report or {}).get("would") or []:
+        if not isinstance(item, dict):
+            continue
+        key = "|".join((str(item.get("venue") or "").lower(),
+                        str(item.get("inst") or ""),
+                        str(item.get("stage") or "")))
+        if key in observed:
+            continue
+        observed.append(key)
+        if key not in _state:
+            _state[key] = float(now_s)
+    _kept = {k: float(v) for k, v in _state.items() if k in observed}
+    _qualify_s = 0.0 if debounce_s is None else max(0.0, float(debounce_s))
+    qualified = sorted(k for k in observed
+                       if float(now_s) - _kept.get(k, float(now_s)) >= _qualify_s)
+    return _kept, observed, qualified

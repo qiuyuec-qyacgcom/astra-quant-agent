@@ -1,0 +1,1294 @@
+"""Versioned prompt profile library used directly by Python trading processes.
+
+## 双文件模型（2026-09 改造，起因是一次真实的数据丢失）
+
+方案库分两个文件，**职责不重叠**：
+
+| 文件 | 角色 | git | 谁写 |
+|---|---|---|---|
+| `BASELINE_FILE` `data/prompt_library.json` | 出厂基线 | **跟踪**（随发版更新） | 没人（运行期只读） |
+| `LOCAL_FILE` `data/prompt_library.local.json` | 用户改动 | 忽略（`data/*.json`） | 本模块（唯一写入目标） |
+
+`load_library()` = 基线 ⊕ 本地（**本地优先**）；`save_library()` 只写本地，
+且**只写真差异**（与出厂逐字相同的预设不落本地，好让它继续跟随发版更新）。
+
+### 为什么不这么改不行
+
+改造前只有一个文件，而它**被 git 跟踪**。于是用户一改提示词，工作区就脏了，
+而后台「更新」有一道「工作区存在未提交修改 ⇒ 409 拒绝更新」的闸
+（`astra_backend/routers/system.py`）—— 用户为了更新只能丢弃改动，丢的正是自己的
+提示词；`git pull` 再把仓库版本盖回来。表现出来就是用户报的那句
+「更新后预设提示词覆盖了用户的预设提示词」。
+
+**推论（别再把运行态文件加回 git）**：任何"应用会写 + git 跟踪"的文件都会
+复现同一事故。`data/policy_archives/*` 同批停止跟踪，理由相同。
+"""
+from __future__ import annotations
+import copy
+import functools
+import hashlib
+import importlib
+import json
+import os
+import re
+import sys
+import tempfile
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+# 结构优化阶段 4·B3 第五十三刀：模板编译簇外提到 `scripts/prompt_templates.py`。
+# ⚠️ 双模导入：本模块既可能以裸名 `prompt_library` 导入（`scripts/` 在
+# sys.path），也可能以 `scripts.prompt_library` 导入（repo 根在 sys.path）——
+# 后一种情况下裸名 `prompt_templates` **不在** sys.path。
+# （第四十八刀在 local_lock 上踩过同一个坑，被 dashboard 用例当场抓住。）
+try:  # repo 根在 sys.path
+    from scripts.prompt_templates import (
+        stable_base_module_id as _tpl_stable_base_module_id,
+        _module as _tpl_module,
+        text_to_modules as _tpl_text_to_modules,
+        compile_modules as _tpl_compile_modules,
+        base_template_modules as _tpl_base_template_modules,
+        base_template_text as _tpl_base_template_text,
+        align_pipeline_sources as _tpl_align_pipeline_sources,
+        normalize_base_modules as _tpl_normalize_base_modules,
+        demote_edited_base_modules as _tpl_demote_edited_base_modules,
+        _inherit_module_tags as _tpl__inherit_module_tags,
+        pipeline_view as _tpl_pipeline_view,
+        append_layer as _tpl_append_layer,
+    )
+except ImportError:  # scripts/ 在 sys.path
+    from prompt_templates import (
+        stable_base_module_id as _tpl_stable_base_module_id,
+        _module as _tpl_module,
+        text_to_modules as _tpl_text_to_modules,
+        compile_modules as _tpl_compile_modules,
+        base_template_modules as _tpl_base_template_modules,
+        base_template_text as _tpl_base_template_text,
+        align_pipeline_sources as _tpl_align_pipeline_sources,
+        normalize_base_modules as _tpl_normalize_base_modules,
+        demote_edited_base_modules as _tpl_demote_edited_base_modules,
+        _inherit_module_tags as _tpl__inherit_module_tags,
+        pipeline_view as _tpl_pipeline_view,
+        append_layer as _tpl_append_layer,
+    )
+# 结构优化阶段 4·B3 第四十八刀：本地锁兜底外提到 `scripts/local_lock.py`。
+# ⚠️ 双模导入：本模块既可能以裸名 `prompt_library` 导入（`scripts/` 在 sys.path），
+# 也可能以 `scripts.prompt_library` 导入（repo 根在 sys.path）——
+# 后一种情况下裸名 `local_lock` **不在** sys.path，直接 import 会
+# `ModuleNotFoundError`（实测被 tests/test_dashboard_bills_extraction 抓到）。
+try:  # repo 根在 sys.path
+    from scripts.local_lock import local_file_lock  # noqa: E402
+except ImportError:  # scripts/ 在 sys.path
+    from local_lock import local_file_lock  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+#: 出厂基线：随发版更新，**运行时只读**（应用从不写它）。
+BASELINE_FILE = ROOT / "data" / "prompt_library.json"
+#: 用户改动：应用**唯一的写入目标**，不纳入 git（`.gitignore` 的 `data/*.json` 已覆盖）。
+#:
+#: 为什么要分成两个文件（2026-09 实测事故）：单文件时代这个数据文件**被 git 跟踪**，
+#: 于是用户一在后台改提示词就把工作区弄脏，而后台「更新」有一道
+#: 「工作区存在未提交修改 ⇒ 409 拒绝更新」的闸（`astra_backend/routers/system.py`）。
+#: 用户为了更新只能丢弃改动 —— 丢弃的正是自己的提示词；`git pull` 再把仓库版本盖回来。
+#: 表现出来就是「更新后预设提示词覆盖了用户的预设提示词」。
+#:
+#: 分成两文件后：基线继续由 git 交付（新部署/新克隆拿得到真正的出厂预设，
+#: 而不是代码里那份**残缺兜底** —— 实测 `evolution_system` 兜底只有 92 字符，
+#: 而基线里有 1049），用户改动落在不跟踪文件里，**永远不会弄脏工作区**，
+#: 也永远不会被 `git pull` 覆盖。
+LOCAL_FILE = ROOT / "data" / "prompt_library.local.json"
+BJ_TZ = timezone(timedelta(hours=8))
+TEMPLATE_KEYS = ("trading_system", "trading_user", "evolution_system", "evolution_user")
+
+TEMPLATE_VARIABLES_METADATA = [
+    {
+        "key": "news_intelligence",
+        "label": "全网实时资讯",
+        "category": "实时情报",
+        "description": "实时注入全网突发重大加密快讯、宏观经济基调与市场情绪倾向",
+        "sample": "【宏观环境基调】: 偏多倾向\n【最新核心资讯要闻】:\n- [2026-09-03 23:45] 美联储官员表态对通胀回落充满信心...",
+    },
+    {
+        "key": "trading_memory",
+        "label": "自进化实战心法",
+        "category": "自进化",
+        "description": "注入每日复盘根据历史平仓台账提炼的核心实战心法、避坑指南与痛点归因",
+        "sample": "# AstraQuant AI 交易大脑长期记忆与启发式心法\n1. [2026-09-04] 4H主升浪中回调即是做多机会，严禁盲目摸顶开空...",
+    },
+    {
+        "key": "market_regime",
+        "label": "全市场宏观体制（已退役·恒为空）",
+        "category": "行情数据",
+        "description": ("**2026-10 起已退役**：该插槽恒为空，不再注入实盘值。原因：其数据源是已退役的"
+                        "数理引擎（`calculus_engine`→`calculus/regime.py`），且缺数据时会凭空编出"
+                        "体制结论与量化分（函数内写死 `atr_pct=1.5`/`adx=20.0` 兜底，实盘 `calculus` "
+                        "块已不存在 ⇒ 震荡/冲击分源自假零）。方向证据改由每个标的的真实 4H 宏观结构"
+                        "（`4H_MACRO_*`）、ADX、ATR 与 T4 动量承载；跨标的总括可由模型自行汇总。"),
+        "sample": "",
+    },
+    {
+        "key": "market_matrix",
+        "label": "标的7梯队量化因子矩阵",
+        "category": "行情数据",
+        "description": "实时注入标的池全部币种的7梯队可观测量化因子（T0衍生品费率与OI象限、T0.5订单流CVD与Taker买卖比、T1盘口OBI与点差、T1.5期权偏度、T2期限基差、T3筹码VWAP与POC、T4动量MACD与RSI）。数据缺失时明示说明，绝不用0冒充。",
+        "sample": "【BTC (BTC-USDT-SWAP)】| 现价: 68500.0 | 4H宏观大势=4H_MACRO_BULL\n- T0 衍生品: 费率=0.0042% (正常), OI=12.5亿U (+2.8%), 四象限=增仓上行, 精英多空比=1.42\n- T0.5 订单流: 1H CVD=+850万U, Taker买卖比=1.28, 量价背离=无\n- T1 盘口: OBI=+32.5%, 深度比Top20=1.45, 点差=0.01%\n- T3 筹码: 24H VWAP=68120 (+0.56%), VAH=68900 / VAL=67800, POC=68250\n- T4 动量: 1H MACD柱=+48.2 (加速度+12.5), RSI(14)=62.4, ADX=28.5 (强趋势)",
+    },
+    {
+        "key": "account_positions",
+        "label": "账户当前持仓",
+        "category": "账户敞口",
+        "description": "注入系统持仓概况、在途持仓方向、均价、标记价、持仓保证金与杠杆、未结浮盈ROI与动态止损线",
+        "sample": "【账户持仓概况】: 当前系统总持仓 1/6\n- 标的: SOL-USDT-SWAP | 方向: long 3x | 开仓均价: 103.55 | 未结浮盈: +9.00 U",
+    },
+    {
+        "key": "pending_orders",
+        "label": "在途未成交挂单",
+        "category": "账户敞口",
+        "description": "注入当前在途未成交的 Maker 限价挂单、买卖方向、价格、保证金及附带的云端OCO止盈止损",
+        "sample": "- [挂单ID: 38790...] ETH-USDT-SWAP | 限价买多 保证金 120.00U @ 3250.0 | 附带云端止盈: 3450.0 / 止损: 3180.0",
+    },
+    {
+        "key": "account_balance",
+        "label": "账户可用资金",
+        "category": "账户敞口",
+        "description": "注入当前账户实际可用于开仓和加仓的 USDT 现金可用余额",
+        "sample": "3858.73 USDT",
+    },
+    {
+        "key": "risk_budget",
+        "label": "自适应风险预算",
+        "category": "账户敞口",
+        "description": "按当前实际可用余额自动推导的单笔保证金区间、单标的累计上限与当日亏损熔断线；小资金账户(如 80U)与大资金账户自动适配，彻底替代提示词中任何写死的绝对金额",
+        "sample": "【本周期风险预算（示意样本，实际以运行期小节为准）｜按实际可用余额 80.00 USDT 自适应推导，严禁套用任何固定绝对金额】:\n- 常规单笔保证金: 2.4 ~ 9.6 USDT (可用余额 3%~12%)\n- 强信号单笔保证金上限: 16.0 USDT (20%)\n- 单标的累计保证金上限(含金字塔加仓): 24.0 USDT (30%)",
+    },
+    {
+        "key": "decision_timestamp",
+        "label": "决策基准时间",
+        "category": "系统环境",
+        "description": "注入当前交易推演周期的精确北京时间戳与时效基准",
+        "sample": "2026-09-04 02:30:00 (北京时间)",
+    },
+    {
+        "key": "active_instruments",
+        "label": "监控标的列表",
+        "category": "系统环境",
+        "description": "注入当前系统跟踪并推演的加密货币标的列表",
+        "sample": "BTC,ETH,SOL,XRP,DOGE,ARB",
+    },
+    {
+        "key": "strategy_version",
+        "label": "系统版本号",
+        "category": "系统环境",
+        "description": "当前 AstraQuant 交易引擎版本",
+        "sample": "6.8.1",
+    },
+    {
+        "key": "policy_version",
+        "label": "策略快照版本",
+        "category": "系统环境",
+        "description": "当前决策周期的策略版本快照标签",
+        "sample": "v8.0.0@prod",
+    },
+    {
+        "key": "policy_hash",
+        "label": "策略快照哈希",
+        "category": "系统环境",
+        "description": "当前决策周期的策略配置不可变哈希指纹",
+        "sample": "a1b2c3d4e5f6",
+    },
+    {
+        "key": "timezone",
+        "label": "系统基准时区",
+        "category": "系统环境",
+        "description": "系统统一时间戳时区",
+        "sample": "Asia/Shanghai",
+    },
+    {
+        "key": "timestamp_beijing",
+        "label": "复盘基准时间",
+        "category": "系统环境",
+        "description": "自进化复盘周期的精确北京时间戳别名（与 decision_timestamp 同源，用于复盘管线）",
+        "sample": "2026-09-06 06:00:00 (北京时间)",
+    },
+    {
+        "key": "existing_memory_markdown",
+        "label": "历史长期记忆库",
+        "category": "自进化",
+        "description": "注入当前系统已沉淀的完整长期记忆 Markdown 原文，供复盘对照与增量修订",
+        "sample": "# AstraQuant AI 交易大脑长期记忆与启发式心法\n1. [2026-09-05] 4H 顺势回踩优先做多...",
+    },
+    {
+        "key": "total",
+        "label": "总平仓笔数",
+        "category": "交易台账",
+        "description": "复盘窗口内已平仓交易总笔数",
+        "sample": "12",
+    },
+    {
+        "key": "wins",
+        "label": "盈利笔数",
+        "category": "交易台账",
+        "description": "复盘窗口内净盈亏为正的平仓笔数",
+        "sample": "7",
+    },
+    {
+        "key": "losses",
+        "label": "亏损笔数",
+        "category": "交易台账",
+        "description": "复盘窗口内净盈亏为负或持平的平仓笔数",
+        "sample": "5",
+    },
+    {
+        "key": "win_rate",
+        "label": "胜率",
+        "category": "交易台账",
+        "description": "复盘窗口内盈利笔数占总平仓笔数的百分比",
+        "sample": "58.3",
+    },
+    {
+        "key": "total_net",
+        "label": "累计净盈亏",
+        "category": "交易台账",
+        "description": "复盘窗口内所有已平仓交易的累计净盈亏（USDT）",
+        "sample": "+123.45",
+    },
+    {
+        "key": "total_fees",
+        "label": "累计手续费",
+        "category": "交易台账",
+        "description": "复盘窗口内所有已平仓交易累计消耗的手续费（USDT）",
+        "sample": "5.60",
+    },
+    {
+        "key": "target_instruments",
+        "label": "聚焦标的池",
+        "category": "交易台账",
+        "description": "当前系统聚焦交易与复盘的加密货币标的列表",
+        "sample": "BTC-USDT-SWAP, ETH-USDT-SWAP, SOL-USDT-SWAP",
+    },
+    {
+        "key": "closed_trades_json",
+        "label": "逐笔交易台账",
+        "category": "交易台账",
+        "description": "复盘窗口内逐笔已平仓交易明细的 JSON 序列化文本",
+        "sample": '[{"symbol":"BTC","net_pnl":12.3,"fee":0.4}]',
+    },
+    {
+        "key": "snapshot_observability_summary",
+        "label": "可观测性审计摘要",
+        "category": "交易台账",
+        "description": "历史成交快照可观测性审计简报",
+        "sample": "全量可观测 10 笔 / 部分可观测 2 笔",
+    },
+    {
+        "key": "dynamics_observable_trades",
+        "label": "因子可观测成交笔数",
+        "category": "交易台账",
+        "description": "具备完整因子快照的已平仓交易笔数",
+        "sample": "10",
+    },
+    {
+        "key": "unobservable_trades",
+        "label": "因子不可观测成交笔数",
+        "category": "交易台账",
+        "description": "缺失入场因子快照的已平仓交易笔数",
+        "sample": "2",
+    },
+]
+
+ALLOWED_VARIABLES = {item["key"] for item in TEMPLATE_VARIABLES_METADATA} | {"profile_name", "timestamp"}
+EXPORT_FORMAT = "astra-prompt-profile"
+EXPORT_VERSION = 4
+_IMPORT_FORMAT_HINT = (
+    "无法识别的提示词文件。请提供以下三种格式之一："
+    "(1) 标准导出包 {\"format\":\"astra-prompt-profile\",\"version\":4,\"profile\":{...}}（v1~v4 均可）；"
+    "(2) 整库导出文件 {\"version\":2,\"active_profile_id\":\"...\",\"profiles\":{...}}，将导入其中的启用方案；"
+    "(3) 裸方案对象（直接包含 pipelines 或 trading_system/trading_user/evolution_system/evolution_user 字段）。"
+)
+MAX_TEMPLATE_CHARS = 12_000
+MAX_PROFILE_CHARS = 32_000
+MAX_REVISIONS = 100
+MAX_MODULES_PER_PIPELINE = 40
+
+# ── 代码侧预设：**只有结构，没有提示词正文**（2026-09-30 重构，用户批准）──────────
+# 正文的事实源是 `data/prompt_library.json`（出厂基线，git 跟踪）。
+#
+# ⚠️ 这里曾经是**第三份**文案副本（trading_system 1356 / trading_user 3022 /
+# evolution_* 199 / 790 字符），与 `SYSTEM_PROMPT`、基线文件三方各存一份 ——
+# 改一处另两处不动，表现就是"工坊里改了、实发却没变"。三方副本已收敛为一方。
+#
+# 为什么保留这个 stub 而不是整个删掉：`PRESETS` 的**键集**是"出厂方案 id"的
+# 事实源，被 `all_profiles` / `rollback_profile` / `create_profile` /
+# `save_library` 的 `in PRESETS` 判定使用。留空 pipelines 让它只承担"身份"职责，
+# 不再提供任何文本；文本一律由基线供给（基线缺失时宁可报错，也不静默发空提示词）。
+PRESETS: dict[str, dict[str, Any]] = {
+    'allpattern_swing': {
+        'id': 'allpattern_swing',
+        'name': '全形态波段策略',
+        'description': '面向全形态的波段样板：招式由模型自选，但每单必须自证三件套'
+                       '（形态命名 · 触发条件 · 失效位）。提示词正文见 data/prompt_library.json。',
+        'editable': True,
+        'enabled': True,
+        'editor_mode': 'modules',
+        'simple_policy': {
+            'strategy': '',
+            'review_focus': '',
+            'participation': 'balanced',
+            'evidence': 'strict',
+            'risk_budget': 'middle',
+        },
+        'trading_system': '',
+        'trading_user': '',
+        'evolution_system': '',
+        'evolution_user': '',
+        'pipelines': {
+            'trading_system': [],
+            'trading_user': [],
+            'evolution_system': [],
+            'evolution_user': [],
+        },
+    },
+}
+EMPTY_CUSTOM = {
+    "id": "custom-default", "name": "自定义方案", "description": "用自然语言调整策略，硬风控始终由系统锁定。", "editable": True,
+    "enabled": True, "created_at": "", "updated_at": "", "editor_mode": "simple",
+    "simple_policy": {"strategy": "", "review_focus": "", "participation": "balanced", "evidence": "strict", "risk_budget": "middle"},
+    "trading_system": "", "trading_user": "", "evolution_system": "", "evolution_user": "",
+}
+
+# 白盒安全护栏：只拦截「解除硬约束」的意图，不拦截正常的杠杆/保证金/止损参数调优表述。
+# 设计要点：动词与硬约束名词必须紧邻（≤2 字插入语），避免 "覆盖 100~200U 保证金上限" 这类
+# 正常额度表述被误判；另用「规则否定」宽窗口兜底捕捉 "忽略上面关于止损的规定" 这类绕法。
+_FORBIDDEN = (
+    (re.compile(r"(?is)(忽略|绕过|无视|跳过|取消|禁用|关闭|豁免|覆盖)[^。；;，,\n]{0,2}(P0|硬风控|风险门禁|风控门禁|风控底线|安全底线|OCO|JSON|止损|保证金上限|持仓上限|盈亏比|置信度)"), "不得要求忽略或覆盖 P0 与执行层硬约束"),
+    (re.compile(r"(?is)(忽略|绕过|无视|取消|覆盖|不必|不要|无需|不受)[^。；;\n]{0,12}(规定|规则|约束|要求|限制|契约|铁律|军规|底线)"), "不得要求忽略系统硬约束与规则契约"),
+    (re.compile(r"(?is)(不设|没有|去掉|拿掉|无需|不必)[^。；;\n]{0,2}(止损|风控)"), "不得取消止损或风控"),
+    (re.compile(r"(?is)(允许|可以|支持|应当)[^。；;\n]{0,12}(逆势补仓|无止损|跳过OCO|突破持仓上限|超过持仓上限|无限杠杆)"), "不得放宽逆势补仓、OCO、止损或持仓上限"),
+    (re.compile(r"(?is)ignore[^.;\n]{0,30}(system|risk|safety|json|oco)"), "不得要求忽略系统、风险、安全或 JSON 契约"),
+    (re.compile(r"(?i)(sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{16,}|api[_ -]?key\s*[:=]\s*\S+)"), "提示词中禁止写入 API Key 或密钥"),
+)
+# 命中前若出现这些否定前缀，说明文本本身是在「禁止」该行为，属于合规表述。
+_BENIGN_PREFIX = re.compile(r"(不得|严禁|禁止|不可|不能|无法|杜绝|防止|避免)[^。；;\n]{0,10}$")
+
+
+def scan_forbidden(value: str) -> list[str]:
+    """返回命中的护栏告警（附带命中片段），供保存/导入/回滚三处校验复用。"""
+    hits: list[str] = []
+    text = str(value or "")
+    for pattern, message in _FORBIDDEN:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 12):match.start()]
+            if _BENIGN_PREFIX.search(prefix):
+                continue
+            fragment = match.group(0).strip().replace("\n", " ")
+            hits.append(f"{message}（命中片段：「{fragment[:40]}」）")
+            break
+    return hits
+_VAR_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def _now() -> str:
+    return datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(temp_path): os.unlink(temp_path)
+
+
+def _default() -> dict[str, Any]:
+    return {"version": 2, "active_profile_id": "allpattern_swing", "profiles": {}, "revisions": []}
+
+
+def stable_base_module_id(title: str) -> str:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_stable_base_module_id(title)
+
+
+def _module(module: dict[str, Any], index: int=0) -> dict[str, Any]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。
+
+    ⚠️ `MAX_TEMPLATE_CHARS` 在**调用时**作为实参传入 —— 它留在门面，
+    故仍可被 patch / 直接赋值；本模块不在 import 期烘焙它。
+    """
+    return _tpl_module(module, index, max_template_chars=MAX_TEMPLATE_CHARS)
+
+
+# ── 管线 → 代码基座文本（审计批5 新发现：update_profile 的来源判定缺陷）──────────
+# 旧行为：用扁平文本更新管线时无条件 `text_to_modules(text, "legacy")`——即使提交文本
+# 与代码基座**逐字相同**，8 个模块也会全变成 legacy；下一轮 apply_module_layout 判定
+# "无 base 模块"就把基座整段前置 → 线上提示词翻倍（实测 6454 → 12910 字符）。
+# 这里提供「管线 → 基座文本」注册表 + 逐模块来源对齐：内容与基座逐字相同的模块
+# 恢复 `source="base"`（连同基座 id 与 locked），只有真正被改写的模块才留在 legacy。
+# 同一份代码在两种导入形态下都存在（`scripts.X` 与裸 `X`，见 risk_constants 的同族问题），
+# 这里按「已导入的实例优先 → 点号形态 → 裸名」依次尝试，避免再引入第三份副本。
+_BASE_TEMPLATE_SOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
+    # 2026-09-30 提示词体系重构（用户批准）：**只有输出 JSON Schema 还是代码基座**，
+    # 其余正文全部搬到 `data/prompt_library.json`（可在工坊编辑）。
+    #
+    # 为什么这里只剩一条：Schema 是模型输出的**机器契约**，字段名/取值枚举必须与
+    # 解析器逐字对齐 —— 让用户在工坊里改它等于把"整轮决策解析失败"变成一次误操作。
+    # 故它由代码所有、工坊里只读（`locked=True`），并由 `validate_profile` 拒绝改动。
+    #
+    # ⚠️ 另外三条管线**刻意没有代码基座**：查不到条目时 `base_template_text` 返回空串
+    # ⇒ `apply_module_layout` 直接按 JSON 里的方案模块编排，不再有"代码基座覆盖存档"
+    # 这条静默路径（那正是旧体系"工坊所见 ≠ 实发"的根源）。
+    "trading_system": ("READONLY_OUTPUT_SCHEMA",
+                       ("scripts.ai_brain_trader", "ai_brain_trader")),
+}
+_BASE_TEMPLATE_CACHE: dict[str, str] = {}
+
+
+def _base_text_resolver(pipeline: str) -> str:
+    """在**调用时**把门面的 `_BASE_TEMPLATE_SOURCES` / `_BASE_TEMPLATE_CACHE`
+    交给 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。
+
+    ⚠️ 这两个名字都留在门面：前者是"管线 → 基座来源"注册表（配置面），
+    后者是**可变**缓存（门面的 `register_base_template()` 会往里写）。
+    子模块若在 import 期绑一份，登记的基座就永远读不到 —— 两处状态分叉。
+    故用这个 resolver 在每次调用时现读门面全局。
+    """
+    return _tpl_base_template_text(
+        pipeline,
+        sources=_BASE_TEMPLATE_SOURCES,
+        cache=_BASE_TEMPLATE_CACHE,
+    )
+
+
+def register_base_template(pipeline: str, text: str) -> None:
+    """显式登记某条管线的代码基座文本（懒加载失败时的兜底入口）。"""
+    if pipeline in TEMPLATE_KEYS:
+        _BASE_TEMPLATE_CACHE[pipeline] = str(text or "")
+
+
+def base_template_text(pipeline: str) -> str:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。
+
+    ⚠️ `_BASE_TEMPLATE_SOURCES` / `_BASE_TEMPLATE_CACHE` 都以**实参**传入，
+    而不是让子模块 import：
+
+    - `_BASE_TEMPLATE_CACHE` 是**可变** dict，且本模块的
+      `register_base_template()` 会往它里面写。子模块若在 import 期绑一份，
+      登记的基座就永远读不到（两处状态分叉）；
+    - `_BASE_TEMPLATE_SOURCES` 是"管线 → 基座来源"注册表，属门面配置面。
+    """
+    return _tpl_base_template_text(
+        pipeline,
+        sources=_BASE_TEMPLATE_SOURCES,
+        cache=_BASE_TEMPLATE_CACHE,
+    )
+
+
+def align_pipeline_sources(modules: list[dict[str, Any]], pipeline: str) -> list[dict[str, Any]]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_align_pipeline_sources(modules, pipeline,
+                                       max_template_chars=MAX_TEMPLATE_CHARS,
+                                       base_text_resolver=_base_text_resolver)
+
+
+def text_to_modules(text: str, source: str='legacy', locked: bool=False) -> list[dict[str, Any]]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_text_to_modules(text, source, locked,
+                                max_template_chars=MAX_TEMPLATE_CHARS)
+
+
+def compile_modules(modules: list[dict[str, Any]]) -> str:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_compile_modules(modules)
+
+
+def base_template_modules(text: str, pipeline: str) -> list[dict[str, Any]]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_base_template_modules(text, pipeline,
+                                      max_template_chars=MAX_TEMPLATE_CHARS,
+                                      base_text_resolver=_base_text_resolver)
+
+
+def _inherit_module_tags(submitted: list[Any], stored: Any) -> list[Any]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl__inherit_module_tags(submitted, stored)
+
+
+def normalize_base_modules(modules: list[dict[str, Any]], base_text: str, pipeline: str,
+                           canonical_modules: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """基座归一薄壳：把方案里的基座与**现网代码基座**对齐（基座只读 + 缺失回插）。
+
+    `MAX_TEMPLATE_CHARS` 在**调用时**作为实参传入（与 `_module` / `pipeline_view` 同款：
+    它留在门面以便 patch）。
+    """
+    return _tpl_normalize_base_modules(modules, base_text, pipeline,
+                                       max_template_chars=MAX_TEMPLATE_CHARS,
+                                       canonical_modules=canonical_modules)
+
+
+def demote_edited_base_modules(modules: list[dict[str, Any]], base_text: str, pipeline: str) -> list[dict[str, Any]]:
+    """**保存路径**薄壳：把"被改过的基座模块"降级为 `legacy` 覆盖层（改动才真正生效）。"""
+    return _tpl_demote_edited_base_modules(modules, base_text, pipeline,
+                                           max_template_chars=MAX_TEMPLATE_CHARS)
+
+
+def _clean_pipelines(raw: Any, legacy: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    source=raw if isinstance(raw,dict) else {}
+    # 审计 P1-2(2026-09-13)：本次提交**没提到**的管线必须原样保留已存定义。
+    # 旧实现在这里用扁平文本 text_to_modules(..., "legacy") 重建 → source 从 base 变
+    # legacy → 下一轮 apply_module_layout 判定「无 base 模块」→ 把 base 整段前置，
+    # 于是「保存心法页」会让交易提示词 6452 → 12906 字符（×2.00，军规/JSON 契约各两遍）。
+    stored_pipelines = legacy.get("pipelines") if isinstance(legacy, dict) else None
+    stored_pipelines = stored_pipelines if isinstance(stored_pipelines, dict) else {}
+    result={}
+    for key in TEMPLATE_KEYS:
+        if isinstance(source.get(key), list):
+            modules = _inherit_module_tags(source[key], stored_pipelines.get(key))
+        elif isinstance(stored_pipelines.get(key), list) and stored_pipelines.get(key):
+            modules = stored_pipelines[key]
+        else:
+            modules=align_pipeline_sources(text_to_modules(str(legacy.get(key) or ""),"legacy"), key)
+        # ⚠️ 基座归**不在**这里做（2026-09-30 实测踩坑）：本条函数是**存储形状**的
+        # 清理器，`import_profile` / `save_library` / 扁平文本重建都经过它。若在此回插
+        # 基座，会把"扁平文本派生的管线"改写成"含基座模块的管线"，
+        # `pipelines[key][0]` 不再是用户那段文本、`resolve_profile` 也改走
+        # compile_modules 重建 ⇒ 用户写的扁平文本被丢弃
+        # （实测 test_custom_profile_roundtrip / test_import_* / test_legacy_storage_* 全红）。
+        # 正解：归一放在**渲染/预览边界**（`apply_module_layout` 与 `pipeline_view`），
+        # 那里拿到的 `base` 就是该管线真正的基座文本。见两处调用点的注释。
+        result[key]=[_module(item,i) for i,item in enumerate(modules[:MAX_MODULES_PER_PIPELINE]) if isinstance(item,dict)]
+    return result
+
+
+def _clean_profile(raw: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
+    now = _now()
+    result = copy.deepcopy(EMPTY_CUSTOM)
+    result.update({key: raw.get(key, result.get(key)) for key in result})
+    result["id"] = profile_id or str(raw.get("id") or f"custom-{uuid.uuid4().hex[:10]}")
+    result["name"] = str(result.get("name") or "自定义方案").strip()[:60]
+    result["description"] = str(result.get("description") or "").strip()[:240]
+    result["editable"] = True
+    result["enabled"] = bool(result.get("enabled", True))
+    result["editor_mode"] = str(raw.get("editor_mode") or ("advanced" if any(raw.get(k) for k in TEMPLATE_KEYS) else "simple"))
+    if result["editor_mode"] not in {"simple", "advanced", "modules"}:
+        result["editor_mode"] = "modules" if isinstance(raw.get("pipelines"), dict) else "simple"
+    policy = raw.get("simple_policy") if isinstance(raw.get("simple_policy"), dict) else {}
+    result["simple_policy"] = {
+        "strategy": str(policy.get("strategy") or "").strip()[:8000],
+        "review_focus": str(policy.get("review_focus") or "").strip()[:4000],
+        "participation": str(policy.get("participation") or "balanced"),
+        "evidence": str(policy.get("evidence") or "strict"),
+        "risk_budget": str(policy.get("risk_budget") or "middle"),
+    }
+    result["created_at"] = str(result.get("created_at") or now)
+    result["updated_at"] = str(result.get("updated_at") or now)
+    for key in TEMPLATE_KEYS:
+        result[key] = str(result.get(key) or "").strip()
+    if result["editor_mode"] == "simple" and not isinstance(raw.get("pipelines"), dict):
+        result["pipelines"] = {}
+    else:
+        result["pipelines"] = _clean_pipelines(raw.get("pipelines"), result)
+        if isinstance(raw.get("pipelines"), dict) or result["editor_mode"] == "modules":
+            for key in TEMPLATE_KEYS:
+                result[key] = compile_modules(result["pipelines"][key])
+        result["editor_mode"] = "modules"
+    return result
+
+
+def _migrate(raw: dict[str, Any]) -> dict[str, Any]:
+    if int(raw.get("version", 1)) >= 2 and isinstance(raw.get("profiles"), dict):
+        payload = _default(); payload.update(raw)
+        payload["profiles"] = {str(k): _clean_profile(v, str(k)) for k, v in raw.get("profiles", {}).items() if isinstance(v, dict)}
+        payload["revisions"] = list(raw.get("revisions", []))[-MAX_REVISIONS:]
+        return payload
+    custom = _clean_profile(raw.get("custom") or {}, "custom-default")
+    active_style = str(raw.get("active_style") or "allpattern_swing")
+    return {"version": 2, "active_profile_id": active_style if active_style in PRESETS else custom["id"], "profiles": {custom["id"]: custom}, "revisions": []}
+
+
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
+    """读一个 JSON 对象；**缺失/损坏一律返回 None**（不抛、不猜）。
+
+    「文件不在」在双文件模型里是**正常状态**（用户还没改过任何东西），
+    所以这里不能把它当异常处理 —— 与 `load_library` 的兜底语义一致。
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _profile_fingerprint(profile: dict[str, Any]) -> str:
+    """方案**内容**指纹，**忽略时间戳**。
+
+    用途：判定"用户到底改没改过这条方案"（见 `_is_user_owned`）。
+    必须忽略 `created_at`/`updated_at` —— 它们每次 `_clean_profile` 都会被刷新，
+    带上就等于"永远不相同"，纯净判定会失效（预设将永远收不到发版改进）。
+    """
+    comparable = {k: v for k, v in (profile or {}).items()
+                  if k not in ("created_at", "updated_at")}
+    blob = json.dumps(comparable, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _shipped_profiles(baseline: dict[str, Any]) -> dict[str, Any]:
+    """"出厂"方案的权威内容 = 代码预设 ⊕ 基线文件（**基线优先**）。
+
+    为什么基线优先：基线是发版交付的那份**完整**预设，而代码 `PRESETS` 只是
+    基线缺失时的兜底 —— 实测二者并不相同（`evolution_system` 基线 1049 字符、
+    兜底只有 92），所以基线在时必须盖住兜底。
+    """
+    shipped = {pid: _clean_profile(copy.deepcopy(PRESETS[pid]), pid) for pid in PRESETS}
+    # ⚠️ 基线侧**也必须 `_clean_profile`**：传进来的可能是文件原样的 dict，
+    # 而待判定那一侧（`save_library` 收到的 payload）已经规范化过。两边不同归
+    # ⇒ 指纹永远不同 ⇒ **纯净预设定被判成"用户改过"而落进本地**，
+    # 后果是把出厂基线永久钉死在旧版本上（发版改进再也进不来）。
+    for pid, prof in (baseline.get("profiles") or {}).items():
+        if isinstance(prof, dict):
+            shipped[str(pid)] = _clean_profile(copy.deepcopy(prof), str(pid))
+    return shipped
+
+
+def _is_user_owned(profile_id: str, profile: dict[str, Any],
+                   shipped: dict[str, Any]) -> bool:
+    """这条方案该不该落进**本地**文件？
+
+    只有两种情况该落：①基线里根本没有它（用户自建）；②基线里有、但内容与出厂不同
+    （用户改过）。**与出厂逐字相同的不落** —— 这正是"没改过的预设能自动跟随发版
+    改进"的实现：本地不留副本，读取时自然由基线供给。
+    """
+    if profile_id not in shipped:
+        return True
+    return _profile_fingerprint(profile) != _profile_fingerprint(shipped[profile_id])
+
+
+def _merge_libraries(baseline_raw: dict[str, Any] | None,
+                     local_raw: dict[str, Any] | None) -> dict[str, Any]:
+    """基线 ⊕ 本地（**本地优先**）。
+
+    - `profiles`：按 id 合并且本地覆盖基线；
+    - `active_profile_id`：本地显式设过才覆盖（否则沿用基线）；
+    - `revisions`：两边**按 id 去重**后合并（见下）。
+    """
+    baseline = _migrate(baseline_raw) if baseline_raw else _default()
+    if not local_raw:
+        return baseline
+    local = _migrate(local_raw)
+    merged = copy.deepcopy(baseline)
+    merged["profiles"].update(copy.deepcopy(local["profiles"]))
+    if local_raw.get("active_profile_id"):
+        merged["active_profile_id"] = local["active_profile_id"]
+    # 修订按 **id 去重**后合并：本地文件里存的是"合并后的历史"（save 时整体写入），
+    # 若这里只做简单相加，基线的旧修订会在每次 load 时被重新前置 ⇒ 历史无限膨胀。
+    seen: dict[str, dict[str, Any]] = {}
+    for item in [*(baseline.get("revisions") or []), *(local.get("revisions") or [])]:
+        if isinstance(item, dict) and item.get("id"):
+            seen[str(item["id"])] = item
+    if seen:
+        merged["revisions"] = list(seen.values())[-MAX_REVISIONS:]
+    return merged
+
+
+def load_library() -> dict[str, Any]:
+    """读方案库 = `BASELINE_FILE`（出厂基线）⊕ `LOCAL_FILE`（用户改动，本地优先）。
+
+    两个文件都在时以本地为准；本地不在（用户还没改过任何东西）时**就等于基线**，
+    行为与双文件改造前逐位相同。
+    """
+    payload = _merge_libraries(_read_json_dict(BASELINE_FILE), _read_json_dict(LOCAL_FILE))
+    active = str(payload.get("active_profile_id") or "allpattern_swing")
+    if active not in PRESETS and active not in payload["profiles"]:
+        active = "allpattern_swing"
+    payload["active_profile_id"] = active
+    # Backward compatibility for old API/tests.
+    payload["active_style"] = active if active in PRESETS else "custom"
+    payload["custom"] = copy.deepcopy(payload["profiles"].get(active) or payload["profiles"].get("custom-default") or EMPTY_CUSTOM)
+    return payload
+
+
+def _library_lock():
+    """跨进程互斥（审计 P2-6）：提示词方案库是 RMW 目标（管理页多次点击 / 导入 / 回滚 /
+    采集脚本都会 load→改→save）。优先用可重入的后端锁，退化为本地 flock。
+
+    ⚠️ 双文件模型（2026-09）后只锁 `LOCAL_FILE`：基线是**只读**的，没人跟它竞争；
+    真正需要串行化的是"读两侧 → 改 → 写本地"这个 RMW 循环本身。
+
+    兜底实现已移到 `scripts/local_lock.py`（结构优化阶段 4·B3 第四十八刀）——
+    原先两处脚本各手写一份**不可重入**的裸 flock，而调用方存在嵌套
+    （`mutate_instruments` → `save_instruments`），一旦走兜底分支会同线程自锁挂死。
+    """
+    try:
+        from astra_backend.file_locks import file_lock
+        return file_lock(LOCAL_FILE)
+    except Exception:
+        return local_file_lock(LOCAL_FILE)
+
+
+def _locked_library(fn):
+    """装饰器：整个 load→改→save 期间持锁（可重入，嵌套 save_library 不会自锁）。"""
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _library_lock():
+            return fn(*args, **kwargs)
+    return _wrapper
+
+
+@_locked_library
+def save_library(payload: dict[str, Any]) -> None:
+    # Accept the v1 shape used by older admin clients. If a caller changed only
+    # active_style/custom while active_profile_id still equals the persisted value,
+    # treat it as an intentional legacy update.
+    legacy_update = "profiles" not in payload
+    if not legacy_update and "active_style" in payload:
+        try:
+            persisted_active = load_library().get("active_profile_id", "stable")
+        except (OSError, json.JSONDecodeError, ValueError):
+            persisted_active = "stable"
+        requested_style = str(payload.get("active_style") or "stable")
+        mapped_active = requested_style if requested_style in PRESETS else "custom"
+        current_mapped = payload.get("active_profile_id") if payload.get("active_profile_id") in PRESETS else "custom"
+        legacy_update = payload.get("active_profile_id", "stable") == persisted_active and mapped_active != current_mapped
+    if legacy_update:
+        existing = load_library()
+        legacy_custom = copy.deepcopy(payload.get("custom") or existing.get("custom") or {})
+        if any(legacy_custom.get(key) for key in TEMPLATE_KEYS): legacy_custom["editor_mode"] = "advanced"
+        custom = _clean_profile(legacy_custom, "custom-default")
+        existing["profiles"][custom["id"]] = custom
+        style = str(payload.get("active_style") or "stable")
+        existing["active_profile_id"] = style if style in PRESETS else custom["id"]
+        payload = existing
+    normalized = _migrate(payload)
+    normalized.pop("active_style", None); normalized.pop("custom", None)
+    # ⚠️ 只写**本地**文件，且只写"真差异"（见 `_is_user_owned`）。
+    # 基线是出厂交付物，应用**永不写它** —— 写它就等于把用户改动塞回 git 跟踪的文件，
+    # 又会把工作区弄脏（那正是本次要消除的形态）。
+    shipped = _shipped_profiles(_read_json_dict(BASELINE_FILE) or {})
+    local = {
+        "version": 2,
+        "active_profile_id": normalized.get("active_profile_id", "stable"),
+        "profiles": {pid: prof for pid, prof in normalized["profiles"].items()
+                     if _is_user_owned(pid, prof, shipped)},
+        "revisions": list(normalized.get("revisions") or [])[-MAX_REVISIONS:],
+    }
+    _atomic_write(LOCAL_FILE, local)
+
+
+def resolve_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Compile ordered module pipelines while preserving V2 simple-profile compatibility."""
+    resolved = copy.deepcopy(profile)
+    if isinstance(resolved.get("pipelines"),dict) and any(resolved["pipelines"].get(key) for key in TEMPLATE_KEYS):
+        for key in TEMPLATE_KEYS: resolved[key]=compile_modules(resolved["pipelines"].get(key,[]))
+        return resolved
+    if resolved.get("editor_mode") != "simple": return resolved
+    policy = resolved.get("simple_policy") or {}; strategy = str(policy.get("strategy") or "").strip(); review = str(policy.get("review_focus") or "").strip()
+    participation = {"conservative":"稳健参与，证据不足时等待", "balanced":"均衡参与高质量机会", "active":"积极参与证据完整的趋势机会"}.get(policy.get("participation"), "均衡参与高质量机会")
+    evidence = {"strict":"要求多周期、动力学、能量与概率风险严格共振", "balanced":"允许轻微证据分歧但必须可解释", "trend":"趋势与动力学优先，风险异常仍等待"}.get(policy.get("evidence"), "要求多周期、动力学、能量与概率风险严格共振")
+    risk = {"low":"优先使用允许风险区间低位", "middle":"优先使用允许风险区间中位", "high":"强信号可使用允许风险区间高位但绝不突破硬上限"}.get(policy.get("risk_budget"), "优先使用允许风险区间中位")
+    resolved["trading_system"] = f"【用户策略偏好·简单模式】\n{participation}；{evidence}；{risk}。\n{strategy}".strip()
+    resolved["trading_user"] = ""
+    resolved["evolution_system"] = f"【用户复盘关注·简单模式】\n围绕用户策略检查执行一致性，不得修改 P0、OCO、JSON 契约或风险硬门禁。\n{review or strategy}".strip()
+    resolved["evolution_user"] = ""
+    return resolved
+
+
+def _canonical_locked_modules(pipeline: str) -> dict[str, str]:
+    """代码基座里**只读**模块的 `{标题: 逐字正文}`（当前 = 输出 JSON Schema）。
+
+    只读的判据是"由代码基座文本解析出来"，而不是方案里自称的 `locked` 字段 ——
+    否则用户把任意模块标个 `locked` 就能免检。
+    """
+    text = base_template_text(pipeline)
+    if not str(text or "").strip():
+        return {}
+    return {str(m["title"]): str(m["content"])
+            for m in text_to_modules(text, "base", locked=True)}
+
+
+def validate_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    name = str(profile.get("name") or "").strip()
+    if not 1 <= len(name) <= 60:
+        errors.append("方案名称长度必须为 1-60")
+    pipelines = profile.get("pipelines") if isinstance(profile.get("pipelines"), dict) else {}
+    module_total = 0
+    for pipeline, modules in pipelines.items():
+        if pipeline not in TEMPLATE_KEYS or not isinstance(modules, list):
+            errors.append(f"无效消息管线：{pipeline}")
+            continue
+        if len(modules) > MAX_MODULES_PER_PIPELINE:
+            errors.append(f"{pipeline} 模块数不得超过 {MAX_MODULES_PER_PIPELINE}")
+        seen = set()
+        for module in modules:
+            if not isinstance(module, dict):
+                errors.append(f"{pipeline} 包含无效模块对象")
+                continue
+            module_id = str(module.get("id") or "")
+            if not module_id or module_id in seen:
+                errors.append(f"{pipeline} 模块 ID 缺失或重复")
+            seen.add(module_id)
+            value = str(module.get("content") or "")
+            module_total += len(value)
+            if len(value) > MAX_TEMPLATE_CHARS:
+                errors.append(f"{pipeline}/{module.get('title', '模块')} 超过 {MAX_TEMPLATE_CHARS} 字符")
+            unknown = sorted(set(_VAR_RE.findall(value)) - ALLOWED_VARIABLES)
+            if unknown:
+                errors.append(f"{pipeline}/{module.get('title', '模块')} 包含未知变量：{', '.join(unknown)}")
+            if module.get("source") == "base" and module.get("locked"):
+                continue
+            for hit in scan_forbidden(value):
+                errors.append(f"{pipeline}/{module.get('title', '模块')}：{hit}")
+        # ── 只读契约模块的**强制一致性**（2026-09-30 重构）────────────────────
+        # 代码基座（= 输出 JSON Schema）在工坊里是只读的：内容不许改、不许禁用。
+        #
+        # ⚠️ 判据是「**标题命中代码基座**」，不是方案里自称的 `locked` 字段 ——
+        # 后者在旧数据里另有含义（"跳过 scan_forbidden 扫描"的豁免位，旧 PRESETS 的
+        # trading_user 插槽载体就带着 locked=True），拿它当只读判据会误伤历史方案。
+        # 代码基座是唯一事实源：命中即只读。
+        #
+        # ⚠️ **缺席不算错**：`normalize_base_modules` 在渲染边界会把缺登记的基座模块
+        # 按规范顺序回插，所以"方案里没有它"最终仍会出现在实发提示词里。若这里要求
+        # 必须提交，新建方案（POST /prompt-profiles）与所有只关心业务模块的导入
+        # 都会被一刀拒绝 —— 那是把"防篡改"做成了"防使用"。
+        #
+        # 为什么必须在**保存路径**校验而不是只靠前端禁用控件：前端只是"不给你点"，
+        # 直接调 API、导入方案、回滚历史都能绕过。Schema 是模型输出的机器契约 ——
+        # 改一个字段名就可能让整轮决策解析失败，这类改动必须在写盘前 fail-closed。
+        canonical_locked = _canonical_locked_modules(pipeline)
+        if canonical_locked:
+            for module in modules:
+                if not isinstance(module, dict):
+                    continue
+                title = str(module.get("title") or "")
+                if title not in canonical_locked:
+                    continue
+                if str(module.get("content") or "") != canonical_locked[title]:
+                    errors.append(
+                        f"{pipeline}/「{title}」是**只读**契约模块（输出 JSON Schema），"
+                        f"内容不可修改；如需调整输出契约请改代码并走发版")
+                if not module.get("enabled", True):
+                    errors.append(f"{pipeline}/「{title}」是只读契约模块，不得禁用")
+    policy = profile.get("simple_policy") if isinstance(profile.get("simple_policy"), dict) else {}
+    if profile.get("editor_mode") == "simple":
+        strategy = str(policy.get("strategy") or "")
+        review = str(policy.get("review_focus") or "")
+        if not strategy.strip():
+            warnings.append("简单策略说明为空，将仅使用选择项和系统基础提示词")
+        for label, value in (("策略说明", strategy), ("复盘重点", review)):
+            unknown = sorted(set(_VAR_RE.findall(value)) - ALLOWED_VARIABLES)
+            if unknown:
+                errors.append(f"{label} 包含未知变量：{', '.join(unknown)}")
+            for hit in scan_forbidden(value):
+                errors.append(f"{label}：{hit}")
+        if policy.get("participation", "balanced") not in {"conservative", "balanced", "active"}:
+            errors.append("参与风格无效")
+        if policy.get("evidence", "strict") not in {"strict", "balanced", "trend"}:
+            errors.append("证据要求无效")
+        if policy.get("risk_budget", "middle") not in {"low", "middle", "high"}:
+            errors.append("风险预算无效")
+    total = 0
+    for key in TEMPLATE_KEYS:
+        value = "" if pipelines else str(profile.get(key) or "")
+        total += len(value)
+        if len(value) > MAX_TEMPLATE_CHARS:
+            errors.append(f"{key} 超过 {MAX_TEMPLATE_CHARS} 字符")
+        unknown = sorted(set(_VAR_RE.findall(value)) - ALLOWED_VARIABLES)
+        if unknown:
+            errors.append(f"{key} 包含未知变量：{', '.join(unknown)}")
+        for hit in scan_forbidden(value):
+            errors.append(f"{key}：{hit}")
+    total_chars = module_total if pipelines else total
+    if total_chars > MAX_PROFILE_CHARS:
+        errors.append(f"四类模板合计不得超过 {MAX_PROFILE_CHARS} 字符")
+    if not total and not pipelines and profile.get("editor_mode") != "simple":
+        warnings.append("当前方案四类附加模板均为空，将只使用基础提示词")
+    return {"valid": not errors, "errors": list(dict.fromkeys(errors)), "warnings": warnings, "characters": total_chars}
+
+
+def _revision(profile: dict[str, Any], action: str, note: str = "") -> dict[str, Any]:
+    return {"id": f"rev-{uuid.uuid4().hex[:12]}", "profile_id": profile["id"], "action": action, "note": str(note)[:240], "created_at": _now(), "snapshot": copy.deepcopy(profile)}
+
+
+@_locked_library
+def create_profile(name: str, description: str = "", source_id: str = "allpattern_swing", note: str = "创建方案") -> dict[str, Any]:
+    library = load_library()
+    source = get_profile(source_id)
+    profile_data = copy.deepcopy(source)
+    profile_data.update({
+        "id": f"custom-{uuid.uuid4().hex[:10]}",
+        "name": name,
+        "description": description,
+        "created_at": _now(),
+        "updated_at": _now(),
+    })
+    profile = _clean_profile(profile_data)
+    check = validate_profile(profile)
+    if not check["valid"]:
+        raise ValueError("；".join(check["errors"]))
+    library["profiles"][profile["id"]] = profile
+    library["revisions"].append(_revision(profile, "create", note))
+    library["revisions"] = library["revisions"][-MAX_REVISIONS:]
+    save_library(library)
+    return profile
+
+
+@_locked_library
+def update_profile(profile_id: str, changes: dict[str, Any], note: str = "更新方案") -> dict[str, Any]:
+    library = load_library()
+    if profile_id in PRESETS and profile_id not in library["profiles"]:
+        # ⚠️ 必须走 `_clean_profile`（与 `get_profile` 同款）：出厂预设是**裸结构**，
+        # 未经读路径归一。若这里直接拿裸预设当 `current`，下面的「未提交管线逐字节
+        # 不变」硬闸会把两侧不同形（裸 vs 归一）判成"静默改写其他管线"当场报错
+        # （2026-09-30 实测：保存 trading_system 时被 trading_user 拦下）。
+        current = _clean_profile(copy.deepcopy(PRESETS[profile_id]), profile_id)
+        current["editable"] = True
+    elif profile_id in library["profiles"]:
+        current = library["profiles"][profile_id]
+    else:
+        raise ValueError("提示词方案不存在")
+    accepted = {k: v for k, v in changes.items() if k in {"name", "description", "enabled", "editor_mode", "simple_policy", "pipelines", *TEMPLATE_KEYS}}
+    # 审计 P1-2 关键修复：调用方可以只提交一条管线（如心法页只提交 evolution_system），
+    # 此时必须与**已存**管线逐键合并后再清理；否则未提到的管线会被扁平文本重建成
+    # legacy 模块（丢掉 source=base 标签），下一轮 apply_module_layout 判定「无 base 模块」
+    # 就把整段 base 前置 → 该管线提示词翻倍（实测保存心法页后交易提示词 ×2.00）。
+    submitted_keys = {k for k in TEMPLATE_KEYS if isinstance((changes.get("pipelines") or {}).get(k), list)}
+    if submitted_keys:
+        stored_pipelines = current.get("pipelines") if isinstance(current.get("pipelines"), dict) else {}
+        merged = copy.deepcopy(stored_pipelines)
+        for key in submitted_keys:
+            # 提交里漏了 source/locked 时从已存同 id/同标题模块继承（见 _inherit_module_tags）
+            submitted = _inherit_module_tags(accepted["pipelines"][key], stored_pipelines.get(key))
+            # 基座只读 + 改动落覆盖层（2026-09-30）：读路径的 normalize_base_modules 会把
+            # source=="base" 的内容**无条件治愈成现网基座**，故用户改过的基座必须先在这里
+            # 降级为 legacy；否则改动会在下一次读到时被静默抹掉（问题只是从"运行期丢弃"
+            # 换成"读路径抹除"）。逐字相同/带独有插槽的不降级，照旧跟随发版。
+            merged[key] = demote_edited_base_modules(submitted, _base_text_resolver(key), key)
+        accepted["pipelines"] = merged
+    flat_updates = [key for key in TEMPLATE_KEYS if key in accepted]
+    submitted_keys |= set(flat_updates)
+    if "pipelines" not in accepted and flat_updates:
+        accepted["pipelines"] = copy.deepcopy(current.get("pipelines") or {})
+        for key in flat_updates:
+            # 批5：不再无条件标 legacy——与基座逐字相同的模块保留 source=base，
+            # 否则下一次渲染会把基座整段前置（提示词翻倍）。
+            accepted["pipelines"][key] = align_pipeline_sources(
+                text_to_modules(str(accepted[key] or ""), "legacy"), key)
+        accepted["editor_mode"] = "modules"
+    elif "editor_mode" not in accepted and any(str(accepted.get(key) or "").strip() for key in TEMPLATE_KEYS): accepted["editor_mode"] = "advanced"
+    updated = _clean_profile({**current, **accepted, "updated_at": _now()}, profile_id)
+    check = validate_profile(updated)
+    if not check["valid"]: raise ValueError("；".join(check["errors"]))
+    # 硬闸（审计 P1-2）：本次没提交的管线，保存后渲染文本必须逐字节不变——
+    # 任何「保存 A 页把 B 管线改了」都说明重建路径又复活了（旧实现在此把 B 管线
+    # 全部降级成 legacy，下一轮布局就把 base 前置导致整段翻倍）。
+    # submitted_keys 取自**原始请求**（上面的 merge 已把四条键补齐，不能拿合并后的判）。
+    for key in TEMPLATE_KEYS:
+        if key in submitted_keys: continue
+        before = compile_modules((current.get("pipelines") or {}).get(key) or [])
+        after = compile_modules((updated.get("pipelines") or {}).get(key) or [])
+        if before.strip() != after.strip():
+            raise ValueError(f"内部一致性错误：本次未提交 {key}，但其内容在保存过程中被改变（禁止静默改写其他管线）")
+    library["profiles"][profile_id] = updated
+    library["revisions"].append(_revision(updated, "update", note))
+    library["revisions"] = library["revisions"][-MAX_REVISIONS:]
+    save_library(library)
+    return updated
+
+
+@_locked_library
+def delete_profile(profile_id: str) -> None:
+    if profile_id in PRESETS:
+        raise ValueError("内置预设不可删除")
+    library = load_library()
+    if profile_id == library["active_profile_id"]:
+        raise ValueError("当前启用方案不能删除，请先切换方案")
+    if profile_id in library["profiles"]:
+        del library["profiles"][profile_id]
+        save_library(library)
+    else:
+        raise ValueError("提示词方案不存在")
+
+
+@_locked_library
+def activate_profile(profile_id: str) -> dict[str, Any]:
+    library = load_library()
+    profile = get_profile(profile_id)
+    if not profile.get("enabled", True): raise ValueError("该方案已停用")
+    library["active_profile_id"] = profile_id
+    save_library(library)
+    return profile
+
+
+def get_profile(profile_id: str) -> dict[str, Any]:
+    library = load_library()
+    if profile_id in library["profiles"]:
+        return copy.deepcopy(library["profiles"][profile_id])
+    if profile_id in PRESETS:
+        preset = _clean_profile(copy.deepcopy(PRESETS[profile_id]), profile_id)
+        preset["editable"] = True
+        return preset
+    raise ValueError("提示词方案不存在")
+
+
+def profile_history(profile_id: str) -> list[dict[str, Any]]:
+    return [copy.deepcopy(x) for x in reversed(load_library()["revisions"]) if x.get("profile_id") == profile_id]
+
+
+@_locked_library
+def rollback_profile(profile_id: str, revision_id: str) -> dict[str, Any]:
+    library = load_library()
+    revision = next((x for x in library["revisions"] if x.get("id") == revision_id and x.get("profile_id") == profile_id), None)
+    if not revision:
+        raise ValueError("历史版本不存在")
+    restored = _clean_profile({**revision["snapshot"], "updated_at": _now()}, profile_id)
+    check = validate_profile(restored)
+    if not check["valid"]:
+        raise ValueError("；".join(check["errors"]))
+    library["profiles"][profile_id] = restored
+    library["revisions"].append(_revision(restored, "rollback", f"回滚到 {revision_id}"))
+    library["revisions"] = library["revisions"][-MAX_REVISIONS:]
+    save_library(library)
+    return restored
+
+
+def export_profile(profile_id: str) -> dict[str, Any]:
+    """Self-describing profile export: one JSON file is enough to restore an
+    equivalent profile on any system of the same version, including the list of
+    template variables the file is allowed to reference."""
+    profile = get_profile(profile_id)
+    payload = {k: profile.get(k) for k in ("name", "description", "editor_mode", "pipelines", "simple_policy", *TEMPLATE_KEYS)}
+    return {
+        "format": EXPORT_FORMAT,
+        "version": EXPORT_VERSION,
+        "exported_at": _now(),
+        "profile_id": profile_id,
+        "profile": payload,
+        "variables": copy.deepcopy(TEMPLATE_VARIABLES_METADATA),
+        "allowed_variables": sorted(ALLOWED_VARIABLES),
+    }
+
+
+def _normalize_import_source(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Accept every shape users actually hold on disk and return (source, origin).
+
+    A) standard wrapper ``{"format": "astra-prompt-profile", "profile": {...}}`` (v1..v4)
+    B) whole-library export ``{"version": 2, "active_profile_id": ..., "profiles": {...}}``
+    C) bare profile object (carries ``pipelines`` or any flat template key)
+    """
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError(_IMPORT_FORMAT_HINT)
+    if payload.get("format") == EXPORT_FORMAT and isinstance(payload.get("profile"), dict):
+        return payload["profile"], "wrapped"
+    if isinstance(payload.get("profiles"), dict) and payload["profiles"]:
+        profiles = payload["profiles"]
+        active_id = str(payload.get("active_profile_id") or payload.get("active_style") or "")
+        source = profiles.get(active_id)
+        if not isinstance(source, dict):
+            source = next((v for v in profiles.values() if isinstance(v, dict)), None)
+        if not isinstance(source, dict):
+            raise ValueError(_IMPORT_FORMAT_HINT)
+        return source, "library"
+    if "format" not in payload and ("pipelines" in payload or any(key in payload for key in TEMPLATE_KEYS)):
+        return payload, "bare"
+    raise ValueError(_IMPORT_FORMAT_HINT)
+
+
+def _unknown_variable_errors(errors: list[str]) -> list[str]:
+    return [item for item in errors if "未知变量" in item]
+
+
+@_locked_library
+def import_profile(payload: dict[str, Any], name_override: str = "") -> dict[str, Any]:
+    source, origin = _normalize_import_source(payload)
+    library = load_library()
+    profile_id = f"custom-{uuid.uuid4().hex[:10]}"
+    profile_data = copy.deepcopy(source)
+    profile_data["id"] = profile_id
+    original_name = str(profile_data.get("name") or "").strip()
+    if name_override:
+        profile_data["name"] = name_override
+    elif original_name:
+        profile_data["name"] = f"{original_name}（导入）"[:60]
+    else:
+        profile_data["name"] = "导入方案"
+    profile_data["created_at"] = _now()
+    profile_data["updated_at"] = _now()
+    profile = _clean_profile(profile_data, profile_id)
+    check = validate_profile(profile)
+    if not check["valid"]:
+        unknown = _unknown_variable_errors(check["errors"])
+        if unknown:
+            raise ValueError("导入文件包含未知变量，请对照导出文件中的 allowed_variables 清单修正：\n- " + "\n- ".join(unknown))
+        raise ValueError("；".join(check["errors"]))
+    library["profiles"][profile["id"]] = profile
+    origin_label = {"wrapped": "标准导出包", "library": "整库导出文件", "bare": "裸方案对象"}.get(origin, "未知来源")
+    library["revisions"].append(_revision(profile, "import", f"导入方案（{origin_label}）"))
+    library["revisions"] = library["revisions"][-MAX_REVISIONS:]
+    save_library(library)
+    return profile
+
+
+def _import_with_templates(source: dict[str, Any], name_override: str) -> dict[str, Any]:
+    return import_profile({"format": EXPORT_FORMAT, "version": EXPORT_VERSION, "profile": source}, name_override)
+
+
+def active_profile() -> dict[str, Any]:
+    return resolve_profile(get_profile(load_library()["active_profile_id"]))
+
+
+# Backward-compatible aliases for policy snapshot & external modules
+load_active_profile = active_profile
+load_prompt_config = load_library
+save_prompt_config = save_library
+
+
+def all_profiles() -> list[dict[str, Any]]:
+    library = load_library()
+    profiles_map = copy.deepcopy(library["profiles"])
+    result = []
+    for pid in ("allpattern_swing",):
+        if pid in profiles_map:
+            result.append(profiles_map.pop(pid))
+        elif pid in PRESETS:
+            preset = _clean_profile(copy.deepcopy(PRESETS[pid]), pid)
+            preset["editable"] = True
+            result.append(preset)
+    result.extend(profiles_map.values())
+    return result
+
+
+def render_variables(text: str, context: dict[str, Any] | None = None) -> str:
+    """Pure, single-pass substitution; never fetch account, news or memory data.
+
+    Missing context means template preview. An explicit mapping means final
+    rendering; unavailable inputs are markers, not evidence of an empty account.
+    Replacement values are opaque and are never recursively interpreted.
+    """
+    if context is None:
+        return text or ""
+    values = {"timezone": "Asia/Shanghai", **context}
+
+    def replace(match: re.Match) -> str:
+        key = match.group(1)
+        if key not in ALLOWED_VARIABLES:
+            return f"[UNKNOWN_VARIABLE:{key}]"
+        if key not in values or values[key] is None:
+            return f"[MISSING_CONTEXT:{key}]"
+        return str(values[key])
+
+    return _VAR_RE.sub(replace, text or "")
+
+
+def _trading_user_parent_groups(base_modules: list[dict[str, Any]], layout_titles: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """Associate nested live-value modules with the preceding editor-visible section."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    current_parent = ""
+    for module in base_modules:
+        title = module["title"]
+        if title in layout_titles:
+            current_parent = title
+            groups.setdefault(title, []).append(module)
+        elif current_parent:
+            groups[current_parent].append(module)
+    return groups
+
+
+def apply_module_layout(base: str, profile: dict[str, Any], pipeline: str, label: str, context: dict[str, Any] | None = None) -> str:
+    """Build a real message from base sections plus ordered profile modules.
+
+    Modules whose source is ``base`` reference the live base section by id; custom
+    and legacy modules carry editable content. Locked base modules stay visible.
+    Trading-user runtime sections may contain many nested ``【...】`` labels. Those
+    live values are merged back into their parent editor slot instead of being
+    appended out of order or replaced by static placeholder text.
+    Supports variable placeholders such as {{news_intelligence}}, {{trading_memory}},
+    {{market_matrix}}, {{account_positions}}, etc.
+    """
+    base_modules = base_template_modules(base, pipeline)
+    layout = ((profile.get("pipelines") or {}).get(pipeline) if isinstance(profile.get("pipelines"), dict) else None)
+    # 基座归一（2026-09-30）：把方案里的基座与**本条 base** 对齐后再编排。
+    # 这是"工坊所见 = 实发所见"的**渲染侧**保证：
+    #   · 少了基座登记 ⇒ 按规范顺序回插（不再走下面那条"整段基座前置"的兜底，
+    #     也就不会让工坊看不到整段系统提示词、不会让排序/启停对那几条管线失效）；
+    #   · 陈旧基座快照 ⇒ 治愈为本条 base 的正文（否则工坊显示存档、运行期用现网）。
+    # 放在渲染边界而非存储清理器里：`base` 在这里才是该管线**真正的**基座文本。
+    if isinstance(layout, list):
+        layout = normalize_base_modules(layout, base, pipeline, canonical_modules=base_modules)
+    if not isinstance(layout, list) or not any(item.get("source") == "base" for item in layout):
+        custom = layout if isinstance(layout, list) else text_to_modules(str(profile.get(pipeline) or ""), "custom")
+        return render_variables(compile_modules(base_modules + custom), context)
+
+    base_by_title = {item["title"]: item for item in base_modules}
+    layout_titles = {str(item.get("title") or "") for item in layout if item.get("source") == "base"}
+    runtime_groups = _trading_user_parent_groups(base_modules, layout_titles) if pipeline == "trading_user" else {}
+    output: list[dict[str, Any]] = []
+    matched: set[str] = set()
+
+    for item in layout:
+        if item.get("source") != "base":
+            if item.get("enabled", True):
+                content = str(item.get("content") or "")
+                output.append({**item, "content": content})
+            continue
+
+        title = str(item.get("title") or "")
+        live = base_by_title.get(title)
+        if not live:
+            if item.get("enabled", True):
+                content = str(item.get("content") or "").strip()
+                if content:
+                    output.append({**item, "content": content})
+            continue
+
+        group = runtime_groups.get(title, [live])
+        matched.update(module["title"] for module in group)
+        if not item.get("enabled", True):
+            continue
+
+        if pipeline == "trading_user":
+            # ⚠️ 这条"内容不含 {{变量}} 就用基座组"的规则**刻意保留**（2026-09-30 复核）：
+            # 它当初被怀疑是"工坊改动没生效"的元凶，但真正的元凶是**上游**缺少基座登记与
+            # 保存路径不落覆盖层。本规则本身是必需的：`trading_user` 的基座是
+            # `scripts/brain/prompt.py` 逐周期生成的 f-string，一个编辑器可见分节下面
+            # 可能挂着若干**嵌套**的实时值分节（`_trading_user_parent_groups` 把它们并进
+            # `group`）；只有"这一段就是插槽载体"时才该用 `raw_content`，否则会丢掉那些
+            # 嵌套实时值。曾试过改成"存档内容 != 基座组 ⇒ 用存档内容"，
+            # 那会让带嵌套分节的父节只剩父节正文（实测会丢实时值），故**不可**这样改。
+            #
+            # 至于"用户改了这段却没生效"：现在由**保存路径** `demote_edited_base_modules`
+            # 把改动降级为 `legacy`（见上面 1281 分支：非 base 项按自己的正文发出）⇒
+            # 改动照常到达模型，且与本规则不冲突。
+            raw_content = str(item.get("content") or "")
+            if _VAR_RE.search(raw_content):
+                content = raw_content
+            else:
+                content = compile_modules(group)
+        elif any(token in title for token in ("三重滤网裁决协议", "开仓与价格几何")):
+            content = live["content"]
+        else:
+            content = str(item.get("content") if item.get("content") is not None else live["content"])
+        output.append({**live, "content": content})
+
+    # Fail closed: only for trading_user to preserve live runtime sections
+    if pipeline == "trading_user":
+        output.extend(module for module in base_modules if module["title"] not in matched)
+
+    return render_variables(compile_modules(output), context)
+
+
+def pipeline_view(base: str, profile: dict[str, Any], pipeline: str) -> list[dict[str, Any]]:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_pipeline_view(base, profile, pipeline,
+                              max_template_chars=MAX_TEMPLATE_CHARS,
+                              base_text_resolver=_base_text_resolver)
+
+
+def append_layer(base: str, layer: str, label: str) -> str:
+    """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
+    return _tpl_append_layer(base, layer, label)

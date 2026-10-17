@@ -1,0 +1,89 @@
+/* ASTRA 新设计系统入口：Tailwind 4 + tokens + base + components
+   注意：components/compat 必须进 @layer，否则层外样式优先级高于 utilities，
+   会压掉 md:hidden / hidden 等响应式工具类（汉堡按钮 PC 端误显示事故根因） */
+@import 'tailwindcss';
+@import './tokens.css';
+@import './base.css' layer(base);
+@import './components.css' layer(components);
+@import './compat.css' layer(components);
+
+/* =========================================================================
+   批 18 · 把 Tailwind 的圆角工具类钉到本仓的半径刻度上
+   -------------------------------------------------------------------------
+   缺陷（实测）：令牌声明的半径刻度只有 5 档 —— 4 / 8 / 10 / 16 / 100（胶囊），
+   但页面大量使用 `rounded-xs / sm / md / lg / xl`，Tailwind 默认值是
+   2 / 4 / 6 / 8 / 12px，于是同一屏里混进了 2、6、12px 三种「刻度外」圆角
+   （仅大盘页 6px 就出现 19 次，与 .btn 的 8px、.card 的 10px 打架）。
+
+   修法：在 @theme 里重声明 Tailwind 的 --radius-*，让每个工具类都落在既有
+   刻度上。**不新造档位**，刻度仍是 4 / 8 / 10 / 12 / 16 / 100。
+   ========================================================================= */
+@theme {
+  --radius-xs: 6px;   /* 微件：徽章 / 芯片 / logo 方块 / 滚动条 */
+  --radius-sm: 6px;
+  --radius-md: 10px;  /* 控件：按钮 / 输入框 */
+  --radius-lg: 14px;  /* 卡片 */
+  --radius-xl: 16px;  /* 浮层 */
+  --radius-2xl: 18px; /* 面板 */
+  --radius-3xl: 22px;
+  --radius-full: 100px;
+}
+
+/* =========================================================================
+   批 28 · 补齐小字号档位的工具类（`text-4xs` / `text-3xs` / `text-2xs`）
+   -------------------------------------------------------------------------
+   缺陷（实测）：模板里 385 个节点写着 `text-3xs`、29 个写着 `text-2xs`，
+   但 @theme 从未声明这三个档位 → Tailwind **一个都没生成**，
+   这些节点实际继承父级 12px。公开页（大盘/因子/舆情/推演/台账/文档）
+   因此普遍比后台"大 1.5px"，同一类小字两种尺寸。
+
+   修法：声明档位让工具类生成。`inline` 让 Tailwind 把值原样内联为
+   `var(--text-3xs)`，于是**运行时取值仍来自 tokens.css**（唯一真源），
+   这里不复制任何数字；`--text-*-‑line-height` 另给，避免 line-height
+   解析出 `var(--text-3xs--line-height)` 空引用。
+   ========================================================================= */
+@theme inline {
+  --text-4xs: var(--text-4xs);
+  --text-4xs--line-height: 1.45;
+  --text-3xs: var(--text-3xs);
+  --text-3xs--line-height: 1.45;
+  --text-2xs: var(--text-2xs);
+  --text-2xs--line-height: 1.45;
+  /* `md` 档 Tailwind 默认主题里没有（默认只有 xs/sm/base/lg/xl…），
+     而模型连接的抽屉标题写着 `text-md` → 那个 h3 此前一直继承父级字号。
+     同一张对差集表里查出来的，一并补上。 */
+  --text-md: var(--text-md);
+  --text-md--line-height: 1.5;
+  --text-5xl: var(--text-5xl);
+  --text-5xl--line-height: 1.1;
+  --text-6xl: var(--text-6xl);
+  --text-6xl--line-height: 1.05;
+  --text-7xl: var(--text-7xl);
+  --text-7xl--line-height: 1.02;
+}
+
+/* =========================================================================
+   批 37 · 补齐行高工具类（`leading-body` / `leading-dense`）
+   -------------------------------------------------------------------------
+   **与批 28 同源的静默失效**：tokens.css 定义了 `--leading-body: 1.6`（160% 行高）
+   与 `--leading-dense: 1.45`（表格行专用），但 @theme 从未声明这一档 →
+   `.leading-body` / `.leading-dense` **一条规则都没生成**。
+
+   实测：编译产物里 `.leading-tight`/`.leading-snug`（Tailwind 自带）各有 1 条，
+   而 `.leading-body` 的选择器出现 **0 次**；模板里却有 **92 处**写着这个类名
+   （46 处原有 + 批 37 把 `leading-relaxed` 归并进来的 46 处），
+   它们全部在"继承父级行高"——同一段副标题落在卡片里是 1.6、落在表格里是 1.45，
+   取决于祖先，而不是取决于它自己写的类（典型症状：明明写了 `leading-body`
+   却在密集表格里被压成 1.45）。
+
+   注意区分：`--leading-dense` 此前**只**在 CSS 里以 `var()` 消费
+   （DecisionsPage / EvolutionPage 各 1 处，本来就生效），没有类名用法；
+   一并声明只是让这一档以后能当类名用。
+
+   修法同批 28：在这里声明档位让工具类生成，值仍是 `var(--leading-*)`，
+   运行时取值依旧来自 tokens.css（唯一真源）。
+   ========================================================================= */
+@theme inline {
+  --leading-body: var(--leading-body);
+  --leading-dense: var(--leading-dense);
+}

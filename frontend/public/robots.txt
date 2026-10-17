@@ -1,0 +1,20 @@
+﻿User-agent: *
+Allow: /
+Allow: /trading
+Allow: /factors
+Allow: /news
+Allow: /lab
+Allow: /history
+Allow: /docs
+Allow: /images/
+Allow: /assets/
+Disallow: /admin/
+Disallow: /admin/*
+Disallow: /api/
+Disallow: /api/*
+
+# Host
+Host: https://www.astraquant.tech
+
+# Sitemaps
+Sitemap: https://www.astraquant.tech/sitemap.xml

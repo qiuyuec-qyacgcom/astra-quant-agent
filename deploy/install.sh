@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON_BIN=${PYTHON_BIN:-python3}
+VENV_DIR=${VENV_DIR:-$ROOT/.venv}
+
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || { echo "ERROR: Python 3 is required" >&2; exit 1; }
+
+# OKX connectivity is V5 API Key direct signing only — no Node.js, no npm,
+# no CLI binary. Market data is zero-process REST (www.okx.com -> aws.okx.com).
+if ! "$PYTHON_BIN" -m venv "$VENV_DIR" 2>/dev/null; then
+  echo "❌ ERROR: 创建 Python 虚拟环境 ($VENV_DIR) 失败。" >&2
+  echo "   常见原因：系统缺少 python3-venv 模块（尤其在全新 Ubuntu / Debian 系统上）。" >&2
+  echo "   请先执行以下命令安装基础组件后重试：" >&2
+  echo "     sudo apt update && sudo apt install -y python3-venv python3-pip git" >&2
+  exit 1
+fi
+"$VENV_DIR/bin/pip" install --upgrade pip --quiet
+"$VENV_DIR/bin/pip" install -r "$ROOT/requirements.txt"
+
+if [ ! -f "$ROOT/.env" ]; then
+  cp "$ROOT/env.example" "$ROOT/.env"
+fi
+chmod 600 "$ROOT/.env"
+
+# Initialize default instrument pool if not present (prevents untrusted pool blocking entry)
+if [ ! -f "$ROOT/data/instrument_pool.json" ]; then
+  mkdir -p "$ROOT/data"
+  "$VENV_DIR/bin/python" -c "from scripts.instrument_pool import save_instruments, DEFAULT_INSTRUMENTS; save_instruments(DEFAULT_INSTRUMENTS)" 2>/dev/null || true
+fi
+
+cat <<EOF
+
+ASTRA dependencies installed.
+Next:
+  1. Edit $ROOT/.env and keep ASTRA_OKX_ENV=demo initially.
+  2. Connect OKX with V5 API Keys (the only method):
+     - Recommended: open /admin, account page, fill the DEMO (or LIVE) trio
+       API Key / Secret Key / Passphrase. Stored Fernet-encrypted; blank fields
+       keep existing values.
+     - Or set OKX_DEMO_* / OKX_LIVE_* in .env directly.
+  3. Until a complete key trio exists for the selected environment the system
+     reports NOT READY and refuses all trading. Never copy another user's
+     credentials or commit them.
+EOF
