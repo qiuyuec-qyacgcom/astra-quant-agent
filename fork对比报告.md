@@ -41,21 +41,21 @@
 
 **本项目已合并**：`live_preflight.py`（249 行只读体检脚本，只用 GET 接口核验、绝不下一单）。
 
-### 3. LanQin996 — 61 提交（部分合并 ⚠️）
+### 3. LanQin996 — 61 提交（大部分已合并 ✅）
 方向：**交易复盘分析包 + LLM 可靠性 + Windows 兼容 + Docker/CI**
 
 | 主题 | 代表提交 | 价值 |
 |---|---|---|
 | 交易复盘/分析 | `4dd55457` 新增交易复盘与完整分析包、`20b8c8a9` 后台分析包导出、`71a8a68d` 独立分析归档 | 高 |
-| LLM 可靠性 | `44f59ca7` 超时与故障回退、`eeb11b98` 流式看门狗+Qwen3 直恢复、`0599df62` 思考看门狗 | 中高 |
+| LLM 可靠性 | `44f59ca7` 超时与故障回退、`eeb11b98` 流式看门狗+Qwen3 直恢复、`0599df62` 思考看门狗 | **中高（已合并）** |
 | 行情防伪造 | `9a1444a4` K线限流重试、`5d9aaebb` 只用已确认K线、`289665f1` 置信度显示 | **高（已合并）** |
 | 交易下单量化 | `90ca616e` 下单数量量化与规格同步、`19409400` 保留小数 OCO 数量 | 中 |
 | Windows 兼容 | `a07783c9` 跨平台文件锁、`8d1874e0` 进程识别与导入 | 低（本项目 Linux 部署） |
 | Docker/CI | `cbd56318` 镜像打包 Node+OKX CLI、`00af0e1d` 推 GHCR | 低 |
 
-**本项目已合并**：行情防伪造（`market_data_service.py` 限速 0.12s + 重试 3 次指数退避、`candle_data.py` 新增 `closed_only` 只返回已收盘 K 线）；**交易复盘分析包**（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync` 8 个后端模块 + 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁，默认开启、测试态可退化为 no-op）。
+**本项目已合并**：行情防伪造（`market_data_service.py` 限速 0.12s + 重试 3 次指数退避、`candle_data.py` 新增 `closed_only` 只返回已收盘 K 线）；**交易复盘分析包**（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync` 8 个后端模块 + 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁，默认开启、测试态可退化为 no-op）；**LLM 流式看门狗 + Qwen3 直恢复**（`policy.py` 响应头看门狗 45s / 仅思考看门狗 60s / Qwen3 直恢复 60s，均可经 `.env` 调参、0 关闭，`transport.py` + `call.py` 落地超时切换与关闭思考直答重试）。
 
-**未合并**：LLM 流式看门狗 + Qwen3 恢复、Windows 兼容。
+**未合并**：Windows 兼容（本项目 Linux 部署，无必要）。
 
 ### 4. Jonoka — 65 提交（未合并 ❌）
 方向：**纯部署/CI/发布治理，几乎无交易功能**
@@ -113,18 +113,17 @@
 |---|---|---|---|
 | **Perryong** | 无 | — | 忽略 |
 | **Dreamqqq** | 实盘体检脚本 | ✅ 已合并 | 完成 |
-| **LanQin996** | 行情防伪造、复盘分析、LLM 可靠性 | ✅ 已合并（防伪造 + 复盘分析包） | LLM 看门狗可后续评估 |
+| **LanQin996** | 行情防伪造、复盘分析、LLM 可靠性 | ✅ 已合并（防伪造 + 复盘分析包 + LLM 看门狗） | 完成 |
 | **Jonoka** | 部署/CI 治理 | ❌ 未合并 | 不建议（纯运维，交易零贡献） |
 | **cnlimiter** | 币安交易、SQLite 治理、演算引擎 | ✅ 已合并（币安交易面 + SQLite + 演算引擎独立模块） | 完成 |
 
-**最终状态**：5 个 fork 中，2 个（Perryong、Jonoka）无交易价值，3 个有价值改动已全部合并进本项目——Dreamqqq 体检、LanQin996 防伪造 + 复盘分析包、cnlimiter 币安交易面 + SQLite + 演算引擎（独立模块）。
+**最终状态**：5 个 fork 中，2 个（Perryong、Jonoka）无交易价值，3 个有价值改动已全部合并进本项目——Dreamqqq 体检、LanQin996 防伪造 + 复盘分析包 + LLM 看门狗、cnlimiter 币安交易面 + SQLite + 演算引擎（独立模块）。
 
 ---
 
 ## 五、后续可选项（未合并的高价值项）
 
-1. **LanQin996 LLM 流式看门狗 + Qwen3 恢复**（`eeb11b98`）：提升模型调用鲁棒性。
-2. **cnlimiter 前端 145 文件大改**：UI 层，与本项目后端改动可独立评估。
-3. **cnlimiter 拦截器插件系统**：已评估并**主动放弃**——本项目 2026-10 重构时有意移除了 `interceptor_manager.py` + `plugins/interceptors/*`（见 `scripts/brain/decisions.py`：战略闸门如置信度下限/ADX/4H 宏观应属 LLM 判断，而非硬编码插件）。
+1. **cnlimiter 前端 145 文件大改**：UI 层，与本项目后端改动可独立评估。
+2. **cnlimiter 拦截器插件系统**：已评估并**主动放弃**——本项目 2026-10 重构时有意移除了 `interceptor_manager.py` + `plugins/interceptors/*`（见 `scripts/brain/decisions.py`：战略闸门如置信度下限/ADX/4H 宏观应属 LLM 判断，而非硬编码插件）。
 
-> 注：复盘分析包（原第 1 项）已并入（`17d56ea`），演算引擎已作为独立模块引入（`1f3469e`），二者从"待办"转为"已完成"。
+> 注：复盘分析包、LLM 流式看门狗 + Qwen3 直恢复已随 `17d56ea` 一并并入；演算引擎已作为独立模块引入（`1f3469e`）。三者均从"待办"转为"已完成"。
