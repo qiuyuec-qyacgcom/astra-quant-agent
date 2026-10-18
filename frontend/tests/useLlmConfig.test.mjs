@@ -14,7 +14,8 @@
  *
  * ## 手法（沿用第五十四刀 `http.test.mjs`）
  *
- * `module.registerHooks` 把四个 composable 依赖换成受控替身：
+ * `registerHooks`（`tests/registerHooks.mjs` 垫片，v22/v24 通吃）把四个
+ * composable 依赖换成受控替身：
  *
  * | 依赖 | 替身行为 |
  * |---|---|
@@ -23,7 +24,7 @@
  * | `./useConfirm` | `ask()` 立即返回预置答案 |
  * | `./useI18n` | `t(key)` 返回 key 本身（断言就不用绑死中文文案） |
  *
- * ✅ 无需安装任何依赖（符合"禁止增减依赖"）：Node 24 直接跑 `.ts`。
+ * ✅ 无需安装任何依赖（符合"禁止增减依赖"）：Node 直接跑 `.ts`。
  * 用真实 `vue` 的 `ref`/`computed`（`reactivity` 在组件外可用）。
  *
  * ## ⚠️ 桩匹配规则（我在这条上连续误判了两次）
@@ -46,10 +47,9 @@
  * 运行：
  *     node --experimental-strip-types tests/useLlmConfig.test.mjs
  */
-import { registerHooks } from 'node:module';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { registerHooks } from './registerHooks.mjs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import fs from 'node:fs';
 
 const SRC = path.resolve('src');
 
@@ -115,26 +115,9 @@ const STUB_FILES = {
 };
 
 registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('.') && context.parentURL) {
-      const base = path.dirname(fileURLToPath(context.parentURL));
-      const cand = path.join(base, specifier);
-      for (const c of [cand + '.ts', cand + '.vue', cand]) {
-        if (fs.existsSync(c) && fs.statSync(c).isFile()) {
-          return { url: pathToFileURL(c).href, shortCircuit: true };
-        }
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    const file = fileURLToPath(url);
-    if (!file.startsWith(SRC)) return nextLoad(url, context);
-    const name = path.basename(file);
-    if (STUB_FILES[name]) {
-      return { format: 'module', shortCircuit: true, source: STUB_FILES[name] };
-    }
-    return nextLoad(url, context);
+  __data: {
+    srcRoot: SRC,
+    stubs: STUB_FILES,
   },
 });
 

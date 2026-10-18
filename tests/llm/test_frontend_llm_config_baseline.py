@@ -64,44 +64,32 @@ def _guard_offline() -> None:
         )
 
 
-def _node_supports_register_hooks(node_path: str) -> bool:
-    """`node:module.registerHooks` 是 Node ≥ 23 才提供的 API（Node 24 稳定）。
+def _node_supports_strip_types(node_path: str) -> bool:
+    """`--experimental-strip-types` 需要 Node ≥ 22.6（批 88 起不再依赖 v24 的
+    `registerHooks`，`useLlmConfig.test.mjs` 已改走 `tests/registerHooks.mjs` 垫片，
+    v22 / v24 通吃）。
 
-    直接 `node -e "import('node:module').then(...)"` 探测，比解析版本号字符串可靠
-    （未来 Node 若移除/改名该 API，探测会自动降级而不是误判）。
+    直接跑一条最小探测比解析版本号字符串可靠（未来 Node 若移除/改名该能力，
+    探测会自动降级而不是误判）。
     """
     try:
         r = subprocess.run(
-            [node_path, "-e",
-             "import('node:module').then(m=>process.exit('registerHooks' in m ? 0 : 1))"],
+            [node_path, "--experimental-strip-types", "-e",
+             "const x: number = 1; console.log(x)"],
             capture_output=True, text=True, timeout=30)
         return r.returncode == 0
     except Exception:
         return False
 
 
-def _resolve_node_with_register_hooks() -> str | None:
-    """定位一个能跑 `registerHooks` 的 node 二进制。
+def _resolve_node() -> str | None:
+    """定位一个能跑 `--experimental-strip-types` 的 node 二进制。
 
-    优先级：
-    1. 当前 `node`（若已满足）；
-    2. nvm 已安装的 v23+ 版本（`~/.nvm/versions/node/v*/bin/node`，取最高版本）；
-    3. 都不满足返回 None（测试 skip）。
+    批 88 后只需 Node ≥ 22.6，优先当前 `node`；不满足则返回 None（测试 skip）。
     """
     node = shutil.which("node")
-    if node and _node_supports_register_hooks(node):
+    if node and _node_supports_strip_types(node):
         return node
-
-    nvm_versions = Path.home() / ".nvm" / "versions" / "node"
-    if nvm_versions.exists():
-        candidates = []
-        for d in sorted(nvm_versions.iterdir(), reverse=True):
-            cand = d / "bin" / "node"
-            if cand.exists():
-                candidates.append(str(cand))
-        for cand in candidates:
-            if _node_supports_register_hooks(cand):
-                return cand
     return None
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,9 +147,9 @@ class NodeBehaviourTest(unittest.TestCase):
     """执行桩驱动的行为基线。"""
 
     def test_behaviour_baseline_passes(self):
-        node = _resolve_node_with_register_hooks()
+        node = _resolve_node()
         if node is None:
-            self.skipTest("未找到支持 registerHooks 的 node（需 Node ≥ 23，推荐 24）")
+            self.skipTest("未找到支持 --experimental-strip-types 的 node（需 Node ≥ 22.6）")
         self.assertTrue(NODE_TEST.exists(), f"行为基线文件缺失: {NODE_TEST}")
         try:
             _guard_offline()

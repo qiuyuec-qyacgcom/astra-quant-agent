@@ -93,9 +93,14 @@ function criticalTooltips(body) {
   // 只有"无条件渲染该字段"的插值才算文本出口。
   // 三元表达式 `{{ cond ? field : other }}` 把字段限制在单一分支里 ——
   // 而 tooltip 往往正是在**另一个**分支（告警态）才需要它，故不算出口。
+  //
+  // ⚠️ 只有**真三元**才该排除。`?.` 可选链、`??` 空值合并是"空值安全"而非
+  // 条件分支：`fmtTokensCompact(x?.y)` 在 y 缺失时仍会渲染 "0"，字段始终有出口。
+  // 若把任意 `?` 一律当条件，会把「带可选链的正常渲染」误判成"只挂在 title 上"。
+  const isTernary = (expr) => /\?/.test(expr.replace(/\?\./g, '').replace(/\?\?/g, ''));
   const interpolations = [...body.matchAll(/\{\{([\s\S]*?)\}\}/g)]
     .map((m) => m[1])
-    .filter((expr) => !expr.includes('?'))
+    .filter((expr) => !isTernary(expr))
     .join('\n');
   const out = [];
 
@@ -153,6 +158,10 @@ test('闸自检：能准确拦截无文本出口的关键 tooltip', () => {
     ["<span :title=\"sourceReason\">{{ t('status.attention') }}</span>", 1, '应拦截「警告态只显示需注意、原因只在悬停」的写法'],
     ["<span :title=\"sourceReason\">{{ sourceReason }}</span>", 0, '应放行已另有文本出口的写法'],
     ['<span :title="String(councilStatus.reason || \'\')">降级</span><p>{{ councilStatus.reason }}</p>', 0, '应放行同文件内另有出口的写法'],
+    // 可选链 `?.` 是空值安全而非条件分支：字段仍无条件渲染，不得被误拦（批 88）
+    ["<div :title=\"`Reasoning Tokens: ${Number(s.model_stats?.reasoning_tokens_total || 0).toLocaleString()}`\">{{ fmtTokensCompact(s.model_stats?.reasoning_tokens_total) }}</div>", 0, '应放行带可选链的正常渲染'],
+    // 真三元把字段锁进单一分支，仍须拦截
+    ['<span :title="breaker.reason">{{ active ? breaker.reason : \'正常\' }}</span>', 1, '应拦截「字段只在三元某分支渲染」的写法'],
   ];
 
   for (const [html, expected, why] of cases) {

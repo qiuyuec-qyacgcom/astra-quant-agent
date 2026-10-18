@@ -264,18 +264,18 @@ class NodeBehaviourTest(unittest.TestCase):
             self.skipTest("未找到 node")
         if not self.TEST.exists():
             self.fail(f"行为测试文件缺失: {self.TEST}")
-        # ⚠️ `http.test.mjs` 用 `node:module` 的 `registerHooks`（Node 24 才有的 API）。
-        #    Node 22.x 只有 `module.register`，缺 `registerHooks` 会在 import 期直接
-        #    SyntaxError —— 这是运行环境版本不足，不是代码改动，故优雅 skip 而非翻红。
+        # ⚠️ 批 88：`http.test.mjs` 已改为经 `tests/registerHooks.mjs` 垫片跑，
+        #    Node v22（`module.register`）与 v24（`registerHooks`）皆可，不再依赖
+        #    v24 专属 API。这里只需确认 `--experimental-strip-types` 可用（Node ≥ 22.6）。
         _guard_offline()
         probe = subprocess.run(
             [node, "-e",
-             "import('node:module').then(m => process.exit('registerHooks' in m ? 0 : 1))"],
+             "import('node:module').then(m => process.exit('register' in m ? 0 : 1))"],
             capture_output=True, text=True)
         if probe.returncode != 0:
             ver = subprocess.run([node, "--version"], capture_output=True, text=True).stdout.strip()
             self.skipTest(
-                f"前端行为测试需要 Node ≥ 24（node:module.registerHooks），"
+                f"前端行为测试需要 Node ≥ 22.6（node:module.register），"
                 f"当前 {ver} 无此 API —— 升级 Node 后自动恢复对拍")
         try:
             r = subprocess.run(

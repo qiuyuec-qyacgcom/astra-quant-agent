@@ -6,70 +6,37 @@
  * 并由后端 `tests/test_frontend_http_single_source.py` 主动执行（见该文件的
  * `NodeBehaviourTest`），这样它不会再次变成"没人跑的测试"。
  *
- * 运行方式（Node ≥ 22.6，本仓为 v24）：
+ * 运行方式（Node ≥ 22.6，本仓为 v22；v24 亦可）：
  *     node --experimental-strip-types tests/http.test.mjs
  *
  * 为什么需要 `--experimental-strip-types`：`http.ts` 是 TypeScript，
- * Node 24 能直接剥类型执行；但它的 `import ... from '../stores/auth'`
- * **没写扩展名**，Node 的 ESM 解析器不接受，故下面用 `module.registerHooks`
+ * Node 能直接剥类型执行；但它的 `import ... from '../stores/auth'`
+ * **没写扩展名**，Node 的 ESM 解析器不接受，故下面用 `registerHooks`
  * 给"相对且无扩展名"的 import 补 `.ts`。
  */
-import { registerHooks } from 'node:module';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { registerHooks } from './registerHooks.mjs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import fs from 'node:fs';
 
-// ① 解析钩子：相对、无扩展名 → 补 .ts（并在存在时优先 .ts）
-//
-// 批 76：还必须处理**目录导入**。`src/locales/zh/index.ts` 里写的是 `./dash`，
-// Vite 能解析成 `./dash/index.ts`，Node 的 ESM 解析器直接抛
-// `ERR_UNSUPPORTED_DIR_IMPORT`。此前 `http.ts` 不依赖 i18n 所以碰不到；
-// 一旦某模块（间接）依赖 i18n，任何加载它的 node 测试都会在**解析阶段**就挂掉 ——
-// 补上目录 → `/index.ts` 这一档，比要求整个 locale 树改成显式 `/index` 更稳妥。
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('.') && !path.extname(specifier) && context.parentURL) {
-      const base = path.dirname(fileURLToPath(context.parentURL));
-      for (const ext of ['.ts', '.js']) {
-        const cand = path.join(base, specifier + ext);
-        if (fs.existsSync(cand)) {
-          return { url: pathToFileURL(cand).href, shortCircuit: true };
-        }
-      }
-      for (const ext of ['.ts', '.js']) {
-        const cand = path.join(base, specifier, 'index' + ext);
-        if (fs.existsSync(cand)) {
-          return { url: pathToFileURL(cand).href, shortCircuit: true };
-        }
-      }
-    }
-    return nextResolve(specifier, context);
-  },
-});
-
-// ② 把 `../stores/auth` 的 pinia store 换成受控替身。
-//    做法：读源码，把 `import { useAuthStore } ...` 换成注入的全局桩。
+// ① 解析钩子：相对、无扩展名 → 补 .ts（并在存在时优先 .ts），
+//    以及目录导入（`./dash` → `./dash/index.ts`，见 loader 内注释）。
+// ② 把 `../stores/auth` 的 pinia store 换成受控替身（basename=auth.ts）。
 const AUTH = 'src/stores/auth.ts';
 const authPath = pathToFileURL(path.resolve(AUTH)).href;
-const realAuth = fs.readFileSync(AUTH, 'utf8');
-registerHooks({
-  load(url, context, nextLoad) {
-    if (url === authPath) {
-      return {
-        format: 'module',
-        shortCircuit: true,
-        source: `
-          export const __authStub = { token: null, loggedOut: 0 };
-          export function useAuthStore() {
-            return {
-              get token() { return __authStub.token },
-              logout() { __authStub.loggedOut++ },
-            };
-          }
-        `,
-      };
-    }
-    return nextLoad(url, context);
+await registerHooks({
+  __data: {
+    srcRoot: path.resolve('src'),
+    stubs: {
+      'auth.ts': `
+        export const __authStub = { token: null, loggedOut: 0 };
+        export function useAuthStore() {
+          return {
+            get token() { return __authStub.token },
+            logout() { __authStub.loggedOut++ },
+          };
+        }
+      `,
+    },
   },
 });
 
