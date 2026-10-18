@@ -17,6 +17,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    from .candle_data import closed_okx_candles
+except ImportError:  # 从 scripts 目录直接执行时
+    from candle_data import closed_okx_candles
+
 logger = logging.getLogger("market_data_service")
 
 OKX_PUBLIC_HOSTS = [
@@ -64,6 +69,22 @@ DEFAULT_HEADERS = {
 
 _SESSION: Optional[requests.Session] = None
 _SESSION_LOCK = threading.Lock()
+
+# K线请求槽位：发请求前先留出最小间隔，避免并发调用者把 OKX 公共 IP 限流打爆。
+# 独立运行的因子/仪表盘进程共享同一出口 IP，所以这里必须**进程内**限速。
+_CANDLE_LOCK = threading.Lock()
+_CANDLE_LAST_STARTED = 0.0
+_CANDLE_MIN_INTERVAL = 0.12
+
+
+def _throttle_candles() -> None:
+    """K线请求前的最小间隔闸（进程内）。"""
+    global _CANDLE_LAST_STARTED
+    with _CANDLE_LOCK:
+        wait = _CANDLE_MIN_INTERVAL - (time.monotonic() - _CANDLE_LAST_STARTED)
+        if wait > 0:
+            time.sleep(wait)
+        _CANDLE_LAST_STARTED = time.monotonic()
 
 # OKX bar 合法字面量（大小写敏感：分钟小写 m，小时/天/周/月大写）
 _OKX_VALID_BARS = {
@@ -126,30 +147,53 @@ def get_market_session() -> requests.Session:
 
 
 def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Try primary then fallback OKX public endpoints."""
+    """Try primary then fallback OKX public endpoints.
+
+    K线路径（/market/candles）额外启用**重试 + 限流**：行情K线是交易/回测的
+    事实源，偶发限流（50011）或空包（code=0 但 data 为空）不应直接当成"没数据"
+    而应重试；同时进程内限速避免并发把 OKX 公共 IP 打爆。
+    """
     session = get_market_session()
     kind = _call_kind("get", path)
-    for base in OKX_PUBLIC_HOSTS:
-        url = f"{base}{path}"
-        started = time.time()
-        try:
-            resp = session.get(url, params=params, timeout=timeout)
-            if resp.status_code == 200:
-                data = resp.json()
-                if str(data.get("code", "0")) == "0":
-                    note_call(kind, time.time() - started, ok=True)
-                    return data
-                reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
-            else:
-                reason = f"http={resp.status_code}"
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, MarketDataResponseError(reason))
-        except Exception as exc:
-            # 第 137 刀的教训：静默 `except` 会让"现价恒 0 / 30 小时无信号"。
-            # 取值行为一字不变（仍旧吞掉、仍旧换下一个 host），但**必须留痕**。
-            note_call(kind, time.time() - started, ok=False)
-            note_failure(kind, exc)
-            logger.debug("Public GET %s failed on %s: %s", path, base, exc)
+    is_candles = path == "/api/v5/market/candles"
+    for attempt in range(3 if is_candles else 1):
+        if attempt:
+            time.sleep(0.5 * attempt)  # 指数退避：0.5s / 1.0s
+        if is_candles:
+            _throttle_candles()
+        retryable = False
+        for base in OKX_PUBLIC_HOSTS:
+            url = f"{base}{path}"
+            started = time.time()
+            try:
+                resp = session.get(url, params=params, timeout=timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    code = str(data.get("code", "0"))
+                    if code == "0" and (not is_candles or data.get("data")):
+                        note_call(kind, time.time() - started, ok=True)
+                        return data
+                    reason = f"code={code} msg={str(data.get('msg'))[:80]}"
+                    if code == "0" and is_candles:
+                        reason += " empty candle data"
+                    # K线可重试的瞬时错误：空包 / 限流 50011 / 服务繁忙 50004 / 超频 50013
+                    retryable = code in {"0", "50011", "50004", "50013"}
+                else:
+                    reason = f"http={resp.status_code}"
+                note_call(kind, time.time() - started, ok=False)
+                note_failure(kind, MarketDataResponseError(reason))
+            except Exception as exc:
+                # 第 137 刀的教训：静默 `except` 会让"现价恒 0 / 30 小时无信号"。
+                # 取值行为一字不变（仍旧吞掉、仍旧换下一个 host），但**必须留痕**。
+                note_call(kind, time.time() - started, ok=False)
+                note_failure(kind, exc)
+                if is_candles:
+                    print(f"[行情K线] host={base} instId={params.get('instId') if params else ''} "
+                          f"bar={params.get('bar') if params else ''} attempt={attempt + 1} error={exc}",
+                          flush=True)
+                logger.debug("Public GET %s failed on %s: %s", path, base, exc)
+        if not retryable:
+            break
     return None
 
 
@@ -400,20 +444,30 @@ def fetch_candles(
     bar: str = "15m",
     limit: int = 45,
     timeout: float = 4.0,
+    *,
+    closed_only: bool = True,
 ) -> List[List[str]]:
-    """Fetch candles directly from OKX Official Market REST API with Keep-Alive."""
+    """Fetch candles directly from OKX Official Market REST API with Keep-Alive.
+
+    默认只返回**已收盘**（confirm=1）的K线，避免把正在形成中的 bar 当确认数据
+    用于交易分析；图表可通过 `closed_only=False` 主动取回形成中的最新 bar。
+    """
     bar = normalize_bar(bar)
     try:
         limit = int(limit)
     except (TypeError, ValueError):
         limit = 45
     limit = max(1, min(limit, 300))  # OKX 单次上限 300，超限直接报错返回空
+    # closed_only 时多要一根，过滤掉未收盘 bar 后仍能凑足 limit 根
+    request_limit = min(limit + 1, 300) if closed_only else limit
     data = _public_get(
         "/api/v5/market/candles",
-        params={"instId": inst_id, "bar": bar, "limit": limit},
+        params={"instId": inst_id, "bar": bar, "limit": request_limit},
         timeout=timeout,
     )
     if data and data.get("data"):
+        if closed_only:
+            return closed_okx_candles(data["data"])[:limit]
         return data["data"]
     return []
 

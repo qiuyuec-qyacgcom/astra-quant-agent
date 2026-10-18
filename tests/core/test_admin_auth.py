@@ -468,27 +468,20 @@ class SetEnabledTests(_StoreBase):
 
 
 class ConnectionHandlingTests(_StoreBase):
-    def test_context_manager_commits_but_does_not_close(self):
-        """⚠️ 实测观察：`with self.connect() as connection:` 是 sqlite3 的**事务**上下文，
-        **退出时不关闭连接**（只 commit）。即长期运行的进程里每次调用都会留下一个
-        仍可用的连接，直到被 GC 回收。本用例按实际行为钉住，未擅自改生产代码。"""
-        created = []
-        original = AA.AdminAuthStore.connect
-
-        def _spy(store_self):
-            connection = original(store_self)
-            created.append(connection)
-            return connection
-
-        with mock.patch.object(AA.AdminAuthStore, "connect", _spy):
-            self.store.has_users()
-        self.assertEqual(len(created), 1)
-        try:
-            created[0].execute("SELECT 1")
-            still_usable = True
-        except sqlite3.ProgrammingError:
-            still_usable = False
-        self.assertTrue(still_usable, "连接在 with 之后仍然可用 ⇒ 确实没被关闭")
+    def test_connection_is_closed_after_success_or_failure(self):
+        """连接治理：`connect()` 是 contextmanager，`with` 退出（无论正常还是抛异常）
+        都会**关闭连接**，不再靠 GC 兜底。这修复了长期运行进程里每次调用泄漏一个
+        文件句柄的问题（结合自 cnlimiter fork 的 `fix(auth): close SQLite connections
+        after every transaction`）。"""
+        with self.store.connect() as connection:
+            connection.execute("SELECT 1")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")  # 已关闭 ⇒ 再用抛 ProgrammingError
+        with self.assertRaisesRegex(RuntimeError, "transaction interrupted"):
+            with self.store.connect() as failed_connection:
+                raise RuntimeError("transaction interrupted")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            failed_connection.execute("SELECT 1")  # 异常路径也关闭
 
 
 if __name__ == "__main__":

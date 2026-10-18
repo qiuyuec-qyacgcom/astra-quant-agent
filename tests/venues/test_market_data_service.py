@@ -16,6 +16,7 @@ from scripts.market_data_service import (
     normalize_bar,
     _local_math_indicators,
 )
+from scripts.candle_data import closed_okx_candles
 
 
 def _synth_candles_1h(n=80, start=100.0, step=1.0):
@@ -49,13 +50,41 @@ class TestBarNormalization(unittest.TestCase):
 
         def fake_get(path, params=None, timeout=3.5):
             seen.update(params or {})
-            return {"data": [["1", "2", "3", "4", "5", "6"]]}
+            # OKX 真实行是 9 字段：[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]，
+            # confirm="1" 表示已收盘。closed_only 默认只保留 confirm=1 的 bar。
+            return {"data": [["1", "2", "3", "4", "5", "6", "7", "8", "1"]]}
 
         with patch("scripts.market_data_service._public_get", side_effect=fake_get):
             out = fetch_candles("BTC-USDT-SWAP", bar="1h", limit=999)
         self.assertEqual(len(out), 1)
         self.assertEqual(seen["bar"], "1H")
         self.assertEqual(seen["limit"], 300)
+
+
+class TestClosedOkxCandles(unittest.TestCase):
+    """`closed_okx_candles` 只保留 confirm=1 的已收盘 bar，绝不把未确认当已收盘。"""
+
+    def _row(self, confirm):
+        return ["1700000000000", "1", "2", "3", "4", "5", "6", "7", confirm]
+
+    def test_keeps_only_confirmed_bars_in_order(self):
+        rows = [self._row("0"), self._row("1"), self._row("1"), self._row("0")]
+        out = closed_okx_candles(rows)
+        self.assertEqual(len(out), 2)
+        # 保持原有（最新在前）顺序
+        self.assertEqual(out[0][8], "1")
+        self.assertEqual(out[1][8], "1")
+
+    def test_missing_or_short_rows_are_not_confirmed(self):
+        # 缺 confirm 字段 / 长度不足 9 的行，一律不算已收盘
+        short = [["1", "2", "3", "4", "5", "6"]]
+        self.assertEqual(closed_okx_candles(short), [])
+        missing_confirm = [["1", "2", "3", "4", "5", "6", "7", "8"]]
+        self.assertEqual(closed_okx_candles(missing_confirm), [])
+
+    def test_non_list_input_is_empty(self):
+        self.assertEqual(closed_okx_candles(None), [])
+        self.assertEqual(closed_okx_candles({"data": []}), [])
 
 
 class TestAwsHostFailover(unittest.TestCase):

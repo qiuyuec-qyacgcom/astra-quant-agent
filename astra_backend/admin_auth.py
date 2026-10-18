@@ -8,9 +8,10 @@ import secrets
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 #: 可选环境覆盖 `ASTRA_ADMIN_DB`（生产从不设置 ⇒ 行为逐位不变；测试会话指向临时目录，
@@ -80,11 +81,21 @@ class AdminAuthStore:
             connection.executescript(SCHEMA)
         os.chmod(self.path, 0o600)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        # ⚠️ 用 contextmanager 而非裸返回连接：`yield` 前的 `with connection:` 负责
+        # 事务的 commit/rollback，`finally` 里的 `close()` 负责**连接回收**。
+        # 此前直接 `return connection` 时，`with self.connect() as connection` 依赖
+        # sqlite3.Connection 自身的 __exit__ 只提交事务、**从不关闭连接**，每次调用
+        # 泄漏一个句柄（靠 GC 兜底）。实盘长期运行会累积文件句柄 / 锁。
         connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def has_users(self) -> bool:
         with self.connect() as connection:
