@@ -2,11 +2,11 @@
 
 [简体中文](README.zh-CN.md) · [**English**](README.md)
 
-# AstraQuant
+# AstraQuant豪华3000型
 
 ### Autonomous Crypto Trading System with Multi-LLM Analysis & Deterministic Risk Control
 
-[![Release](https://img.shields.io/badge/Release-v8.6.1-00E599.svg?style=flat-square)](https://github.com/0xethanq/astra-quant-agent/releases)
+[![Release](https://img.shields.io/badge/Release-v8.7.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
 [![License](https://img.shields.io/badge/License-AGPLv3%20%2B%20Commons%20Clause-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -42,7 +42,7 @@ AstraQuant combines large language models (macro, technical, and microstructure 
 ## Quick Start
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 ./setup.sh                  # Interactive onboarding wizard (recommended)
 # Container launch: ./deploy/docker-start.sh | Bare-metal: ./deploy/install.sh && ./start.sh
 ```
@@ -167,7 +167,7 @@ Risk rules are enforced strictly by Python code (`scripts/risk_constants.py`). B
 ### Docker (Recommended)
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 ./setup.sh                  # Interactive CLI onboarding wizard
 ./deploy/docker-start.sh    # Builds and launches backend & gateway daemons
 docker compose ps           # Check container health
@@ -176,7 +176,7 @@ docker compose ps           # Check container health
 ### Bare Metal Linux / macOS
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 sh deploy/install.sh        # Installs Python environment & dependencies
 ./setup.sh                  # Prepares .env configuration
 cd frontend && npm install && npm run build && cd ..
@@ -240,6 +240,27 @@ Three historical markers are intentionally preserved to protect live production 
 1. **Exchange leg tags `t-r20sl*` / `t-r20tp*`**: Open orders placed prior to namespace upgrade remain live on exchange matching engines. Preserved so cloud ratchets maintain tracking; new orders use `astrasl` / `astratp`.
 2. **Encrypted backup magic `R20GCM2` + NUL**: Historic backups must remain decryptable. New archives use `ASTRAGCM`.
 3. **`cpa.r20.cn` in test fixtures**: The maintainer's internal DNS gateway for upstream LLM routing, not a repository namespace.
+
+---
+
+## About This Fork
+
+This repository is a maintained fork of the original [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent) project, rebranded as **AstraQuant豪华3000型**. It preserves the upstream architecture and deterministic risk-control philosophy while merging the highest-value improvements from a family of community forks. Full change triage is documented in [`fork对比报告.md`](fork对比报告.md).
+
+### Changes vs. the Original Project
+
+| Change | Description |
+|---|---|
+| **Binance USDⓈ-M trading** | Native `BinanceTradingAdapter` wired into the order-submit path with coin-margin sizing and protected OCO brackets; execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. |
+| **Trade review & analytics** | A full closed-loop review suite (8 backend modules, 40 instrumentation points, `AnalysisPage.vue`) that the upstream project lacked. |
+| **LLM streaming watchdogs** | Response-start (45s) and reasoning-only (60s) watchdogs plus Qwen3 direct-recovery, all `.env`-tunable. |
+| **Causal calculus engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine, imported as a standalone math library (not wired into any decision path). |
+| **Market-data anti-forgery** | Rate-limited, backoff-retried market data that only ever returns confirmed closed candles. |
+| **Live preflight check** | Read-only balance/position/permission probe before switching to live trading. |
+| **Referral channels** | Exchange referral links updated to this fork's own channels (see [Exchange Referral](#exchange-referral--fee-rebates)). |
+| **Branding & version** | Rebranded to **AstraQuant豪华3000型**, version bumped to **v8.7.1**. |
+
+> Upstream project credit and the AGPL-3.0 + Commons Clause license are fully retained; this fork adds features without removing or relicensing the original work.
 
 ---
 

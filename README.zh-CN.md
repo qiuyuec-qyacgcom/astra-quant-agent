@@ -2,11 +2,11 @@
 
 [**简体中文**](README.zh-CN.md) · [English](README.md)
 
-# AstraQuant
+# AstraQuant豪华3000型
 
 ### 基于多大模型分析与确定性代码风控的加密货币自主量化交易系统
 
-[![Release](https://img.shields.io/badge/Release-v8.6.1-00E599.svg?style=flat-square)](https://github.com/0xethanq/astra-quant-agent/releases)
+[![Release](https://img.shields.io/badge/Release-v8.7.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
 [![License](https://img.shields.io/badge/License-AGPLv3%20%2B%20Commons%20Clause-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -42,7 +42,7 @@ AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘
 ## 快速开始
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 ./setup.sh                  # 交互式向导（推荐，2分钟完成基础环境配置）
 # 容器启动：./deploy/docker-start.sh | 裸机环境：./deploy/install.sh && ./start.sh
 ```
@@ -167,7 +167,7 @@ AstraQuant 摒弃简单滞后指标，结合高频衍生品微观数据进行综
 ### 选项 A：Docker 容器（推荐）
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 ./setup.sh                  # 交互式初始化向导
 ./deploy/docker-start.sh    # 构建并拉起后台与网关容器
 docker compose ps           # 检查容器运行状态
@@ -176,7 +176,7 @@ docker compose ps           # 检查容器运行状态
 ### 选项 B：Linux / macOS 裸机部署
 
 ```bash
-git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent
+git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent
 sh deploy/install.sh        # 安装 Python 虚拟环境与依赖
 ./setup.sh                  # 配置 .env 环境
 cd frontend && npm install && npm run build && cd ..
@@ -240,6 +240,27 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 1. **交易所订单标记 `t-r20sl*` / `t-r20tp*`**：旧订单保持兼容跟踪；新订单使用 `astrasl` / `astratp`。
 2. **加密备份标识 `R20GCM2` + NUL**：历史备份保持可解密；新备份使用 `ASTRAGCM`。
 3. **测试夹具 `cpa.r20.cn`**：维护者内部 LLM 网关域名，非仓库命名空间。
+
+---
+
+## 关于本 Fork
+
+本仓库是原项目 [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent) 的一个持续维护的 fork，更名为 **AstraQuant豪华3000型**。它保留了上游的架构与确定性风控理念，同时从社区 fork 家族中精选合并了高价值改进。完整的取舍分析见 [`fork对比报告.md`](fork对比报告.md)。
+
+### 相较原项目的改动
+
+| 改动 | 说明 |
+|---|---|
+| **币安 USDⓈ-M 交易** | 原生 `BinanceTradingAdapter` 接入下单主路径，含币本位换算与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 |
+| **交易复盘分析** | 完整闭环复盘套件（8 个后端模块、40 处埋点、`AnalysisPage.vue` 前端），原项目缺失。 |
+| **LLM 流式看门狗** | 响应头看门狗（45s）与仅思考看门狗（60s）加 Qwen3 直恢复，均经 `.env` 调参。 |
+| **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎，作为独立数理库引入（未接入任何决策链路）。 |
+| **行情防伪造** | 限速 + 指数退避重试的行情服务，只返回已收盘确认 K 线。 |
+| **实盘切换前体检** | 切换实盘前的只读余额/持仓/权限探测。 |
+| **推广链接** | 交易所推广链接已替换为本 fork 自有通道（见[交易所开户与手续费返现](#交易所开户与手续费返现)）。 |
+| **品牌与版本** | 更名为 **AstraQuant豪华3000型**，版本号升级至 **v8.7.1**。 |
+
+> 完全保留对原项目的署名与 AGPL-3.0 + Commons Clause 协议；本 fork 仅新增特性，未删除或重新授权原作品。
 
 ---
 
