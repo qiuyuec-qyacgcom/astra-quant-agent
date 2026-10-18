@@ -39,19 +39,16 @@ class InviteCodeTest(unittest.TestCase):
     """短码抽取是纯函数，逐形状钉住。"""
 
     def test_query_param_wins_over_path_tail(self):
-        """码放在 `?ref=` 时：路径末段是 `CPA`（无意义），必须以查询参数为准。"""
+        """码放在 `?ref=` 时：路径末段是 `register`（无意义），必须以查询参数为准。"""
         self.assertEqual(
             system_router._invite_code(
-                "https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG"),
-            "CPA_00N8UVQ2OG")
+                "https://www.bsmkweb.cc/register?ref=37575575"),
+            "37575575")
 
     def test_path_tail_is_used_when_no_query(self):
         self.assertEqual(
-            system_router._invite_code("https://www.mitxcqvwnhj.com/join/48039151"),
-            "48039151")
-        self.assertEqual(
-            system_router._invite_code("https://www.gatesites.net/share/MCHDBKYF"),
-            "MCHDBKYF")
+            system_router._invite_code("https://www.mitnpkwxvfr.net/join/O5XCV2BS"),
+            "O5XCV2BS")
 
     def test_degenerate_inputs_yield_empty_not_garbage(self):
         """抽不到就空串（前端据此只显示链接），**绝不编造**一个码出来。"""

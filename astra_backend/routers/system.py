@@ -753,7 +753,7 @@ def _invite_code(url: str) -> str:
     """从邀请链接里取「给人看的短码」（纯展示用，不是鉴权值）。
 
     优先取查询串里的 `ref`/`code`/`invite`（把码放在 `?ref=` 的形态），
-    否则取路径末段（OKX `/join/48039151`）。
+    否则取路径末段（OKX `/join/O5XCV2BS`）。
     取不到就返回空串 —— 前端据此退化成"只显示整条链接"，不编造。
     """
     parts = urlparse(str(url or "").strip())

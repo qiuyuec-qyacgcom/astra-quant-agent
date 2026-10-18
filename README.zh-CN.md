@@ -63,9 +63,9 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 | 交易所 | 平台角色与兼容性 | 专属开户通道 | 邀请码 | 特别说明 |
 |---|---|---|---|---|
-| **OKX 欧易** | **系统实盘直连** (核心执行支持) | [前往 OKX 注册开户](https://www.mitxcqvwnhj.com/join/48039151) | `48039151` | 支持新用户及 **180 天未登录老用户重新绑定** 享受费率返还 |
-| **Binance 币安** | **系统实盘直连** (USDⓈ-M 永续，fail-closed 开闸) | [前往币安注册开户](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | 专属手续费减免链接；执行开闸由 `ASTRA_BINANCE_EXECUTION` 控制 |
-| **Gate.io 芝麻开门** | 仅生态合作推广 (不支持 API 交易) | [前往 Gate 注册开户](https://www.gatesites.net/share/MCHDBKYF) | `MCHDBKYF` | 专属手续费减免链接；量化系统暂不支持直连下单 |
+| **OKX 欧易** | **系统实盘直连** (核心执行支持) | [前往 OKX 注册开户](https://www.mitnpkwxvfr.net/join/O5XCV2BS) | `O5XCV2BS` | 支持新用户及 **180 天未登录老用户重新绑定** 享受费率返还 |
+| **Binance 币安** | **系统实盘直连** (USDⓈ-M 永续，fail-closed 开闸) | [前往币安注册开户](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | 专属手续费减免链接；执行开闸由 `ASTRA_BINANCE_EXECUTION` 控制 |
+| **Gate.io 芝麻开门** | 仅生态合作推广 (不支持 API 交易) | [前往 Gate 注册开户](https://www.gate.io) | — | 官网入口；量化系统暂不支持直连下单 |
 
 ---
 

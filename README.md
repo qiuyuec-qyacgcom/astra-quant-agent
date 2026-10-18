@@ -63,9 +63,9 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 | Exchange | Role & Compatibility | Referral Link | Code | Special Note |
 |---|---|---|---|---|
-| **OKX** | **Native Trading Supported** (Primary Engine Target) | [Register on OKX](https://www.mitxcqvwnhj.com/join/48039151) | `48039151` | Supports new accounts & **dormant accounts (inactive > 180 days)** |
-| **Binance** | **Native Trading Supported** (USDⓈ-M Perpetuals, fail-closed) | [Register on Binance](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | Exclusive fee rebate link; execution gated by `ASTRA_BINANCE_EXECUTION` |
-| **Gate.io** | Partner Promotion Only (No API Trading) | [Register on Gate](https://www.gatesites.net/share/MCHDBKYF) | `MCHDBKYF` | Exclusive fee rebate link; not supported by trading engine |
+| **OKX** | **Native Trading Supported** (Primary Engine Target) | [Register on OKX](https://www.mitnpkwxvfr.net/join/O5XCV2BS) | `O5XCV2BS` | Supports new accounts & **dormant accounts (inactive > 180 days)** |
+| **Binance** | **Native Trading Supported** (USDⓈ-M Perpetuals, fail-closed) | [Register on Binance](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | Exclusive fee rebate link; execution gated by `ASTRA_BINANCE_EXECUTION` |
+| **Gate.io** | Partner Promotion Only (No API Trading) | [Register on Gate](https://www.gate.io) | — | Official site; not supported by trading engine |
 
 ---
 

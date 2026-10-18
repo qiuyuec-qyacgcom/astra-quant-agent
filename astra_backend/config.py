@@ -74,9 +74,9 @@ class Settings:
     okx_broker_tag: str = ""
     #: 注册/返佣通道的**展示**用地址（后台「关于」页渲染成可复制入口）。
     #: 可用同名环境变量覆盖，便于分发副本时替换成自己的通道。
-    okx_invite_url: str = "https://www.mitxcqvwnhj.com/join/48039151"
-    binance_invite_url: str = "https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG"
-    gate_invite_url: str = "https://www.gatesites.net/share/MCHDBKYF"
+    okx_invite_url: str = "https://www.mitnpkwxvfr.net/join/O5XCV2BS"
+    binance_invite_url: str = "https://www.bsmkweb.cc/register?ref=37575575"
+    gate_invite_url: str = "https://www.gate.io"
 
 
 def refresh_settings() -> Settings:
@@ -110,9 +110,9 @@ def refresh_settings() -> Settings:
     settings.manual_close_enabled = os.getenv("ASTRA_MANUAL_CLOSE_ENABLED", "0") == "1"
     settings.order_mode = os.getenv("ASTRA_ORDER_MODE", "market").strip().lower() or "market"
     settings.okx_broker_tag = "6e2191f027c6SUDE"
-    settings.okx_invite_url = os.getenv("OKX_INVITE_URL", "https://www.mitxcqvwnhj.com/join/48039151")
-    settings.binance_invite_url = os.getenv("BINANCE_INVITE_URL", "https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG")
-    settings.gate_invite_url = os.getenv("GATE_INVITE_URL", "https://www.gatesites.net/share/MCHDBKYF")
+    settings.okx_invite_url = os.getenv("OKX_INVITE_URL", "https://www.mitnpkwxvfr.net/join/O5XCV2BS")
+    settings.binance_invite_url = os.getenv("BINANCE_INVITE_URL", "https://www.bsmkweb.cc/register?ref=37575575")
+    settings.gate_invite_url = os.getenv("GATE_INVITE_URL", "https://www.gate.io")
     return settings
 
 
