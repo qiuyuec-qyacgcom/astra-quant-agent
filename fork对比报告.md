@@ -3,6 +3,7 @@
 > 对比基准：原作者 `0xethanq/astra-quant-agent` 的 `e0b29fe`
 > （`feat(strategy): 提升开单频率与入场质量，收紧亏损截断`）
 > 生成时间：2026-10-18
+> 最后更新：2026-10-19（复盘分析包、演算引擎、币安交易面接线已并入）
 
 ---
 
@@ -16,7 +17,7 @@
 | **LanQin996** | 61 | 173 | +8536 / −922 | ahead |
 | **Jonoka** | 65 | 176 | +21990 / −1098 | ahead |
 | **cnlimiter** | 104 | 269 | +8841 / −6491 | diverged（落后 1058 提交） |
-| **本项目（修改后）** | 9 | 37 | +946 / −94 | 已合并 fork 优点 |
+| **本项目（修改后）** | 13 | 40+ | +数千 / −数百 | 已合并 fork 优点 |
 
 > 说明：`behind_by` 大的 fork（cnlimiter 落后 1058、Dreamqqq 落后 93）是因为它们的 fork 起点早于基线 `e0b29fe`，未同步原作者后续提交；`ahead_by` 才是它们相对基线的**独有新增**。
 
@@ -52,9 +53,9 @@
 | Windows 兼容 | `a07783c9` 跨平台文件锁、`8d1874e0` 进程识别与导入 | 低（本项目 Linux 部署） |
 | Docker/CI | `cbd56318` 镜像打包 Node+OKX CLI、`00af0e1d` 推 GHCR | 低 |
 
-**本项目已合并**：行情防伪造（`market_data_service.py` 限速 0.12s + 重试 3 次指数退避、`candle_data.py` 新增 `closed_only` 只返回已收盘 K 线）。
+**本项目已合并**：行情防伪造（`market_data_service.py` 限速 0.12s + 重试 3 次指数退避、`candle_data.py` 新增 `closed_only` 只返回已收盘 K 线）；**交易复盘分析包**（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync` 8 个后端模块 + 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁，默认开启、测试态可退化为 no-op）。
 
-**未合并**：交易复盘分析包（体量大、需前端配合）、LLM 看门狗、Windows 兼容。
+**未合并**：LLM 流式看门狗 + Qwen3 恢复、Windows 兼容。
 
 ### 4. Jonoka — 65 提交（未合并 ❌）
 方向：**纯部署/CI/发布治理，几乎无交易功能**
@@ -78,13 +79,15 @@
 | 前端大改 | 145 个前端文件变更 | 中（体量大） |
 | 跨平台文件锁 | `bfb56281` | 低 |
 
-**本项目已合并**：币安适配（`astra_backend/exchanges/binance.py` + `binance_pending.py`）、SQLite 连接治理（`admin_auth.py` connect 改 contextmanager + finally close）。
+**本项目已合并**：币安适配（`astra_backend/exchanges/binance.py` + `binance_pending.py`）、**币安交易面接线**（`BinanceTradingAdapter` 上线 `supports_orders=True`，下单主路径接入币本位换算 `margin×lev/price` 与 `place_protected_*` 保护单，选所路由由 `venue_ctx` 决定）、SQLite 连接治理（`admin_auth.py` connect 改 contextmanager + finally close）。
+
+**独立模块引入（未接入决策链）**：**因果演算引擎**（`scripts/calculus_engine.py` 477 行纯标准库 + `calculus_replay.py` 离线回放 CLI + 16 测试用例）。只作为独立可复用数理库引入，未接入任何决策/下单/因子链路；缺数据时返回 `valid=False`（绝不伪造结论），符合「缺失不代填」纪律。历史背景：本仓曾拥有同一引擎的下游包装层 `calculus/regime.py`，因缺数据硬编码 `atr_pct/adx` 伪造结论已于 2026-10 退役，本次仅引入干净原始引擎，不恢复下游包装。
 
 ---
 
 ## 三、本项目（修改后）相对原作者的完整改动
 
-### 已提交的 9 个 commit
+### 已提交的 13 个 commit
 
 | commit | 内容 |
 |---|---|
@@ -93,15 +96,14 @@
 | `d9bafbc` | 风控派生值随 OKX 余额实时同步 + .env 空值污染修复 |
 | `e51bfdc` | 修复 2 个测试（环境变量优先级 + 会话级标志隔离） |
 | `ab20b5b` | **结合 fork 优点：实盘体检 + SQLite 治理 + 行情防伪造** |
+| `17d56ea` | **移植复盘分析包完整闭环 + 币安适配 + 全量测试修复** |
+| `1f3469e` | **引入因果演算引擎独立模块（calculus_engine + replay CLI + 测试）** |
+| `412db38` | **币安交易面接线 + 移除风控「引擎此刻口径」模块 + P0 修复** |
+| `3860228` | **修复前端测试 3 处失败（a11y 可选链误判 + Node v22 兼容垫片）** |
 
-### 未提交改动（工作区 176 文件，+435 / −321）
+### 工作区状态
 
-| 目录 | 文件数 | 性质 |
-|---|---|---|
-| `data/` | 105 | 运行时数据（lock 文件、快照等，多为删除/变更） |
-| `tests/` | 56 | 测试修复（26 个 extraction 浅克隆 skip、router split、币安迁移等） |
-| `astra_backend/` | 8 | 币安 registry/env、README 等 |
-| `scripts/` | 6 | candle_data、routing_policy、factors/defaults 等 |
+当前工作区**干净**（无未提交改动）。上一版报告中记录的 176 个未提交文件已通过上述 4 个提交全部归档，`data/` 运行时数据也已清理并补充 `.gitignore` 规则。
 
 ---
 
@@ -111,16 +113,18 @@
 |---|---|---|---|
 | **Perryong** | 无 | — | 忽略 |
 | **Dreamqqq** | 实盘体检脚本 | ✅ 已合并 | 完成 |
-| **LanQin996** | 行情防伪造、复盘分析、LLM 可靠性 | ⚠️ 部分（防伪造已合） | 复盘分析包可后续评估 |
+| **LanQin996** | 行情防伪造、复盘分析、LLM 可靠性 | ✅ 已合并（防伪造 + 复盘分析包） | LLM 看门狗可后续评估 |
 | **Jonoka** | 部署/CI 治理 | ❌ 未合并 | 不建议（纯运维，交易零贡献） |
-| **cnlimiter** | 币安交易、SQLite 治理 | ✅ 已合并 | 完成 |
+| **cnlimiter** | 币安交易、SQLite 治理、演算引擎 | ✅ 已合并（币安交易面 + SQLite + 演算引擎独立模块） | 完成 |
 
-**最终状态**：5 个 fork 中，2 个（Perryong、Jonoka）无交易价值，3 个有价值改动（Dreamqqq 体检、LanQin996 防伪造、cnlimiter 币安+SQLite）**已全部合并进本项目**。
+**最终状态**：5 个 fork 中，2 个（Perryong、Jonoka）无交易价值，3 个有价值改动已全部合并进本项目——Dreamqqq 体检、LanQin996 防伪造 + 复盘分析包、cnlimiter 币安交易面 + SQLite + 演算引擎（独立模块）。
 
 ---
 
 ## 五、后续可选项（未合并的高价值项）
 
-1. **LanQin996 交易复盘分析包**（`4dd55457` + `20b8c8a9` + `71a8a68d`）：需前端配合，体量大。
-2. **LanQin996 LLM 流式看门狗 + Qwen3 恢复**（`eeb11b98`）：提升模型调用鲁棒性。
-3. **cnlimiter 前端 145 文件大改**：UI 层，与本项目后端改动可独立评估。
+1. **LanQin996 LLM 流式看门狗 + Qwen3 恢复**（`eeb11b98`）：提升模型调用鲁棒性。
+2. **cnlimiter 前端 145 文件大改**：UI 层，与本项目后端改动可独立评估。
+3. **cnlimiter 拦截器插件系统**：已评估并**主动放弃**——本项目 2026-10 重构时有意移除了 `interceptor_manager.py` + `plugins/interceptors/*`（见 `scripts/brain/decisions.py`：战略闸门如置信度下限/ADX/4H 宏观应属 LLM 判断，而非硬编码插件）。
+
+> 注：复盘分析包（原第 1 项）已并入（`17d56ea`），演算引擎已作为独立模块引入（`1f3469e`），二者从"待办"转为"已完成"。
