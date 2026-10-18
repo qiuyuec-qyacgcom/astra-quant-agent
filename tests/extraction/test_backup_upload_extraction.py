@@ -60,7 +60,7 @@ MOVED = ["calculate_sha256", "_credentials", "_urlencoded_json", "_multipart_upl
 
 import backup_runtime as br  # noqa: E402
 import backup_upload as bu  # noqa: E402
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 
 class FacadeSurfaceTest(unittest.TestCase):
@@ -204,12 +204,9 @@ class VerbatimCopyTest(unittest.TestCase):
     """
 
     def _old_body(self, name):
-        import subprocess
-        src = subprocess.run(
-            ["git", "show", legacy_rev_path(f"{PRE_EXTRACTION_COMMIT}:scripts/backup_runtime.py")],
-            capture_output=True, text=True, cwd=str(ROOT))
-        self.assertEqual(src.returncode, 0, src.stderr)
-        tree = ast.parse(normalize(src.stdout))
+        # ⚠️ 用 git_show（浅克隆环境缺失基线 commit 时优雅 skip），而非直接 subprocess
+        src = git_show(f"{PRE_EXTRACTION_COMMIT}:scripts/backup_runtime.py")
+        tree = ast.parse(normalize(src))
         n = next(x for x in tree.body
                  if isinstance(x, ast.FunctionDef) and x.name == name)
         return ast.unparse(ast.Module(

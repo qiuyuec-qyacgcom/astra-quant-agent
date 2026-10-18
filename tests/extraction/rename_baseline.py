@@ -110,13 +110,26 @@ def normalize(source: str) -> str:
 
 
 def git_show(rev_path: str) -> str:
-    """取基线源码：自动把路径映射回旧名。取不到就**大声失败**（不静默返回空串）。"""
+    """取基线源码：自动把路径映射回旧名。取不到就**大声失败**（不静默返回空串）。
+
+    浅克隆（`--is-shallow-repository`）环境里历史 commit 可能缺失，此时
+    ``git show <旧commit>`` 返回 128。这类「用 git 历史做对拍基线」的门在
+    没有完整历史的环境里无从对拍，故**优雅 skip**（``unittest.SkipTest``）
+    而非硬失败 —— 否则 CI/容器/浅克隆里会整批红，而代码一行没改。
+    """
     r = subprocess.run(["git", "show", legacy_rev_path(rev_path)],
                        capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, (
-        f"基线取不到（{legacy_rev_path(rev_path)}）：{r.stderr[:200]}\n"
-        "  提示：老提交里只有 r20_* 旧名；本函数已自动映射，若仍失败说明该路径在"
-        "老提交里压根不存在（改名前就不是这个位置）。")
+    if r.returncode != 0:
+        # 基线 commit 缺失（浅克隆）⇒ 跳过本门，而非误报「搬运事故」
+        if "invalid object name" in (r.stderr or "") or r.returncode == 128:
+            import unittest
+            raise unittest.SkipTest(
+                f"基线 commit 缺失（浅克隆环境）：{legacy_rev_path(rev_path)} —— "
+                "需 `git fetch --unshallow` 或完整克隆后才能对拍历史基线")
+        raise AssertionError(
+            f"基线取不到（{legacy_rev_path(rev_path)}）：{r.stderr[:200]}\n"
+            "  提示：老提交里只有 r20_* 旧名；本函数已自动映射，若仍失败说明该路径在"
+            "老提交里压根不存在（改名前就不是这个位置）。")
     return r.stdout
 
 

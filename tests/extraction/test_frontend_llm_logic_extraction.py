@@ -105,6 +105,17 @@ def _run_node(test_file: Path, timeout: int = 300):
     if node is None:
         raise unittest.SkipTest("未找到 node")
     _guard_offline()
+    # ⚠️ 前端 `.mjs` 用 `node:module` 的 `registerHooks`（Node 24 才有的 API）。
+    #    Node 22.x 只有 `module.register`，缺 `registerHooks` 会在 import 期直接
+    #    SyntaxError —— 这是**运行环境版本不足**，不是代码改动，故优雅 skip 而非翻红。
+    probe = subprocess.run(
+        [node, "-e", "import('node:module').then(m => process.exit('registerHooks' in m ? 0 : 1))"],
+        capture_output=True, text=True)
+    if probe.returncode != 0:
+        raise unittest.SkipTest(
+            "前端行为基线需要 Node ≥ 24（node:module.registerHooks），"
+            f"当前 {subprocess.run([node, '--version'], capture_output=True, text=True).stdout.strip()}"
+            " 无此 API —— 升级 Node 后自动恢复对拍")
     return subprocess.run([node, "--experimental-strip-types", str(test_file)],
                           cwd=str(FRONTEND), capture_output=True, text=True,
                           timeout=timeout)

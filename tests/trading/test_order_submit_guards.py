@@ -156,7 +156,8 @@ class PriceAnchorGateTest(unittest.TestCase):
              patch("astra_backend.exchanges.listing.ensure_contract_listed",
                    return_value=SimpleNamespace(ok=True, reason="")), \
              patch("scripts.order_risk.validate_quote_geometry_and_rr",
-                   return_value=(True, "", 1.0)):
+                   return_value=(True, "", 1.0)), \
+             _direct_venue_gate_adapter():
             return rig, submit_protected_limit_order(
                 INST, "buy" if pos_side == "long" else "sell", pos_side, 3.0, price,
                 105000.0, 95000.0, venue_ctx=ctx,

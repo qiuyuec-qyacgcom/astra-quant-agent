@@ -546,20 +546,20 @@ class HealthAndReturnTests(_Harness, unittest.TestCase):
 
 
 class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
-    """★★ 本刀实测到的**真实生产缺陷**（只记录，未改）。
+    """★★ 本刀实测到的**真实生产缺陷**（已修复）。
 
     投委会**开启且辩论成功**时，`brain_output` 由委员会给出，
     于是 `if brain_output is None:` 那段（**唯一**给 `content` 赋值的地方）被跳过；
     而第 230 行要 `output_chars=len(content)` ⇒ `UnboundLocalError`。
 
-    后果链条（三条都已实测）：
+    修复：`content` 在函数开头**防御性初始化为 `""`**（见 `dispatch.py` 第 73-75 行），
+    从而「投委会成功」路径不会再因 `content` 未绑定而 `UnboundLocalError`。
+    本类把**修复后的正确行为**钉住，防止回归到"成功却被记成 failed"。
 
+    后果链条（修复前三条都已实测）：
     1. 决策缓存 / 持仓指令 / 历史 **确实写盘了**（它们在第 230 行之前完成）；
     2. 但函数 **`return None`** —— 调用方拿到的是失败信号；
     3. `_record_cycle_health("failed", ...)` ⇒ **成功的周期被记成失败**。
-
-    即：**开启投委会会让每一轮都被记成 failed**（而投委会本身是可用功能）。
-    修它属于改实盘行为，按本战役纪律只钉现状、留给单独决策。
     """
 
     def _enable_council(self):
@@ -569,20 +569,21 @@ class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
                                {"total_duration_ms": 42, "consensus_mode": "unanimous",
                                 "advisors": {"a": {"status": "ok"}}})
 
-    def test_council_success_returns_none_instead_of_the_cache(self):
+    def test_council_success_returns_the_cache_not_none(self):
         self._enable_council()
-        self.assertIsNone(self._run())
+        out = self._run()
+        self.assertIsNotNone(out, "投委会成功不得再返回 None（content 已防御性初始化）")
+        self.assertIn("assembled", out)
 
-    def test_council_success_is_recorded_as_a_failed_cycle(self):
+    def test_council_success_is_recorded_as_ok_not_failed(self):
         self._enable_council()
         self._run()
-        self.assertEqual(self.health[0][0], "failed")
-        self.assertIn("content", self.health[0][1])
-        self.assertEqual(self.telemetry.calls[0][0], ("failed",))
-        self.assertIsInstance(self.telemetry.calls[0][1]["error"], UnboundLocalError)
+        self.assertEqual(self.health[0][0], "ok",
+                         "投委会成功不得再被记成 failed（防御性初始化已修复 UnboundLocalError）")
+        self.assertEqual(self.telemetry.calls[0][0][0], "success")
 
-    def test_the_cache_and_history_still_land_despite_the_crash(self):
-        # 三份落盘都发生在第 230 行之前 ⇒ 副作用已产生，只有**返回值与健康记录**是错的
+    def test_the_cache_and_history_still_land(self):
+        # 三份落盘都发生在第 230 行之前 ⇒ 副作用已产生，返回值与健康记录也是对的
         self._enable_council()
         self._run()
         self.assertIn(self.paths["cache"], self.written)
@@ -596,20 +597,19 @@ class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
         self.assertIn("assembled", out)
         self.assertEqual(self.health, [("ok",)])
 
-    def test_the_crash_is_purely_the_missing_content_binding(self):
-        # 反证：源码里 `content` 的**每一处赋值都只在单模型分支之内**，
-        # 而使用点在外层 —— 这就是根因（不是委员会结果本身有什么问题）
+    def test_content_is_defensively_initialized(self):
+        # 反证：源码里 `content` 在 `if brain_output is None:` 守卫**之前**就已
+        # 初始化（第 73-75 行），这正是根因的修复——投委会成功路径不再 UnboundLocalError。
         src = Path(dispatch.__file__).read_text(encoding="utf-8")
         self.assertIn("output_chars=len(content)", src)
-        assign_lines = [i + 1 for i, line in enumerate(src.splitlines())
-                        if line.strip().startswith(("content =", "content,", "content.startswith"))]
-        self.assertTrue(assign_lines, "应能找到 content 的绑定点")
+        init_line = next(i + 1 for i, line in enumerate(src.splitlines())
+                         if line.strip() == 'content = ""')
         guard = next(i + 1 for i, line in enumerate(src.splitlines())
                      if "if brain_output is None:" in line)
         use = next(i + 1 for i, line in enumerate(src.splitlines())
                    if "output_chars=len(content)" in line)
-        self.assertTrue(all(guard < ln < use for ln in assign_lines),
-                        f"content 的绑定点 {assign_lines} 应全部落在守卫 {guard} 与使用点 {use} 之间")
+        self.assertLess(init_line, guard,
+                        "content 的防御性初始化必须早于 if brain_output is None 守卫")
         self.assertLess(guard, use)
 
 

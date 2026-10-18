@@ -163,11 +163,16 @@ class CompletionStatusTests(_TempStore):
         self.assertEqual(row["status"], "accepted")
         self.assertEqual(len(row["last_error"]), 1000)
 
-    def test_a_delivered_delivery_clears_the_detail(self):
-        """成功投递不留错误文本 —— 否则面板会一直显示上次的失败原因。"""
+    def test_a_delivered_delivery_keeps_the_trace_detail(self):
+        """成功投递保留溯源回执（message_id 等可追踪信息）。
+
+        审计(2026-10-17)：原实现"delivered 时清空 detail"导致 webhook/QQ 返回的
+        message_id 永久丢失（channel 的 status 恒为 delivered，accepted 分支是死代码）。
+        改为无条件保存 detail，截断到 1000 字符上限不变。
+        """
         delivery_id = self._delivery()
-        self.store.complete(delivery_id, "delivered", "别留我")
-        self.assertEqual(self.store.recent()[0]["last_error"], "")
+        self.store.complete(delivery_id, "delivered", "msg_id=abc123")
+        self.assertEqual(self.store.recent()[0]["last_error"], "msg_id=abc123")
 
     def test_the_delivery_time_is_stamped(self):
         delivery_id = self._delivery()

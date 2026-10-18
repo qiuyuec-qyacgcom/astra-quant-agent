@@ -1,20 +1,22 @@
-"""反向门：**已移除的多所源码不得回潮**（OKX 专用化配套）。
+"""反向门：**已移除的多所源码不得回潮**（Gate 移除配套）。
 
 ## 这道门在守什么
 
-本仓已把 Binance 与 Gate 两家交易所的**源码面**整体移除（适配器、签名/下单构造器、
-多所执行路由、选所路由包、跨所证据与看板聚合），系统收口为 OKX 专用。
+本仓已把 Gate 交易所的**源码面**整体移除（适配器、签名/下单构造器、多所执行路由、
+选所路由包、跨所证据与看板聚合），系统收口为 OKX + 币安 双所。币安（Binance）
+已按用户决策**重新完整支持**（``astra_backend/exchanges/binance.py`` 公开面 +
+``BinanceExchange`` 私有面 + ``binance_pending.py`` durable pending），不再属
+「已移除」场所。
 
 "删干净"最怕的不是删错，而是**悄悄长回来**：一次复制粘贴、一段从旧提交里捞回来的
-工具函数，就足以让"OKX 专用"变成一句空话。所以这里钉一道**反向**扫描门。
+工具函数，就足以让"Gate 已移除"变成一句空话。所以这里钉一道**反向**扫描门。
 
 ## 判据（结构化，不是 `contains` 放行）
 
 1. `astra_backend/` 与 `scripts/` 下每个 `.py` 的**代码**（注释与文档字符串**除外**）
    不得出现下列字样（大小写不敏感）：
 
-   `binance` / `BinanceAdapter` / `gate.py` / `GateAdapter` /
-   `ASTRA_GATE_` / `ASTRA_BINANCE_` / `venue_routing` / `execution_router`
+   `gate.py` / `GateAdapter` / `ASTRA_GATE_` / `venue_routing` / `execution_router`
 
 2. **"注释与文档字符串"是结构化排除的，不是"包含即过"**：本门用 `ast` 取出
    Module/Class/Function 的 docstring 节点位置、再用 `tokenize` 逐 token 剔除
@@ -50,23 +52,17 @@ ROOT = Path(__file__).resolve().parents[2]
 SCAN_DIRS = ("astra_backend", "scripts")
 
 #: 不得出现在**代码**里的字样（大小写不敏感）。
+#: 注：币安（binance）已重新完整支持，不再属「已移除」场所，故不在本表。
 REMOVED_TOKENS = (
-    "binance",
-    "BinanceAdapter",
     "gate.py",
     "GateAdapter",
     "ASTRA_GATE_",
-    "ASTRA_BINANCE_",
     "venue_routing",
     "execution_router",
 )
 
-#: 已删除的模块路径（存在即回潮）。
+#: 已删除的模块路径（存在即回潮）。币安路径已移除（币安重新支持）。
 REMOVED_PATHS = (
-    "astra_backend/exchanges/binance.py",
-    "astra_backend/exchanges/binance_algo.py",
-    "astra_backend/exchanges/binance_orders.py",
-    "astra_backend/exchanges/binance_signing.py",
     "astra_backend/exchanges/gate.py",
     "astra_backend/execution_router.py",
     "astra_backend/venue_router.py",
@@ -83,20 +79,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
         "配置文件路径字面量 `data/venue_routing.json`：该配置文件由用户自行处置，"
         "本仓保留它的读写入口（preferred_venue / routing_mode 两个顶层键）；"
         "本模块内的函数名与日志前缀已全部去掉 venue_routing 字样，仅此一处路径常量。",
-    ("scripts/news/importance.py", "binance"):
-        "新闻**主题词表** `CRYPTO_MACRO_RELEVANT_KEYWORDS`：`binance` 在这里是"
-        "「这条快讯是否与加密行业相关」的关键词之一（Binance 作为新闻主体依然存在），"
-        "与交易所适配器/下单/凭证**毫无关系** —— 删掉它只会让新闻相关性过滤变差。",
-    ("scripts/news/selection.py", "binance"):
-        "同上：`CRYPTO_PLATFORMS` / `CRYPTO_SPECIFIC_KEYWORDS` 是新闻**来源白名单与"
-        "主题词表**（判断一条快讯是不是币圈新闻），不是交易所集成面。"
-        "Binance 仍是加密行业的新闻主体，保留该关键词是内容判定，不是回潮。",
-    ("astra_backend/config.py", "binance"):
-        "生态合作推广返佣链接设置（BINANCE_INVITE_URL / binance_invite_url），"
-        "仅供关于页与落地页展示，系统不包含该平台的 API 直连与执行适配器。",
-    ("astra_backend/routers/system.py", "binance"):
-        "公开只读生态合作返佣通道元数据（/api/v1/referral-channels partner_channels），"
-        "仅供前端动态渲染推广卡片，系统不包含该平台的 API 直连与执行适配器。",
 }
 
 
@@ -183,16 +165,16 @@ class NoRemovedVenuesInSourceTest(unittest.TestCase):
 
     def test_gate_has_teeth(self):
         """合成回潮必须被抓；纯 docstring 提及必须**不**被抓。"""
-        hit = scan_source('def f(venue):\n    return venue == "binance"\n', "scripts/x.py")
-        self.assertIn(("binance", None), hit, "代码里的 'binance' 没被抓到 ⇒ 门没有牙齿")
+        hit = scan_source('def f(venue):\n    return venue == "gate.py"\n', "scripts/x.py")
+        self.assertIn(("gate.py", None), hit, "代码里的 'gate.py' 没被抓到 ⇒ 门没有牙齿")
         hit2 = scan_source(
-            'import os\n\n\ndef f():\n    """历史：曾支持 Binance 与 Gate。"""\n'
+            'import os\n\n\ndef f():\n    """历史：曾支持 Gate。"""\n'
             '    # 旧实现读 ASTRA_GATE_EXECUTION\n'
             '    return os.environ.get("OKX_API_KEY")\n', "scripts/y.py")
         self.assertEqual(hit2, [], "纯注释/文档字符串的历史说明不该被判红（结构化排除失效）")
         # …但同一段文字若出现在**普通字符串**里，必须照抓（排除规则不得放宽）
-        hit3 = scan_source('X = "曾支持 Binance"\n', "scripts/z.py")
-        self.assertIn(("binance", None), hit3, "普通字符串字面量里的回潮被放过了 ⇒ 排除过宽")
+        hit3 = scan_source('X = "gate.py"\n', "scripts/z.py")
+        self.assertIn(("gate.py", None), hit3, "普通字符串字面量里的回潮被放过了 ⇒ 排除过宽")
 
     def test_allowlist_is_explicit_and_alive(self):
         for (rel, token), reason in ALLOWLIST.items():

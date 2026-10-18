@@ -79,11 +79,11 @@ class TestCapabilityTable(unittest.TestCase):
 
 class TestRegistry(unittest.TestCase):
     def test_registry_venues(self):
-        self.assertEqual(registry.registered_venues(), ["okx"])
+        self.assertEqual(registry.registered_venues(), ["binance", "okx"])
+        # 币安公开行情面：可读、恒关执行闸（supports_orders=False）
+        self.assertFalse(registry.get_adapter("binance").capabilities.supports_orders)
         with self.assertRaises(ExchangeCapabilityError):
             registry.get_adapter("hyperliquid")
-        with self.assertRaises(ExchangeCapabilityError):
-            registry.get_adapter("binance")
         with self.assertRaises(ExchangeCapabilityError):
             registry.get_adapter("gate")
 

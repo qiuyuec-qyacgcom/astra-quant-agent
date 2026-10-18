@@ -534,18 +534,19 @@ class RecordTradeTests(unittest.TestCase):
         self._run(trade)
         self.assertIsNot(self.sqlite_rows[0], trade)
 
-    def test_non_dict_trade_raises_before_the_type_guard_can_run(self):
-        # ⚠️ 实测行为（本刀仅记录，**未改**）：第 67 行的 `trade_data.setdefault(...)`
-        #    在类型守卫 `if not isinstance(trade_data, dict): return` **之前**执行 ⇒
-        #    真正的非 dict（字符串/列表/None）会在这里 `AttributeError`，
-        #    那个 `return` 根本轮不到。已用 `assertRaises` 钉住现状。
+    def test_non_dict_trade_is_silently_rejected_by_the_guard(self):
+        # ⚠️ 审计(2026-10-17)修复：类型检查已**前置**到 `trade_data.setdefault(...)`
+        #    之前，非 dict 输入不再抛 AttributeError，而是被 `if not isinstance(...): return`
+        #    安静挡下 —— 什么都不写、什么都不抛。旧实现（setdefault 在守卫前）
+        #    会让字符串/列表/None 直接 AttributeError，那条 `return` 根本轮不到。
         for bad in ("junk", ["a"], None, 42):
             with self.subTest(bad=bad):
-                with self.assertRaises(AttributeError):
-                    self._run(bad)
+                self._run(bad)   # 不得抛异常
+                self.assertEqual(self.json_writes, [], f"{bad!r} 被守卫挡下 ⇒ 不写 JSON")
+                self.assertEqual(self.sqlite_rows, [], f"{bad!r} 被守卫挡下 ⇒ 不写 SQLite")
 
-    def test_a_duck_typed_object_with_setdefault_does_reach_the_guard(self):
-        # 反面：只要有 `.setdefault` 就不是 dict 也能走到那个 `return`（第 70 行）
+    def test_a_duck_typed_object_with_setdefault_is_still_rejected(self):
+        # 反面：即便有 `.setdefault`，只要不是 dict 也会被前置守卫挡下 ⇒ 什么都不写
         class _Duck:
             def setdefault(self, key, value):
                 return value

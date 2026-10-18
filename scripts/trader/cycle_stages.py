@@ -204,7 +204,8 @@ def fetch_positions_and_reconcile(*,
         current_environment,
         okx_rest,
         query_positions,
-        reconcile_reservation_ledger):
+        reconcile_reservation_ledger,
+        account_snapshot=None):
     """相位 1：取真实持仓 + 挂单盲区统计 + 预留对账。
 
     段内 4 处 `return None` 语义 = **本周期中止**（调用点判 None 后 `return None`）。
@@ -296,10 +297,15 @@ def fetch_positions_and_reconcile(*,
         print(f"[Trader] Abort: unable to verify account balance: {bal_exc}")
         return None
     usdt_available = 0.0
+    if account_snapshot is not None:
+        account_snapshot.update(balance=bal_res, equity=0.0)
     if bal_res:
         for d in bal_res[0].get("details", []):
             if d.get("ccy") == "USDT":
                 usdt_available = float(d.get("availBal", 0.0))
+                if account_snapshot is not None:
+                    from scripts.risk_constants import risk_base_balance
+                    account_snapshot["equity"] = risk_base_balance(d)
                 break
     return (active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available)
 

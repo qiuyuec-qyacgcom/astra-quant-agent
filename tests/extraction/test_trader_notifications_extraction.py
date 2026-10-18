@@ -336,14 +336,19 @@ class WiringTest(unittest.TestCase):
             self.assertNotIn(literal, facade, f"门面仍残留方向文案字面量 {literal!r}")
 
     def test_four_notifications_still_carry_leverage(self):
-        """4 处 notify_trade_open 必须各自字面量传 `int(ai_lever)`。
+        """4 处 notify_trade_open 必须各自字面量传 `int(round(ai_lever))`。
 
         这是审计缺陷 D(2026-09-13) 的守卫：曾恒写 3，5x 仓也通知「3x 杠杆」。
+
+        ⚠️ 第九十刀把开多/开空两支整体搬进 `scripts/trader/entry_execution.py`，
+        这 4 处通知也随之迁走（门面只剩 `notify_trade_open` 的**注入**与透传）；
+        同时钳制口径从 `int(ai_lever)` 收紧为 `int(round(ai_lever))`（先四舍五入
+        再取整，避免浮点直接截断把 4.999 报成 4x）。
         """
         from tests.source_scan import count_keyword_argument
         self.assertEqual(
-            count_keyword_argument("scripts/ai_factor_trader.py", "notify_trade_open",
-                                   "leverage", value_must_contain="int(ai_lever)",
+            count_keyword_argument("scripts/trader/entry_execution.py", "notify_trade_open",
+                                   "leverage", value_must_contain="int(round(ai_lever))",
                                    pkg_name="trader"), 4,
             "四处开仓通知必须携带钳制后的真实杠杆")
 
@@ -356,8 +361,8 @@ class WiringTest(unittest.TestCase):
             lev = [k for k in call.keywords if k.arg == "leverage"]
             self.assertEqual(len(lev), 1, f"L{call.lineno} 缺 leverage")
             rendered = ast.unparse(lev[0].value)
-            self.assertEqual(rendered, "int(ai_lever)",
-                             f"L{call.lineno} 的 leverage 必须是 int(ai_lever)，"
+            self.assertEqual(rendered, "int(round(ai_lever))",
+                             f"L{call.lineno} 的 leverage 必须是 int(round(ai_lever))，"
                              f"实际 {rendered!r}（曾因此谎报杠杆）")
 
     def test_both_directions_call_helpers(self):

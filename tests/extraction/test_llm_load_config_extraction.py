@@ -24,7 +24,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -37,10 +37,8 @@ SPECS = {"normalize_providers_into_result": (6, 6), "flatten_models_into_result"
 
 
 def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:astra_backend/llm/store.py")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return next(n for n in ast.parse(normalize(r.stdout)).body
+    src = git_show(f"{PRE}:astra_backend/llm/store.py")
+    return next(n for n in ast.parse(normalize(src)).body
                 if isinstance(n, ast.FunctionDef) and n.name == OWNER)
 
 

@@ -38,7 +38,7 @@ from astra_backend.llm.transport import (
     TRANSIENT_MARKERS,
     _LLMHardError,
     _LLMTransientError,
-    _attempt_llm_call,
+    _attempt_llm_call as _transport_attempt_llm_call,
     _is_transient_http,
     _parse_llm_response,
     build_chat_payload,
@@ -52,6 +52,10 @@ from astra_backend.llm.policy import (
     MAX_FALLBACK_MODELS,
     MAX_REQUEST_ATTEMPTS,
     MIN_REQUEST_ATTEMPTS,
+    QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+    QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS,
+    REASONING_ONLY_TIMEOUT_SECONDS,
+    RESPONSE_START_TIMEOUT_SECONDS,
     STANDARD_REASONING_EFFORTS,
     SUPPORTED_API_FORMATS,
 )
@@ -91,7 +95,8 @@ def init_llm_config() -> Dict[str, Any]:
 
     实现已迁往 astra_backend.llm.store.init_llm_config（结构优化阶段 2 / B4）。
     """
-    return _store_init_llm_config(LLM_CONFIG_FILE)
+    with file_lock(LLM_CONFIG_FILE):
+        return _store_init_llm_config(LLM_CONFIG_FILE)
 
 
 # Backwards compatibility alias for app.py
@@ -257,8 +262,8 @@ def execute_llm_request(
     实现已迁往 astra_backend.llm（结构优化阶段 2 / B4）。
     """
     if use_cache:
-        return _core_execute_llm_request(get_active_llm_runtime, resolve_model_runtime, record_failover_event, messages, model, base_url, api_key, api_format, reasoning_effort, temperature, response_format, timeout, allow_fallback, use_cache=use_cache, cache_ttl=cache_ttl)
-    return _core_execute_llm_request(get_active_llm_runtime, resolve_model_runtime, record_failover_event, messages, model, base_url, api_key, api_format, reasoning_effort, temperature, response_format, timeout, allow_fallback)
+        return _core_execute_llm_request(get_active_llm_runtime, resolve_model_runtime, record_failover_event, messages, model, base_url, api_key, api_format, reasoning_effort, temperature, response_format, timeout, allow_fallback, attempt_call=_attempt_llm_call, max_total_wait=FAILOVER_MAX_TOTAL_WAIT, recovery_timeout=QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS, use_cache=use_cache, cache_ttl=cache_ttl)
+    return _core_execute_llm_request(get_active_llm_runtime, resolve_model_runtime, record_failover_event, messages, model, base_url, api_key, api_format, reasoning_effort, temperature, response_format, timeout, allow_fallback, attempt_call=_attempt_llm_call, max_total_wait=FAILOVER_MAX_TOTAL_WAIT, recovery_timeout=QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS)
 
 
 def _lookup_api_path(base_url: str, model_id: str) -> str:
@@ -284,3 +289,17 @@ def test_llm_connection(
     实现已迁往 astra_backend.llm（结构优化阶段 2 / B4）。
     """
     return _core_test_llm_connection(init_llm_config, base_url, api_key, model, api_format, reasoning_effort, reasoning_type, timeout, api_path)
+
+
+def _attempt_llm_call(*args, **kwargs):
+    """把传输层 `_attempt_llm_call` 包一层，注入流式看门狗超时参数。
+
+    看门狗超时（响应头 / 仅思考）由 policy.py 的模块常量驱动，可在 .env 里用
+    LLM_RESPONSE_START_TIMEOUT_SECONDS / LLM_REASONING_ONLY_TIMEOUT_SECONDS 覆盖。
+    """
+    return _transport_attempt_llm_call(
+        *args,
+        **kwargs,
+        response_start_timeout=RESPONSE_START_TIMEOUT_SECONDS,
+        reasoning_only_timeout=REASONING_ONLY_TIMEOUT_SECONDS,
+    )

@@ -473,19 +473,29 @@ class InjectionContractTest(unittest.TestCase):
         `close_position_confirmed`（生产实现会打 OKX 接口 —— 实测返回
         `OKX 51023: Position doesn't exist.`）。测试不得触网/触所，
         故两个缝一起 patch，并断言"读到的是临时文件里的指令"。
+
+        ⚠️ 复盘埋点闭环（analysis_capture 移植）后，门面壳会注入**真实**
+        `record_trade` ⇒ `CLOSE_MARKET` 成功路径会经 `ledger_writer.record_trade`
+        写**生产** `data/trading_ledger.json`（律①违规）。故此处同时 patch
+        `aft.record_trade` 成记录桩，既验证"文件路径缝"又不落生产台账。
         """
         h = _Harness({"instructions": [{"instId": "BTC-USDT-SWAP", "action": "CLOSE_MARKET",
                                         "confidence": 99, "reason": "r"}]},
                      {"BTC-USDT-SWAP": {"posSide": "long", "pos": 1, "markPx": 100}})
         self.addCleanup(h.cleanup)
+        recorded = []
         with patch.object(aft, "AI_POSITION_MANAGEMENT_FILE", str(h.path)), \
-             patch.object(aft, "close_position_confirmed", h.close):
+             patch.object(aft, "close_position_confirmed", h.close), \
+             patch.object(aft, "record_trade", lambda trade_data, **k: recorded.append(trade_data)):
             actions = []
             aft.execute_ai_position_management(h.positions, h.trackers, "T", actions)
         self.assertTrue(any("整仓退出" in a for a in actions),
                         f"未读到 patch 的文件路径，实际 {actions}")
         self.assertEqual(len(h.close_calls), 1, "未走 patch 的 close 实现")
         self.assertEqual(h.close_calls[0][0], "BTC-USDT-SWAP")
+        # 复盘埋点闭环：平仓成交必须经 record_trade 记录（而不是落生产台账）。
+        self.assertEqual(len(recorded), 1, "CLOSE_MARKET 成功路径必须调用 record_trade")
+        self.assertEqual(recorded[0]["action"], "平仓")
 
 
 if __name__ == "__main__":

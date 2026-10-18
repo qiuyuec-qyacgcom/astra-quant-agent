@@ -6,7 +6,9 @@ get_active_llm_runtime / resolve_model_runtime / record_failover_event）作为�
 且核心不 import llm_manager（无循环依赖）。结构优化阶段 2（B4）。
 """
 from __future__ import annotations
+from astra_backend.llm.policy import (RESPONSE_START_TIMEOUT_SECONDS, REASONING_ONLY_TIMEOUT_SECONDS, QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS, QWEN_DIRECT_RECOVERY_MAX_TOKENS)
 
+import re
 import json
 import os
 import time
@@ -33,6 +35,9 @@ from astra_backend.llm.transport import (
     _attempt_llm_call,
     build_request_spec,
 )
+
+from astra_backend import analysis_capture
+
 
 
 def _lookup_api_path(reload_config: Callable[[], Dict[str, Any]], base_url: str, model_id: str) -> str:
@@ -200,7 +205,7 @@ def fetch_remote_models(reload_config: Callable[[], Dict[str, Any]], get_active_
     }
 
 
-def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolve_runtime: Callable[[str], Optional[Dict[str, Any]]], on_failover: Callable[[Dict[str, Any]], None], 
+def execute_llm_request(get_active_runtime, resolve_runtime, on_failover,
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -211,7 +216,7 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     response_format: Optional[Dict[str, Any]] = None,
     timeout: Optional[float] = None,
     allow_fallback: bool = True,
-    *,
+    *, attempt_call=None, max_total_wait=None, recovery_timeout=None,
     use_cache: bool = False,
     cache_ttl: float = 0.0,
 ) -> Tuple[str, str, Dict[str, Any], int]:
@@ -221,6 +226,9 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     硬故障（401/404 等）时按后台「回退模型」顺序切换下一个模型。
     Returns: (content, reasoning_content, usage_dict, latency_ms)
     """
+    attempt_call = attempt_call or _attempt_llm_call
+    max_total_wait = FAILOVER_MAX_TOTAL_WAIT if max_total_wait is None else max_total_wait
+    recovery_timeout = QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS if recovery_timeout is None else recovery_timeout
     runtime = get_active_runtime()
     target_model = model or runtime.get("model") or os.getenv("LLM_MODEL") or ""
     if not target_model:
@@ -252,13 +260,13 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
     attempts = max(MIN_REQUEST_ATTEMPTS, min(MAX_REQUEST_ATTEMPTS, attempts))
 
     primary = {
+        "api_path": "" if base_url else str(runtime.get("api_path", "") or ""),
         "model": target_model,
         "name": runtime.get("name") or target_model,
         "provider_name": runtime.get("provider_name", ""),
         "base_url": target_url,
         "api_key": target_key,
         "api_format": target_format,
-        "api_path": "" if base_url else str(runtime.get("api_path", "") or ""),
         "reasoning_effort": target_effort,
         "reasoning_type": target_rtype,
     }
@@ -275,29 +283,43 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
                 rt["thinking_timeout"] = float(timeout)
             candidates.append(rt)
 
+    candidate_timeouts = [
+        effective_timeout if idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
+        for idx, cand in enumerate(candidates)
+    ]
     call_started = time.perf_counter()
+    chain_budget = sum(candidate_timeouts)
+    if max_total_wait > 0:
+        chain_budget = min(chain_budget, max_total_wait)
+    global_deadline = call_started + chain_budget
     failures: List[str] = []
+    attempted_models: List[str] = []
     last_error: Optional[BaseException] = None
-    last_timed_out = False
+    all_timed_out = True
     deadline_hit = False
-    # 防御性初始化：任何异常路径都保证 content/reasoning/usage/latency 已绑定，
-    # 避免上层解包或后续引用触发 UnboundLocalError（cannot access local variable 'content'）。
-    content = ""
-    reasoning = ""
-    usage: Dict[str, Any] = {}
-    latency = 0
 
     for cand_idx, cand in enumerate(candidates):
-        cand_timeout = effective_timeout if cand_idx == 0 else float(cand.get("thinking_timeout") or effective_timeout)
+        cand_timeout = candidate_timeouts[cand_idx]
+        candidate_started = time.perf_counter()
+        candidate_deadline = min(global_deadline, candidate_started + cand_timeout)
+        recovery_attempted = False
         for attempt in range(attempts):
+            remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
+            if remaining <= 0:
+                deadline_hit = time.perf_counter() >= global_deadline
+                break
             if attempt > 0:
-                if (time.perf_counter() - call_started) > FAILOVER_MAX_TOTAL_WAIT:
-                    deadline_hit = True
+                time.sleep(min(2.0 * attempt, 8.0, remaining))
+                remaining = min(global_deadline, candidate_deadline) - time.perf_counter()
+                if remaining <= 0:
+                    deadline_hit = time.perf_counter() >= global_deadline
                     break
-                time.sleep(min(2.0 * attempt, 8.0))
             try:
-                content, reasoning, usage, latency = _attempt_llm_call(
-                    cand, messages, temperature, response_format, cand_timeout
+                if cand["model"] not in attempted_models:
+                    attempted_models.append(cand["model"])
+                content, reasoning, usage, latency = attempt_call(
+                    cand, messages, temperature, response_format, min(cand_timeout, remaining),
+                    attempt=attempt, candidate_index=cand_idx,
                 )
                 if cand_idx > 0:
                     print(
@@ -314,6 +336,8 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
                         "chain": " → ".join(c["model"] for c in candidates),
                         "errors": [f[:220] for f in failures[-6:]],
                         "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                        "chain_budget_seconds": chain_budget,
+                        "attempted_models": attempted_models,
                         "succeeded": True,
                     })
                 if ckey and use_cache and cache_ttl > 0:
@@ -323,28 +347,164 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
             except _LLMHardError as exc:
                 failures.append(str(exc))
                 last_error = exc
-                last_timed_out = False
+                all_timed_out = False
                 break  # 该模型硬故障：不再原地重试，切换下一个回退模型
             except _LLMTransientError as exc:
                 failures.append(str(exc))
                 last_error = exc
-                last_timed_out = exc.timed_out
-                if exc.fail_over_now and cand_idx < len(candidates) - 1:
-                    break  # 504/超时等慢故障：链上有下一个模型立即回退，末位模型仍按次数重试
+                all_timed_out = all_timed_out and exc.timed_out
+                # Qwen3 can spend the entire stream emitting reasoning_content
+                # and never transition to content. Give the same model one
+                # bounded, no-thinking finalizer attempt before moving on.
+                if (
+                    exc.reasoning_only
+                    and not recovery_attempted
+                    and _is_qwen3_model(cand.get("model", ""))
+                    and cand.get("api_format", "openai_chat") == "openai_chat"
+                    and _is_structured_response(response_format)
+                    and recovery_timeout > 0
+                ):
+                    recovery_attempted = True
+                    recovery_remaining = min(
+                        global_deadline, candidate_deadline
+                    ) - time.perf_counter()
+                    if recovery_remaining > 0:
+                        recovery_timeout = min(
+                            recovery_remaining,
+                            recovery_timeout,
+                        )
+                        recovery_cand = {
+                            **cand,
+                            "reasoning_effort": "none",
+                        }
+                        recovery_messages = _direct_answer_messages(messages)
+                        analysis_capture.emit(
+                            "llm.reasoning_finalizer",
+                            {
+                                "model": cand["model"],
+                                "attempt": attempt,
+                                "candidate_index": cand_idx,
+                                "timeout_seconds": recovery_timeout,
+                                "max_tokens": QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+                            },
+                            "started",
+                        )
+                        try:
+                            content, reasoning, usage, latency = attempt_call(
+                                recovery_cand,
+                                recovery_messages,
+                                temperature,
+                                response_format,
+                                recovery_timeout,
+                                attempt=attempt,
+                                candidate_index=cand_idx,
+                                enable_thinking=False,
+                                max_tokens=QWEN_DIRECT_RECOVERY_MAX_TOKENS,
+                            )
+                            if cand_idx > 0:
+                                print(
+                                    f"[LLM Failover] ✅ 主模型 {primary['model']} 请求失败，已回退至模型 {cand['model']}"
+                                    f"（{cand.get('provider_name') or '备用'} · 第 {cand_idx + 1}/{len(candidates)} 个候选 · 直接答案恢复成功）"
+                                )
+                                on_failover({
+                                    "type": "fallback_hit",
+                                    "from_model": primary["model"],
+                                    "to_model": cand["model"],
+                                    "to_provider": cand.get("provider_name", ""),
+                                    "attempt": attempt + 1,
+                                    "attempts_per_model": attempts,
+                                    "chain": " → ".join(c["model"] for c in candidates),
+                                    "errors": [f[:220] for f in failures[-6:]],
+                                    "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                                    "chain_budget_seconds": chain_budget,
+                                    "attempted_models": attempted_models,
+                                    "succeeded": True,
+                                })
+                            on_failover({
+                                "type": "reasoning_finalizer_hit",
+                                "from_model": cand["model"],
+                                "to_model": cand["model"],
+                                "attempt": attempt + 1,
+                                "chain": " → ".join(c["model"] for c in candidates),
+                                "errors": [str(exc)[:220]],
+                                "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                                "chain_budget_seconds": chain_budget,
+                                "attempted_models": attempted_models,
+                                "succeeded": True,
+                            })
+                            analysis_capture.emit(
+                                "llm.reasoning_finalizer",
+                                {
+                                    "model": cand["model"],
+                                    "attempt": attempt,
+                                    "candidate_index": cand_idx,
+                                    "latency_ms": latency,
+                                },
+                                "completed",
+                            )
+                            return content, reasoning, usage, latency
+                        except _LLMHardError as recovery_exc:
+                            recovery_error = str(recovery_exc)
+                            last_error = recovery_exc
+                            all_timed_out = False
+                        except _LLMTransientError as recovery_exc:
+                            recovery_error = str(recovery_exc)
+                            last_error = recovery_exc
+                            all_timed_out = all_timed_out and recovery_exc.timed_out
+                        except Exception as recovery_exc:
+                            recovery_error = (
+                                f"模型 {cand['model']} 直接答案恢复异常："
+                                f"{type(recovery_exc).__name__}: {str(recovery_exc)[:200]}"
+                            )
+                            last_error = recovery_exc
+                            all_timed_out = False
+                        failures.append(f"模型 {cand['model']} 直接答案恢复失败：{recovery_error}")
+                        analysis_capture.emit(
+                            "llm.reasoning_finalizer",
+                            {
+                                "model": cand["model"],
+                                "attempt": attempt,
+                                "candidate_index": cand_idx,
+                                "error": recovery_error,
+                            },
+                            "failed",
+                        )
+                    # A finalizer is the one allowed same-model recovery. Do
+                    # not spend another full thinking attempt on this model.
+                    break
+                # A timeout consumes the model's whole attempt budget. Retrying
+                # the same long reasoning request only duplicates the stall;
+                # move to the next candidate while the global budget remains.
+                if exc.timed_out or (exc.fail_over_now and cand_idx < len(candidates) - 1):
+                    break
             except Exception as exc:  # 兜底：任何未分类异常按瞬时处理，绝不让整链崩在第一次
                 failures.append(f"模型 {cand['model']} 未预期异常：{type(exc).__name__}: {str(exc)[:200]}")
                 last_error = exc
-                last_timed_out = False
+                all_timed_out = False
         if deadline_hit:
             break
 
     summary_tail = " | ".join(failures[-6:]) if failures else (str(last_error) if last_error else "无响应")
+    deadline_hit = deadline_hit or time.perf_counter() >= global_deadline
     if len(candidates) == 1:
-        # 单模型（未配置回退）：保持旧版异常语义，前端提示文案不变
+        # 单模型（未配置回退）：保持 TimeoutError / RuntimeError 异常语义。
         if isinstance(last_error, _LLMHardError):
             raise RuntimeError(str(last_error)) from last_error
         if isinstance(last_error, _LLMTransientError):
             if last_error.timed_out:
+                on_failover({
+                    "type": "single_model_timeout",
+                    "from_model": primary["model"],
+                    "to_model": "",
+                    "chain": primary["model"],
+                    "attempts_per_model": attempts,
+                    "attempts_used": len(failures),
+                    "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+                    "chain_budget_seconds": chain_budget,
+                    "errors": [str(last_error)[:220]],
+                    "deadline_hit": deadline_hit,
+                    "succeeded": False,
+                })
                 raise TimeoutError(str(last_error)) from last_error
             raise RuntimeError(str(last_error)) from last_error
         raise RuntimeError(f"LLM 请求未获得响应（模型 {primary['model']}）")
@@ -357,11 +517,15 @@ def execute_llm_request(get_active_runtime: Callable[[], Dict[str, Any]], resolv
         "attempts_per_model": attempts,
         "errors": [f[:220] for f in failures[-8:]],
         "elapsed_seconds": round(time.perf_counter() - call_started, 1),
+        "chain_budget_seconds": chain_budget,
+        "attempted_models": attempted_models,
         "deadline_hit": deadline_hit,
         "succeeded": False,
     })
     chain_names = " → ".join(c["model"] for c in candidates)
-    if last_timed_out:
+    if deadline_hit and len(attempted_models) < len(candidates):
+        raise TimeoutError(f"LLM 模型链总预算 {chain_budget:.0f}s 耗尽（已尝试 {' → '.join(attempted_models)}；部分备用模型未执行）：{summary_tail}") from last_error
+    if all_timed_out and failures:
         raise TimeoutError(f"LLM 模型链全部超时（{chain_names}）：{summary_tail}")
     raise RuntimeError(f"LLM 模型链全部失败（{chain_names}）：{summary_tail}") from last_error
 
@@ -543,3 +707,29 @@ def test_llm_connection(reload_config: Callable[[], Dict[str, Any]],
             "error": f"测试执行异常: {str(exc)}",
             "recommendation": "发生未预期的连接错误，请检查输入配置格式",
         }
+
+
+def _is_qwen3_model(model: str) -> bool:
+    model_lower = str(model or "").lower()
+    return "qwen3" in model_lower or "qwen-3" in model_lower
+
+
+def _is_structured_response(response_format: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        response_format
+        and response_format.get("type") in ("json_object", "json_schema")
+    )
+
+
+def _direct_answer_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Clone the prompt and ask the model to deliver the final JSON immediately."""
+    instruction = (
+        "请立即结束内部思考并直接输出最终答案。只输出符合要求的最终 JSON，"
+        "不要输出思考过程、解释、Markdown 代码围栏或其他文字。"
+    )
+    cloned = [dict(message) for message in messages]
+    for message in cloned:
+        if message.get("role") == "system":
+            message["content"] = f"{message.get('content', '')}\n\n{instruction}".strip()
+            return cloned
+    return [{"role": "system", "content": instruction}, *cloned]

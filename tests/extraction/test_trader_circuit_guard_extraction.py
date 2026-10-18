@@ -20,7 +20,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -36,10 +36,8 @@ RENAMES = {
 
 def _src(commit: str, rel: str) -> str:
     """基线源码，**已归一命名空间**（`r20_*` → `astra_*`）；见 `rename_baseline`。"""
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{commit}:{rel}")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到 {commit}:{rel}：{r.stderr[:200]}"
-    return normalize(r.stdout)
+    src = git_show(f"{commit}:{rel}")
+    return normalize(src)
 
 
 def _get_func(tree: ast.Module, name: str) -> ast.FunctionDef:

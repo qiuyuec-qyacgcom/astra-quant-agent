@@ -94,6 +94,9 @@ def build_default_factors(inst_id: str, name: str) -> Dict[str, Any]:
             "macd_accel_pct": 0.0,
             "macd_momentum_state": "NEUTRAL",
             "macd_divergence": "NONE",
+            # 15M K 线派生：拿不到时显式标 None（不许用 0 冒充"贴 VWAP/无量能"）。
+            "vol_ratio": None,
+            "ema21_slope_pct": None,
         },
 
         # Pillar 2: Volatility & Channel
@@ -104,7 +107,10 @@ def build_default_factors(inst_id: str, name: str) -> Dict[str, Any]:
             "atr_1h_pct": 0.0,
             "bb_width_1h": 0.0,
             "bb_squeeze": False,
-            "volatility_regime": "NORMAL"
+            "volatility_regime": "NORMAL",
+            # 15M K 线派生：拿不到时显式标 None（见 mark_15m_missing）。
+            "atr": None,
+            "atr_15m": None,
         },
 
         # Pillar 3: Volume & Money Flow

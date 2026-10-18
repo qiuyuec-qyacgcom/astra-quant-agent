@@ -580,6 +580,16 @@ def build_lifecycle_ledger():
     # 审计 A2：台账原子写成功后同步落逐所状态旁车（读侧容错缺文件）。
     _write_sync_status(env)
 
+    try:
+        from astra_backend.analysis_capture import enabled, fault
+        from astra_backend.analysis_sync import sync_archive
+        standalone_archive = (os.getenv("ASTRA_ANALYSIS_STANDALONE") == "1"
+                              or os.path.exists(os.path.join(DATA_DIR, "analysis_archive.standalone")))
+        if enabled() and env.configured and not standalone_archive:
+            sync_archive(positions=pos_data)
+    except Exception as exc:
+        fault(exc, "ledger_archive_sync")
+
     notify_newly_closed_trades(
         existing_closed_ids=existing_closed_ids,
         trades_lifecycle=trades_lifecycle    )

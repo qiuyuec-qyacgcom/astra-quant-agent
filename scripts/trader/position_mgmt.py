@@ -35,11 +35,13 @@ import json
 import os
 import time
 
+from astra_backend import analysis_capture
+
 
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions, *,
                                  ai_position_management_file, ai_tightens_stop,
                                  close_position_confirmed, okx_rest, venue_registry,
-                                 current_environment):
+                                 current_environment, record_trade=None):
     """Execute only fresh, high-confidence and risk-reducing AI position instructions."""
     if not os.path.exists(ai_position_management_file):
         return
@@ -96,6 +98,30 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
             closed, close_detail = close_position_confirmed(inst_id, pos_side, float(position.get("pos", 0) or 0), venue=pos_venue)
             if closed:
                 executed_actions.append(f"[{name}] AI高置信度整仓退出 ({pos_venue.upper()}): {reason}")
+                closed_sz = abs(float(position.get("pos", 0) or 0))
+                trade_record = {
+                    "venue": pos_venue,
+                    "is_trade": True,
+                    "time": timestamp_full,
+                    "inst": name,
+                    "name": name,
+                    "action": "平仓",
+                    "action_type": "AI裁量整仓退出",
+                    "direction": f"平{'多' if pos_side == 'long' else '空'}",
+                    "side": f"{'多' if pos_side == 'long' else '空'}单AI裁量整仓退出",
+                    "size": closed_sz,
+                    "sz": closed_sz,
+                    "price": current_px,
+                    "pnl": position.get("upl"),
+                    "remark": f"AI高置信度({confidence:.0f}%)整仓退出: {reason}",
+                }
+                if record_trade is not None:
+                    record_trade(trade_record, position=position)
+                else:
+                    analysis_capture.emit("position.exit_reason", {
+                        "reason": trade_record["action_type"], "confirmed": True,
+                        "execution": trade_record,
+                    }, **analysis_capture.position_meta(position))
                 tr = trackers.get(f"{inst_id}_{pos_side}")
                 if tr and isinstance(tr, dict):
                     try:

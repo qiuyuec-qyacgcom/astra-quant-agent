@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 from astra_backend.dashboard_payload.trade_stats import aggregate_trade_stats
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 # 第 143 刀：本模块从 `dashboard/app.py` 迁到 `astra_backend/dashboard_cache.py`。
 # **对拍基线必须按历史路径取**（旧 revision 里只有 dashboard/app.py），
@@ -369,10 +369,8 @@ def agg_field(got, name):
 
 
 def _agg_baseline_cycle() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{AGG_PRE}:{PRE_MOVE_PATH}")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    t = ast.parse(normalize(r.stdout))
+    src = git_show(f"{AGG_PRE}:{PRE_MOVE_PATH}")
+    t = ast.parse(normalize(src))
     return next(n for n in t.body if isinstance(n, ast.FunctionDef)
                 and n.name == "update_cache_cycle")
 

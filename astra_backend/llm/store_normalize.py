@@ -102,7 +102,8 @@ def finalize_config_document(*,
         "providers": merged_providers,
         "models": flat_models,
     }
-    _atomic_write_json(config_file, config)
+    if config != data:
+        _atomic_write_json(config_file, config)
     return config
 
 def normalize_providers_into_result(*,

@@ -44,10 +44,14 @@ class ProfileTableTest(unittest.TestCase):
         self.assertTrue(demo.simulated_trading)            # 头开关位（结构表达）
         self.assertFalse(live.simulated_trading)
 
-    def test_only_okx_profiles_are_registered(self):
-        self.assertEqual(sorted(ep.PROFILES), [("okx", "demo"), ("okx", "live")])
+    def test_registered_profiles(self):
+        self.assertEqual(sorted(ep.PROFILES), [
+            ("binance", "demo"), ("binance", "live"),
+            ("okx", "demo"), ("okx", "live")])
         self.assertEqual(ep.resolve_base_url("okx", "live"), "https://www.okx.com")
         self.assertEqual(ep.resolve_base_url("okx", "demo"), "https://www.okx.com")
+        self.assertEqual(ep.resolve_base_url("binance", "live"), "https://fapi.binance.com")
+        self.assertEqual(ep.resolve_base_url("binance", "demo"), "https://demo-fapi.binance.com")
 
     def test_unknown_environment_fail_closed(self):
         with self.assertRaises(ExchangeCapabilityError):
@@ -117,14 +121,14 @@ class RegistryEnvKeyingTest(unittest.TestCase):
             self.assertEqual(reg.adapter_environment("okx"), "live")
 
 
-class OkxOnlyRegistryTest(unittest.TestCase):
-    """OKX 专用注册表：未登记（已移除）场所显式拒答，绝不静默降级。"""
+class RegistryTest(unittest.TestCase):
+    """注册表：已登记场所（OKX + 币安公开面）可答，未登记场所显式拒答。"""
 
-    def test_registered_venues_is_okx_only(self):
-        self.assertEqual(reg.registered_venues(), ["okx"])
+    def test_registered_venues(self):
+        self.assertEqual(reg.registered_venues(), ["binance", "okx"])
 
     def test_removed_venues_are_rejected(self):
-        for venue in ("binance", "gate"):
+        for venue in ("gate",):
             with self.subTest(venue=venue):
                 with self.assertRaises(ExchangeCapabilityError):
                     reg.get_adapter(venue)

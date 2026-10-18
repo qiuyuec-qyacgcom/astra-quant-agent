@@ -145,14 +145,22 @@ class SubprocessDataWritesRedirectedTest(unittest.TestCase):
 
         probe = (
             "import sys; sys.path.insert(0, 'scripts');"
-            "import factor_library; print(factor_library.DATA_DIR)"
+            "import factor_library; print('DATA_DIR=' + factor_library.DATA_DIR)"
         )
         cp = subprocess.run([sys.executable, "-c", probe],
                             capture_output=True, text=True,
                             cwd=str(ROOT), timeout=90)
         self.assertEqual(cp.returncode, 0,
                          f"子进程探针失败：{cp.stderr[-300:]}")
-        self.assertEqual(cp.stdout.strip(), expected,
+        # ⚠️ import factor_library 会触发 instrument_pool 的 import 期副作用
+        #    （池文件缺失时 `print("[instrument_pool] warn …")`），污染 stdout。
+        #    故探针用 `DATA_DIR=` 前缀标记真实输出，只取**最后一行**匹配，
+        #    而非 `cp.stdout.strip() == expected`（会撞上 warn 行）。
+        marker = "DATA_DIR="
+        lines = [ln for ln in cp.stdout.splitlines() if ln.startswith(marker)]
+        self.assertEqual(len(lines), 1,
+                         f"未取到唯一 DATA_DIR 输出：{cp.stdout[-300:]}")
+        self.assertEqual(lines[0][len(marker):], expected,
                          "子进程解析出的 DATA_DIR 未指向沙箱 —— "
                          "env 传递链断了（泄漏仍在）")
 

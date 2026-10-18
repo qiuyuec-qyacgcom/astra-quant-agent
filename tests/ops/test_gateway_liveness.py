@@ -26,7 +26,8 @@ sys.path.insert(0, str(ROOT))
 
 from scripts import gateway_liveness as gl  # noqa: E402
 
-PY = str(ROOT / ".venv" / "bin" / "python")
+#: 用**当前**解释器跑脚本（不硬编码 .venv —— CI/容器/pyenv 环境各异）。
+PY = sys.executable
 SCRIPT = str(ROOT / "scripts" / "gateway_liveness.py")
 
 #: 保证匹配不到任何真实进程的"进程判据"

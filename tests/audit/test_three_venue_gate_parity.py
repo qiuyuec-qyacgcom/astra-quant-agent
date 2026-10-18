@@ -16,6 +16,10 @@
 本门因此收口为**单所口径**：判据仍只有一份实现，且必须真的挂在唯一的
 执行路径（OKX 直签：`scripts/trader/order_submit.py::_shared_venue_entry_gate`）上。
 
+（币安已重新完整移植，但其私有交易面由自包含的 `BinanceExchange` 提供、不接交易
+主循环；注册表里的 `BinancePublicAdapter` 仅公开行情面。故交易主循环仍是 OKX 单所
+直签，本门「闸门单源 + OKX 直签覆盖」的语义不变。）
+
 ## 四组断言
 
 1. **策略单源**：判据只在 `astra_backend/execution/venue_gate.py` 里实现一次，
@@ -94,8 +98,16 @@ class StrategyIsSingleSourcedTest(unittest.TestCase):
                     "astra_backend/venue_routing/selection.py"):
             self.assertFalse((ROOT / rel).exists(), f"{rel} 应已随多所执行面移除")
         from astra_backend.exchanges import registered_venues
-        self.assertEqual(list(registered_venues()), ["okx"],
-                         "注册表里只应剩 OKX")
+        venues = list(registered_venues())
+        self.assertIn("okx", venues,
+                      "OKX 必须仍是登记场所（交易主循环唯一执行路径）")
+        # 币安已重新完整移植，但其私有交易面由自包含的 BinanceExchange 提供、
+        # 注册表里的 BinancePublicAdapter 仅公开行情面（supports_orders=False）。
+        # 因此「多所执行面」仍未回来 —— 交易主循环仍是 OKX 单所直签，本门语义不变。
+        if "binance" in venues:
+            from astra_backend.exchanges.registry import _ADAPTERS
+            self.assertFalse(_ADAPTERS["binance"].capabilities.supports_orders,
+                             "币安公开面不得声明下单能力，否则多所执行面会悄然回归")
 
 
 class GateBehaviourTest(unittest.TestCase):

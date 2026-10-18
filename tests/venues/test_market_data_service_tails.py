@@ -307,17 +307,17 @@ class FetchCandlesTests(unittest.TestCase):
 
     def test_a_non_numeric_limit_falls_back_to_forty_five(self):
         with patch.object(mds, "_public_get", return_value={"data": []}) as pg:
-            mds.fetch_candles("BTC-USDT-SWAP", limit="abc")
+            mds.fetch_candles("BTC-USDT-SWAP", limit="abc", closed_only=False)
         self.assertEqual(pg.call_args.kwargs["params"]["limit"], 45)
 
     def test_the_limit_is_clamped_to_the_okx_ceiling(self):
         with patch.object(mds, "_public_get", return_value={"data": []}) as pg:
-            mds.fetch_candles("BTC-USDT-SWAP", limit=10_000)
+            mds.fetch_candles("BTC-USDT-SWAP", limit=10_000, closed_only=False)
         self.assertEqual(pg.call_args.kwargs["params"]["limit"], 300)
 
     def test_the_limit_is_clamped_to_at_least_one(self):
         with patch.object(mds, "_public_get", return_value={"data": []}) as pg:
-            mds.fetch_candles("BTC-USDT-SWAP", limit=0)
+            mds.fetch_candles("BTC-USDT-SWAP", limit=0, closed_only=False)
         self.assertEqual(pg.call_args.kwargs["params"]["limit"], 1)
 
     def test_the_bar_is_normalised(self):

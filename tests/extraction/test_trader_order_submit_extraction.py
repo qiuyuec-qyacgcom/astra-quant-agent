@@ -17,7 +17,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -98,10 +98,8 @@ def _base_text() -> str:
     本门比较的是**段体源码文本**（不是 AST），所以归一必须落在取源码这一步；
     只包 `ast.parse()` 是不够的。
     """
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/ai_factor_trader.py")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return normalize(r.stdout)
+    src = git_show(f"{PRE}:scripts/ai_factor_trader.py")
+    return normalize(src)
 
 
 def _get_func(tree: ast.Module, name: str) -> ast.FunctionDef:

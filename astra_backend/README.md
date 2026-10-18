@@ -71,7 +71,7 @@
 `strategy/prompts.py`（提示词库与档案），`strategy/__init__.py` 只做**按原顺序**聚合
 （顺序即匹配优先级）。
 
-⚠️ 2026-10：`strategy/interceptors.py`（拦截器 CRUD，8 条路由）随**策略插件系统整套裁撤**
+⚠️ 2026-10：`strategy/interceptors` 模块（拦截器 CRUD，8 条路由）随**策略插件系统整套裁撤**
 一并删除（连同根层 `interceptor_manager` 模块与 `plugins/interceptors/` 目录），聚合顺序变为
 council → policy → prompts；路由表对拍门 `tests/trading/test_strategy_router_split.py`
 按前缀显式摘除这 8 条并钉住"不得复活"。
@@ -88,6 +88,7 @@ council → policy → prompts；路由表对拍门 `tests/trading/test_strategy
 | 提示词 | `prompt_views.py`、`dashboard_payload/prompts*` |
 | 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py`、`trading_session_store.py`（交易时段配置的读写；判定纯函数在 `scripts/trader/session.py`） |
 | 可观测性 | `metrics.py`（Prometheus 文本 exposition 的唯一渲染点；路由薄壳在 `routers/system.py::admin_metrics`） |
+| 复盘分析 | `analysis_capture.py`（决策/执行边界的埋点采集，默认开启可关断）、`analysis_store.py`（账户隔离的持久化归档库）、`analysis_metrics.py`（持仓生命周期统计）、`analysis_service.py`（鉴权查询与自包含导出）、`analysis_routes.py`（管理端复盘 API）、`analysis_export.py`（落盘分析包）、`analysis_export_jobs.py`（有界后台导出任务）、`analysis_sync.py`（OKX 历史只读采集与分页对账） |
 
 ### L4 纯计算/载荷子包（新代码的默认去处）
 

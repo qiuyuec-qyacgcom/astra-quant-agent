@@ -214,10 +214,21 @@ class EmptiedConfigsMustBeDeclaredTest(unittest.TestCase):
         """反向断言：登记为"有意清空"的，必须**真的**在沙箱里是空的。
 
         否则这份清单会慢慢变成一份与现实无关的说明文。
+
+        注意「stale」的精确语义：只有「**生产里存在**、且沙箱里也**继承了**」
+        的文件才算 stale（该清空却没清空 ⇒ 清单过时）。生产里**本来就不存在**
+        的文件（全新环境未运行过交易系统时，`.astra_secret_key` / `trading_ledger.json`
+        等运行时产物天然缺失）不算 stale —— 它们既不构成「清空」、也不构成「泄漏」。
         """
         emptied = self._emptied()
-        stale = [rel for rel in DELIBERATE_EMPTY
-                 if rel not in emptied and rel not in CONDITIONALLY_ABSENT]
+        stale = []
+        for rel in DELIBERATE_EMPTY:
+            if rel in emptied or rel in CONDITIONALLY_ABSENT:
+                continue
+            # 只有「生产里确实存在」的文件，才谈得上「该清空却继承」= 清单过时
+            if not (DATA / rel).exists():
+                continue
+            stale.append(rel)
         self.assertEqual(stale, [],
                          f"这些登记项现在已经不是「被清空」状态了，请从对应桶里删除：{stale}")
 

@@ -24,6 +24,8 @@ import types
 import unittest
 from pathlib import Path
 
+from tests.extraction.rename_baseline import git_show
+
 # 场所构成是**纯函数**：冒烟例直接用真身，替身会掩盖"各所几笔"的真实口径。
 from scripts.trader.cycle_snapshot import venue_position_span
 
@@ -43,10 +45,8 @@ SPECS = {  # 函数名 -> (该刀动工前的提交, 基线 execute_portfolio �
 
 
 def _baseline_portfolio(rev: str = PRE) -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{rev}:scripts/ai_factor_trader.py"],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到({rev})：{r.stderr[:200]}"
-    t = ast.parse(r.stdout)
+    src = git_show(f"{rev}:scripts/ai_factor_trader.py")
+    t = ast.parse(src)
     return next(n for n in t.body if isinstance(n, ast.FunctionDef)
                 and n.name == "execute_portfolio")
 

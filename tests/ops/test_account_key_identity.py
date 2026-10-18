@@ -205,17 +205,22 @@ class AccountKeyCacheTest(_IsolatedRegistryMixin):
         self.assertEqual(after.environment, "demo")
 
     def test_removed_venues_are_rejected_and_read_only_rows_tolerated(self):
-        # 已移除场所：执行/凭证面显式拒绝……
-        for gone in ("binance", "gate"):
+        # 已移除场所（gate）：执行/凭证面显式拒绝……
+        for gone in ("gate",):
             with self.subTest(venue=gone):
                 self.assertFalse(reg.is_registered(gone))
                 with self.assertRaises(reg.ExchangeCapabilityError):
                     reg.get_adapter(gone)
                 with self.assertRaises(reg.ExchangeCapabilityError):
                     reg.venue_credentials(gone)
-        self.assertEqual(reg.registered_venues(), ["okx"])
-        # ……但**只读**符号翻译（历史台账行消费面）不得崩，回退 canonical。
-        self.assertEqual(reg.native_symbol_pure("BTC-USDT-SWAP", "binance"), "BTC")
+        # 币安已重新登记为**公开行情面**（私有交易面未走注册表执行路由）。
+        self.assertTrue(reg.is_registered("binance"))
+        self.assertFalse(reg.get_adapter("binance").capabilities.supports_orders)
+        self.assertEqual(reg.registered_venues(), ["binance", "okx"])
+        # ……但**只读**符号翻译（历史台账行消费面）不得崩：币安公开面现可翻译原生符号。
+        self.assertEqual(reg.native_symbol_pure("BTC-USDT-SWAP", "binance"), "BTCUSDT")
+        # 仍被移除的场所（gate）符号翻译回退 canonical（不崩、不猜所）。
+        self.assertEqual(reg.native_symbol_pure("BTC-USDT-SWAP", "gate"), "BTC")
 
 
 # ----------------------------------------------------------------------
@@ -300,13 +305,18 @@ class ExecutionGateMatrixTest(unittest.TestCase):
 
     def test_removed_venues_are_closed_and_rejected(self):
         with self._flag("1", "1"):
-            for gone in ("binance", "gate"):
+            # 币安：已登记但仅公开行情面（supports_orders=False），执行恒关。
+            self.assertFalse(reg.execution_open("binance"))
+            self.assertFalse(reg.execution_open("binance", "demo"))
+            self.assertFalse(reg.get_adapter("binance").capabilities.supports_orders)
+            # gate：仍未登记，执行/取适配器均显式拒绝。
+            for gone in ("gate",):
                 with self.subTest(venue=gone):
                     self.assertFalse(reg.execution_open(gone))
                     self.assertFalse(reg.execution_open(gone, "demo"))
                     with self.assertRaises(reg.ExchangeCapabilityError):
                         reg.get_adapter(gone)
-        # 合成场所只在本人用例内登记，真实注册表仍是 OKX 专用（见 AccountKeyCacheTest）。
+        # 合成场所只在本人用例内登记，真实注册表仍是 OKX + 币安公开面（见 AccountKeyCacheTest）。
 
     def test_require_execution_okx_message_points_at_read_only_reality(self):
         with patch.object(reg, "venue_credentials", return_value=("", "")):
@@ -339,11 +349,12 @@ class RoutingPolicyConfigTest(unittest.TestCase):
         self.file = Path(self._tmp.name) / "venue_routing.json"
         self.enterContext(patch.object(rp, "ROUTING_FILE", self.file))
 
-    def test_valid_preferred_venues_are_okx_only(self):
-        self.assertEqual(rp.VALID_PREFERRED_VENUES, ("auto", "okx"))
+    def test_valid_preferred_venues_derive_from_registry(self):
+        # preferred_venue 合法值 = 注册场所 ∪ {auto}（币安公开面已登记即生效）。
+        self.assertEqual(rp.VALID_PREFERRED_VENUES, ("auto", "binance", "okx"))
 
     def test_removed_venue_is_rejected_and_never_written(self):
-        for gone in ("binance", "gate"):
+        for gone in ("gate",):
             with self.subTest(venue=gone):
                 self.assertFalse(rp.save_preferred_venue(gone))
         self.assertFalse(self.file.exists(), "非法场所不得落盘")
@@ -361,8 +372,8 @@ class RoutingPolicyConfigTest(unittest.TestCase):
         self.assertEqual(rp.load_routing_mode(), "balanced")
 
     def test_removed_venue_value_in_file_falls_back_to_auto(self):
-        # 历史配置文件里的已移除场所值 → fail-safe 回 auto，绝不猜所、绝不崩。
-        self.file.write_text(json.dumps({"preferred_venue": "binance"}),
+        # 历史配置文件里的已移除场所值（gate）→ fail-safe 回 auto，绝不猜所、绝不崩。
+        self.file.write_text(json.dumps({"preferred_venue": "gate"}),
                              encoding="utf-8")
         self.assertEqual(rp.load_preferred_venue(), "auto")
 

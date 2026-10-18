@@ -221,9 +221,14 @@ class TestLeverageLanding(unittest.TestCase):
         # 既不受文档影响，也能真正表达"四处开仓通知都带杠杆"这个语义。
         from tests.source_scan import combined, count_keyword_argument
         trader_src = combined("scripts/ai_factor_trader.py", pkg_name="trader")
+        # ⚠️ 第九十刀把开多/开空两支整体搬进 `scripts/trader/entry_execution.py`，
+        #   这 4 处 `notify_trade_open` 随之迁走（`pkg_name="trader"` 会扩展扫描
+        #   `scripts/trader/*.py`，故仍扫得到）；同时钳制口径从 `int(ai_lever)`
+        #   收紧为 `int(round(ai_lever))`（先四舍五入再取整，避免浮点直接截断
+        #   把 4.999 报成 4x）。
         self.assertEqual(
             count_keyword_argument("scripts/ai_factor_trader.py", "notify_trade_open",
-                                   "leverage", value_must_contain="int(ai_lever)",
+                                   "leverage", value_must_contain="int(round(ai_lever))",
                                    pkg_name="trader"), 4,
             "四处开仓通知必须携带钳制后的真实杠杆（AST 计数，不受文档/换行影响）")
         # 第八十八刀：submit_protected_limit_order 已搬入

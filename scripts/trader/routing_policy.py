@@ -117,7 +117,9 @@ def route_and_reserve_signal(inst_id: str, side: str, price: float,
 
     ## OKX 专用化后的"路由"
 
-    系统只剩 OKX 一个已登记**且已接单**的场所（`registered_venues()` 恒为 `["okx"]`），
+    系统只剩 OKX 一个已登记**且已接单**的场所（币安仅公开行情面、
+    `supports_orders=False` 恒关执行闸 ⇒ `registered_venues()` 虽含 binance，
+    但**可执行**场所仍恒为 `["okx"]`），
     评分选所（候选装配 / 拆单 / 选所证据）已随多所执行面移除 ⇒ 目标场所恒为 OKX。
     唯一保留的抉择是**手选锁定**：`preferred_venue` 若被锁到一个不再登记的场所，
     这里 **fail-closed 拒单**，绝不"猜所"改派 OKX —— 与配置面 fail-safe 同族

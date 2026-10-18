@@ -6,7 +6,9 @@
 结构优化阶段 2（B4）。
 """
 from __future__ import annotations
+from astra_backend.llm.policy import (RESPONSE_START_TIMEOUT_SECONDS, REASONING_ONLY_TIMEOUT_SECONDS, QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS, QWEN_DIRECT_RECOVERY_MAX_TOKENS)
 
+import re
 import hashlib
 import json
 import os
@@ -18,6 +20,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from astra_backend.llm.capabilities import _detect_reasoning_type
 from astra_backend.llm.providers import _join_api_path
+
+import http.client
+from astra_backend import analysis_capture
+
 
 
 # Transient upstream faults (gateway route flaps, bot/rate shields, 5xx) must not
@@ -33,13 +39,13 @@ TRANSIENT_MARKERS = (
 class _LLMTransientError(Exception):
     """可重试错误：瞬时 HTTP、超时、连接层异常（拒绝/重置/DNS/TLS）、坏响应体、空正文。
 
-    fail_over_now=True：错误本身可再试（末位模型仍会重试），但链上还有下一个模型时
-    立即切换——504/思考超时属"慢故障"，同一轮内原地重试大概率再烧满一个超时窗口。"""
+    """
 
-    def __init__(self, message: str, timed_out: bool = False, fail_over_now: bool = False):
+    def __init__(self, message: str, timed_out: bool = False, reasoning_only: bool = False, fail_over_now: bool = False):
         super().__init__(message)
         self.timed_out = timed_out
-        self.fail_over_now = fail_over_now
+        self.reasoning_only = reasoning_only
+        self.fail_over_now = fail_over_now or timed_out
 
 
 class _LLMHardError(Exception):
@@ -56,6 +62,10 @@ def _is_transient_http(code: int, body: str) -> bool:
 
 
 def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+    if not isinstance(res_json, dict):
+        raise _LLMTransientError("LLM 响应格式错误：根节点不是对象")
+    if res_json.get("error"):
+        raise _LLMTransientError(f"LLM 上游返回错误：{str(res_json['error'])[:220]}")
     content = ""
     reasoning_content = ""
     raw_usage = res_json.get("usage", {}) if isinstance(res_json, dict) else {}
@@ -68,11 +78,8 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
         content = "".join(text_chunks).strip()
         reasoning_content = "\n".join(thinking_chunks).strip()
         if not usage:
-            # 审计(2026-10-17)：usage 字段显式为 null 时 res_json.get("usage", {}) 返回 None，
-            # None.get() 抛 AttributeError。此处先安全取 usage dict 再读 token 字段。
-            _usage_dict = res_json.get("usage") or {}
             usage = {
-                "total_tokens": _usage_dict.get("input_tokens", 0) + _usage_dict.get("output_tokens", 0)
+                "total_tokens": res_json.get("usage", {}).get("input_tokens", 0) + res_json.get("usage", {}).get("output_tokens", 0)
             }
 
     # Protocol 2: OpenAI Responses Response
@@ -91,8 +98,9 @@ def _parse_llm_response(target_format: str, res_json: Dict[str, Any]) -> Tuple[s
 
     # Protocol 3: OpenAI Chat Completions Response
     else:
-        msg = res_json.get("choices", [{}])[0].get("message", {})
-        content = str(msg.get("content", "")).strip()
+        choices = res_json.get("choices") or [{}]
+        msg = choices[0].get("message") or {}
+        content = str(msg.get("content") or "").strip()
         reasoning_content = str(msg.get("reasoning_content") or "").strip()
 
     # 规范化提取各厂商 Prompt Caching 缓存命中指标（OpenAI, DeepSeek, Claude, Gemini, Qwen）
@@ -166,7 +174,9 @@ def build_request_spec(
     temperature: Optional[float] = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
     reasoning_type: str = "auto",
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = None,
+    stream: bool = False,
+    enable_thinking: Optional[bool] = None,
     api_path: str = "",
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build endpoint URL, headers, and request payload according to the specific API protocol format."""
@@ -210,7 +220,7 @@ def build_request_spec(
 
         payload: Dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else 4096,
             "messages": chat_messages,
         }
         if system_chunks:
@@ -242,7 +252,7 @@ def build_request_spec(
             }
             budget = budget_map[effort]
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            payload["max_tokens"] = budget + max_tokens
+            payload["max_tokens"] = budget + (max_tokens if max_tokens is not None else 4096)
         elif effort == "none":
             payload["thinking"] = {"type": "disabled"}
             if temperature is not None:
@@ -298,6 +308,11 @@ def build_request_spec(
             "messages": messages,
             "user": affinity_id,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
 
         # Temperature handling for reasoning models vs normal models
         is_reasoning_model = (
@@ -330,6 +345,14 @@ def build_request_spec(
             elif effort == "none":
                 payload["reasoning_effort"] = "none"
 
+        # Qwen3-compatible gateways use this switch to disable the thinking
+        # channel. Only add it for an explicit recovery request so ordinary
+        # configured calls retain their provider defaults.
+        if enable_thinking is not None and (
+            "qwen3" in m_lower or "qwen-3" in m_lower
+        ):
+            payload["enable_thinking"] = bool(enable_thinking)
+
         if response_format and rtype != "deepseek_reasoner":
             payload["response_format"] = response_format
 
@@ -343,6 +366,8 @@ def build_chat_payload(
     temperature: Optional[float] = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
     reasoning_type: str = "auto",
+    max_tokens: Optional[int] = None,
+    enable_thinking: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Compatibility wrapper for standard chat payload generation."""
     _, _, payload = build_request_spec(
@@ -354,6 +379,8 @@ def build_chat_payload(
         temperature=temperature,
         response_format=response_format,
         reasoning_type=reasoning_type,
+        max_tokens=max_tokens,
+        enable_thinking=enable_thinking,
     )
     return payload
 
@@ -364,8 +391,17 @@ def _attempt_llm_call(
     temperature: Optional[float],
     response_format: Optional[Dict[str, Any]],
     effective_timeout: float,
+    *,
+    attempt: int = 0,
+    candidate_index: int = 0,
+    enable_thinking: Optional[bool] = None,
+    max_tokens: Optional[int] = None,
+    response_start_timeout: Optional[float] = None,
+    reasoning_only_timeout: Optional[float] = None,
 ) -> Tuple[str, str, Dict[str, Any], int]:
     """单次请求一个模型；失败时抛 _LLMTransientError（可重试）或 _LLMHardError（换模型）。"""
+    response_start_timeout = RESPONSE_START_TIMEOUT_SECONDS if response_start_timeout is None else response_start_timeout
+    reasoning_only_timeout = REASONING_ONLY_TIMEOUT_SECONDS if reasoning_only_timeout is None else reasoning_only_timeout
     endpoint, headers, payload = build_request_spec(
         model=cand["model"],
         messages=messages,
@@ -377,94 +413,309 @@ def _attempt_llm_call(
         response_format=response_format,
         reasoning_type=cand.get("reasoning_type", "auto"),
         api_path=cand.get("api_path", ""),
+        stream=cand.get("api_format", "openai_chat") == "openai_chat",
+        enable_thinking=enable_thinking,
+        max_tokens=max_tokens,
     )
 
     t0 = time.perf_counter()
-    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    try:
-        resp_handle = urllib.request.urlopen(req, timeout=effective_timeout)
-    except urllib.error.HTTPError as exc:
-        err_b = ""
+    deadline = t0 + effective_timeout
+    target_format = cand.get("api_format", "openai_chat")
+    progress: Dict[str, Any] = {"stage": "response_headers", "received_bytes": 0}
+    seen_payloads = set()
+    adaptation = 0
+
+    def timeout_error(exc: BaseException) -> _LLMTransientError:
+        reasoning_only = bool(
+            progress.get("reasoning_only_timeout")
+            or (
+                progress.get("reasoning_chars")
+                and progress.get("read_deadline") is not None
+                and time.perf_counter() >= float(progress["read_deadline"])
+                and not progress.get("content_chars")
+            )
+        )
+        if progress.get("content_chars"):
+            detail = "已收到部分答案，但未完成"
+        elif reasoning_only or progress.get("reasoning_chars"):
+            watchdog = progress.get("reasoning_watchdog_seconds")
+            if watchdog:
+                detail = f"仅思考看门狗 {float(watchdog):.0f}s 到期，已收到思考内容但未收到最终答案"
+            else:
+                detail = "已收到思考内容，但未收到最终答案"
+        elif progress["stage"] == "response_headers":
+            watchdog = progress.get("response_start_watchdog_seconds")
+            if watchdog:
+                detail = f"响应头看门狗 {float(watchdog):.0f}s 到期（可能是网络、网关排队或模型处理延迟）"
+            else:
+                detail = "等待连接或响应头超时（可能是网络、网关排队或模型处理延迟）"
+        else:
+            detail = "读取响应体超时"
+        elapsed = time.perf_counter() - t0
+        analysis_capture.emit("llm.error", {
+            "attempt": attempt, "candidate_index": candidate_index,
+            "model": cand["model"], "timeout_seconds": effective_timeout,
+            "elapsed_seconds": round(elapsed, 3), **progress, "error": str(exc),
+        }, "timeout")
+        return _LLMTransientError(
+            f"LLM 请求超时（模型 {cand['model']}，本模型预算 {effective_timeout:.0f}s，"
+            f"已等待 {elapsed:.1f}s）：{detail}", timed_out=True,
+            reasoning_only=reasoning_only,
+        )
+
+    while True:
+        seen_payloads.add(json.dumps(payload, sort_keys=True))
         try:
-            err_b = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        # Adaptive fallback retry on rejected parameter (400: reasoning_effort/temperature/response_format)
-        if (
-            exc.code == 400
-            and cand.get("api_format", "openai_chat") == "openai_chat"
-            and any(kw in err_b.lower() for kw in ["reasoning_effort", "temperature", "response_format", "invalid parameter"])
-        ):
-            fb_payload = {"model": cand["model"], "messages": messages}
-            fb_req = urllib.request.Request(endpoint, data=json.dumps(fb_payload).encode("utf-8"), headers=headers)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError("request deadline exceeded")
+            progress = {"stage": "response_headers", "received_bytes": 0}
+            req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
             try:
-                with urllib.request.urlopen(fb_req, timeout=effective_timeout) as fb_resp:
-                    latency_ms = int((time.perf_counter() - t0) * 1000)
-                    fb_json = json.loads(fb_resp.read().decode("utf-8", errors="replace"))
-                content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), fb_json)
-                if not content and not reasoning:
-                    raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（已自适应去参数重试）")
-                return content, reasoning, usage, latency_ms
-            except _LLMTransientError:
-                raise
-            except urllib.error.HTTPError as fb_exc:
-                # 去参数重试仍被上游以 HTTP 错误拒绝（401/403/429/5xx 等）：
-                # 按瞬时/硬故障正确分类，绝不泄漏 UnboundLocalError。
-                fb_err_b = ""
+                transport_timeout = remaining
+                # The short response-start watchdog is only a transport
+                # timeout. Once headers arrive, body reads use the candidate
+                # deadline (and the reasoning-only watchdog below).
+                if target_format == "openai_chat" and response_start_timeout > 0:
+                    transport_timeout = min(remaining, response_start_timeout)
+                    if transport_timeout < remaining:
+                        progress["response_start_watchdog_seconds"] = transport_timeout
+                resp_handle = analysis_capture.llm_request(
+                    req, transport_timeout, urllib.request.urlopen,
+                    attempt=attempt, candidate_index=candidate_index, fallback=adaptation > 0,
+                    adaptation=adaptation, api_format=target_format,
+                )
+            except urllib.error.HTTPError as exc:
                 try:
-                    fb_err_b = fb_exc.read().decode("utf-8", errors="replace")
-                except Exception:
-                    pass
-                if _is_transient_http(fb_exc.code, fb_err_b):
-                    raise _LLMTransientError(
-                        f"LLM 网关返回 HTTP {exc.code}（参数冲突 {err_b[:80]}…）→ 去参数重试仍被 HTTP {fb_exc.code} 拒绝（模型 {cand['model']}）：{(fb_err_b or '')[:200]}",
-                        fail_over_now=(fb_exc.code == 504),
-                    ) from fb_exc
-                raise _LLMHardError(f"LLM 网关返回 HTTP {exc.code}（参数冲突）→ 去参数重试仍被 HTTP {fb_exc.code} 拒绝（模型 {cand['model']}）：{(fb_err_b or '')[:200]}") from fb_exc
-            except (urllib.error.URLError, TimeoutError, socket.timeout) as fb_exc:
-                fb_code = getattr(fb_exc, "code", 0) or 0
-                if fb_code and not _is_transient_http(fb_code, str(getattr(fb_exc, "msg", "") or fb_exc)):
-                    raise _LLMHardError(f"LLM 网关返回 HTTP {fb_code}（模型 {cand['model']}）：{str(fb_exc)[:280]}") from fb_exc
-                raise _LLMTransientError(f"LLM 网关返回 HTTP {exc.code}（参数冲突）→ 去参数重试连接失败（模型 {cand['model']}）：{(err_b or '')[:200]}") from fb_exc
-            except Exception as fb_exc:
-                # 兜底：响应体解析异常（IndexError/KeyError/AttributeError 等）——
-                # 绝不能裸抛穿透，否则上层解包处 content 未绑定触发 UnboundLocalError。
-                raise _LLMTransientError(f"LLM 响应体解析失败（模型 {cand['model']}）：{type(fb_exc).__name__}: {str(fb_exc)[:200]}") from fb_exc
-        if _is_transient_http(exc.code, err_b):
-            raise _LLMTransientError(
-                f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}",
-                fail_over_now=(exc.code == 504),  # 504=上游已超时：链上有下一个模型则立即切换
-            ) from exc
-        raise _LLMHardError(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{(err_b or '')[:280]}") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise _LLMTransientError(
-            f"LLM 推演超时（已达到思考上限时间 {effective_timeout:.0f}s）：模型思考链过长未在时限内完成响应，可前往后台 AI 模型设置中调大思考上限时间",
-            timed_out=True,
-            fail_over_now=True,  # 慢故障：有回退链时立即切换，不再原地烧第二个超时窗口
-        ) from exc
-    except urllib.error.URLError as exc:
-        # 连接层异常（拒绝/重置/DNS/TLS/断线）与超时包装同样属于瞬时故障：
-        # 旧版在此处直接 raise，导致「失败一次就不再请求」——现在纳入重试与回退。
-        reason = getattr(exc, "reason", None)
-        timed_out = isinstance(reason, (socket.timeout, TimeoutError))
-        raise _LLMTransientError(
-            f"LLM 连接层异常（模型 {cand['model']}）：{type(reason).__name__ if reason is not None else type(exc).__name__}: {str(reason or exc)[:220]}",
-            timed_out=timed_out,
-            fail_over_now=timed_out,  # 连接层包装的超时同样按慢故障快速换模型
-        ) from exc
-    except (ValueError, OSError) as exc:
-        # 响应体非 JSON（如反代 HTML 错误页）、读取中断等：可重试
-        raise _LLMTransientError(f"LLM 响应体解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
+                    progress["stage"] = "error_body"
+                    err_b = b"".join(_response_chunks(exc, deadline, progress)).decode("utf-8", errors="replace")
+                finally:
+                    exc.close()
+                analysis_capture.emit("llm.error", {
+                    "attempt": attempt, "candidate_index": candidate_index,
+                    "http_status": exc.code, "body": err_b,
+                }, "failed")
+                adapted = _adapt_chat_payload(payload, err_b) if exc.code == 400 and target_format == "openai_chat" else None
+                if adapted is not None and json.dumps(adapted, sort_keys=True) not in seen_payloads:
+                    analysis_capture.emit("llm.parameter_adaptation", {
+                        "model": cand["model"], "attempt": attempt, "candidate_index": candidate_index,
+                        "removed_parameters": sorted(set(payload) - set(adapted)),
+                        "added_parameters": sorted(set(adapted) - set(payload)),
+                    })
+                    payload = adapted
+                    adaptation += 1
+                    continue
+                error_type = _LLMTransientError if _is_transient_http(exc.code, err_b) else _LLMHardError
+                if error_type is _LLMTransientError and exc.code == 504:
+                    raise _LLMTransientError(f"LLM 网关返回 HTTP 504（模型 {cand['model']}）：{err_b[:280]}", fail_over_now=True) from exc
+                raise error_type(f"LLM 网关返回 HTTP {exc.code}（模型 {cand['model']}）：{err_b[:280]}") from exc
 
-    with resp_handle as resp:
-        latency_ms = int((time.perf_counter() - t0) * 1000)
-        body_bytes = resp.read()
+            with resp_handle as resp:
+                progress["stage"] = "response_body"
+                res_json = _read_llm_response(resp, target_format, deadline, progress, effective_timeout, reasoning_only_timeout)
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
+            content, reasoning, usage = _parse_llm_response(target_format, res_json)
+            content = _validate_llm_answer(res_json, content, reasoning, response_format, cand["model"])
+            return content, reasoning, usage, latency_ms
+        except (TimeoutError, socket.timeout) as exc:
+            raise timeout_error(exc) from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise timeout_error(exc) from exc
+            raise _LLMTransientError(f"LLM 连接层异常（模型 {cand['model']}）：{str(reason or exc)[:220]}") from exc
+        except (ValueError, OSError, http.client.HTTPException) as exc:
+            raise _LLMTransientError(f"LLM 响应读取或解析失败（模型 {cand['model']}）：{str(exc)[:200]}") from exc
+
+
+def _response_chunks(resp, deadline: float, progress: Dict[str, Any]):
+    """Bound the entire body read, including an upstream that keeps sending heartbeats."""
+    read1 = getattr(resp, "read1", None)
+    while True:
+        active_deadline = min(
+            deadline,
+            float(progress.get("read_deadline", deadline) or deadline),
+        )
+        remaining = active_deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("request deadline exceeded")
+        # urllib exposes a socket timeout, not a total deadline. Recalculate it
+        # before each read so headers + body + heartbeats share the same budget.
+        raw = getattr(getattr(resp, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        chunk = read1(8192) if callable(read1) else resp.read()
+        if chunk:
+            progress["received_bytes"] = progress.get("received_bytes", 0) + len(chunk)
+        if time.perf_counter() >= active_deadline:
+            raise TimeoutError("request deadline exceeded")
+        if not chunk:
+            return
+        yield chunk
+        if not callable(read1):
+            return
+
+
+def _read_llm_response(resp, target_format: str, deadline: float, progress: Dict[str, Any], effective_timeout: float, reasoning_only_timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Accept ordinary JSON or Chat Completions SSE, preserving usage and reasoning."""
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    usage: Dict[str, Any] = {}
+    finish_reason = None
+    done = False
+    data_lines: List[bytes] = []
+    reasoning_deadline: Optional[float] = None
+
+    def consume_event():
+        nonlocal usage, finish_reason, done, reasoning_deadline
+        if not data_lines:
+            return
+        data = b"\n".join(data_lines).strip()
+        data_lines.clear()
+        if data == b"[DONE]":
+            done = True
+            return
+        event = json.loads(data.decode("utf-8"))
+        if not isinstance(event, dict):
+            raise ValueError("SSE event is not an object")
+        if event.get("error"):
+            raise _LLMTransientError(f"LLM 流式响应错误：{str(event['error'])[:220]}")
+        if isinstance(event.get("usage"), dict):
+            usage.update(event["usage"])
+        for choice in event.get("choices") or []:
+            if choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta") or choice.get("message") or {}
+            text = delta.get("content") or ""
+            reasoning = delta.get("reasoning_content") or ""
+            if text:
+                content_parts.append(text)
+                progress["content_chars"] = progress.get("content_chars", 0) + len(text)
+                # The watchdog only covers the reasoning-only phase. Once the
+                # model starts its final answer, restore the candidate's full
+                # body deadline so a long JSON answer is not cut off at 60s.
+                if reasoning_deadline is not None:
+                    reasoning_deadline = None
+                    progress.pop("read_deadline", None)
+                    progress.pop("reasoning_watchdog_seconds", None)
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                progress["reasoning_chars"] = progress.get("reasoning_chars", 0) + len(reasoning)
+                # A long explicit model budget must not be silently shortened
+                # by the legacy fixed thinking watchdog.
+                watchdog = (REASONING_ONLY_TIMEOUT_SECONDS if reasoning_only_timeout is None else reasoning_only_timeout) if effective_timeout <= 60.0 else 0.0
+                if (
+                    reasoning_deadline is None
+                    and watchdog > 0
+                    and not content_parts
+                ):
+                    reasoning_deadline = min(
+                        deadline,
+                        time.perf_counter() + watchdog,
+                    )
+                    progress["read_deadline"] = reasoning_deadline
+                    progress["reasoning_watchdog_seconds"] = watchdog
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+
+    def consume_line(line: bytes):
+        line = line.rstrip(b"\r")
+        if not line:
+            consume_event()
+        elif line.startswith(b"data:"):
+            data_lines.append(line[5:].lstrip(b" "))
+
+    pending = b""
+    is_sse = None
+    sse_prefixes = (b":", b"data:", b"event:", b"id:", b"retry:")
+    for chunk in _response_chunks(resp, deadline, progress):
+        if (
+            reasoning_deadline is not None
+            and not content_parts
+            and time.perf_counter() >= reasoning_deadline
+        ):
+            progress["reasoning_only_timeout"] = True
+            raise TimeoutError("reasoning-only watchdog exceeded")
+        pending += chunk
+        if is_sse is None:
+            if b"\xef\xbb\xbf".startswith(pending) and len(pending) < 3:
+                continue
+            pending = pending.removeprefix(b"\xef\xbb\xbf")
+            prefix = pending.lstrip()
+            if not prefix:
+                continue
+            # Some compatible gateways omit
+            # Content-Type, or ignore stream=true and send a complete JSON body.
+            if target_format == "openai_chat" and any(field.startswith(prefix) for field in sse_prefixes):
+                continue  # a field name may be split across socket reads
+            is_sse = target_format == "openai_chat" and prefix.startswith(sse_prefixes)
+        if is_sse:
+            while b"\n" in pending and not done:
+                line, pending = pending.split(b"\n", 1)
+                consume_line(line)
+            if done:
+                break
+    if (
+        reasoning_deadline is not None
+        and not content_parts
+        and time.perf_counter() >= reasoning_deadline
+    ):
+        progress["reasoning_only_timeout"] = True
+        raise TimeoutError("reasoning-only watchdog exceeded")
+    if not is_sse:
+        return json.loads(pending.decode("utf-8"))
+    if not done:
+        if pending:
+            consume_line(pending)
+        consume_event()
+    if not done and not finish_reason:
+        raise _LLMTransientError("LLM 流式响应中断：未收到结束标记，不能使用未完成答案")
+    return {
+        "choices": [{"index": 0, "message": {
+            "content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts),
+        }, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
+
+def _validate_llm_answer(res_json: Dict[str, Any], content: str, reasoning: str,
+                         response_format: Optional[Dict[str, Any]], model: str) -> str:
+    choices = res_json.get("choices") or [{}]
+    finish = choices[0].get("finish_reason") or res_json.get("stop_reason")
+    if finish in ("length", "max_tokens") or res_json.get("status") == "incomplete":
+        raise _LLMTransientError(f"模型 {model} 输出被截断（{finish or 'incomplete'}），未获得完整答案")
+    if not content:
+        detail = "仅返回思考内容，没有最终答案" if reasoning else "返回空正文"
+        raise _LLMTransientError(
+            f"模型 {model} {detail}", reasoning_only=bool(reasoning)
+        )
+    if response_format and response_format.get("type") in ("json_object", "json_schema"):
+        # Normalize fenced JSON for all callers and retry malformed/truncated
+        # answers inside this chain. The unnormalized answer remains in the archive.
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
         try:
-            res_json = json.loads(body_bytes.decode("utf-8", errors="replace"))
+            value = json.loads(text)
         except ValueError as exc:
-            raise _LLMTransientError(f"LLM 响应体非 JSON（模型 {cand['model']}）：{str(body_bytes[:160])!r}") from exc
+            raise _LLMTransientError(f"模型 {model} 未返回有效 JSON 答案") from exc
+        if response_format.get("type") == "json_object" and not isinstance(value, dict):
+            raise _LLMTransientError(f"模型 {model} JSON 答案必须为对象")
+        return text
+    return content
 
-    content, reasoning, usage = _parse_llm_response(cand.get("api_format", "openai_chat"), res_json)
-    if not content and not reasoning:
-        raise _LLMTransientError(f"模型 {cand['model']} 返回空正文（HTTP 200 但无 content/reasoning，疑似上游静默失败）")
-    return content, reasoning, usage, latency_ms
+
+def _adapt_chat_payload(payload: Dict[str, Any], error_body: str) -> Optional[Dict[str, Any]]:
+    """Change only a named rejected parameter, preserving the other request settings."""
+    low = error_body.lower()
+    adapted = dict(payload)
+    for key in (
+        "stream_options", "response_format", "temperature", "reasoning_effort",
+        "enable_thinking", "max_tokens", "stream",
+    ):
+        if key in payload and re.search(r"\b" + key + r"\b", low):
+            adapted.pop(key)
+            if key == "stream":
+                adapted.pop("stream_options", None)
+            return adapted
+    return None

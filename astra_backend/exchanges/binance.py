@@ -1,0 +1,2219 @@
+"""Binance USDⓈ-M USDT 永续适配器（完整私有面 + 公开行情面）。
+
+移植自 cnlimiter/r20-quantum-trader 的 ``feat/binance-upstream`` 分支
+（``r20_exchange/binance.py``），适配本仓 ``astra_backend`` 结构：
+- 模块内数量用 base-asset Decimal（币本位数量），与 OKX 的 contracts（张）不同；
+- ``BinanceExchange`` = 自包含完整实现（HMAC 签名下单、时间同步、幂等对账、
+  独立算法单保护腿 SL/TP、durable pending 崩溃恢复、持仓历史重建）；
+- ``BinancePublicAdapter`` = ``BaseExchangeAdapter`` 子类，只暴露公开行情面，
+  供 registry 多所聚合矩阵统一入口使用（``supports_orders=False`` 恒关执行闸）。
+
+clientOrderId 命名空间沿用上游 ``R20G{hex}{EN|SL|TP|SX|CL}`` 前缀：这是**交易所
+订单 ID 命名空间**（全局唯一标识），与项目内部命名无关，保留以维持与上游的
+幂等对账语义逐字一致、便于后续同步上游修复。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import math
+import re
+import secrets
+import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from typing import Any
+from urllib.parse import urlencode
+
+import requests
+
+from .base import (BaseExchangeAdapter, ExchangeCapabilities,
+                     InstrumentSpec, canonical_base)
+from scripts.order_risk import validate_quote_geometry_and_rr
+from .binance_pending import (
+    PENDING_LOCK,
+    PendingStoreCorrupt,
+    load_pending_entries,
+    new_record,
+    pending_state_path,
+    save_pending_entries,
+)
+
+LIVE_HOST = "https://fapi.binance.com"
+DEMO_HOST = "https://demo-fapi.binance.com"
+RECV_WINDOW_MS = 5000
+TRADE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+TRADE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000
+ORDER_MAX_AGE_MS = 15 * 60 * 1000
+UNKNOWN_MUTATE_CODES = {-1000, -1006, -1007}
+CLIENT_ID_RE = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
+INST_RE = re.compile(r"^([A-Z0-9]+)-USDT-SWAP$")
+GROUP_RE = re.compile(r"^R20G([0-9a-f]{12})([A-Z]{2})$")
+BAR_INTERVALS = {
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1H": "1h",
+    "1h": "1h",
+    "2H": "2h",
+    "2h": "2h",
+    "4H": "4h",
+    "4h": "4h",
+    "6H": "6h",
+    "6h": "6h",
+    "8H": "8h",
+    "8h": "8h",
+    "12H": "12h",
+    "12h": "12h",
+    "1D": "1d",
+    "1d": "1d",
+    "1W": "1w",
+    "1w": "1w",
+    "1M": "1M",
+}
+ORDER_STATES = {
+    "NEW": "live",
+    "PARTIALLY_FILLED": "partially_filled",
+    "FILLED": "filled",
+    "CANCELED": "canceled",
+    "EXPIRED": "canceled",
+    "EXPIRED_IN_MATCH": "canceled",
+    "REJECTED": "canceled",
+}
+TERMINAL_ORDER_STATES = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+ALGO_LIVE_STATES = {"NEW", "RUNNING", "TRIGGERING"}
+ALGO_DEAD_STATES = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FINISHED", "TRIGGERED"}
+UNKNOWN_BODY_HINTS = (
+    "unknown error, please check your request",
+    "request occur unknown error",
+)
+SENSITIVE_RE = re.compile(r"(signature|X-MBX-APIKEY|api[_-]?key|secret)\s*[=:]\s*[^&\s]+", re.I)
+
+
+def _decimal(value: Any) -> Decimal:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Exchange numeric values must be finite")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Invalid exchange numeric value") from exc
+    if not result.is_finite():
+        raise ValueError("Exchange numeric values must be finite")
+    return result
+
+
+def _text(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def _sanitize(message: Any, *tokens: str) -> str:
+    text = SENSITIVE_RE.sub(r"\1=[redacted]", str(message))
+    for token in tokens:
+        if token:
+            text = text.replace(token, "[redacted]")
+    return text
+
+
+def _host_for(mode: str) -> str:
+    if mode == "live":
+        return LIVE_HOST
+    if mode == "demo":
+        return DEMO_HOST
+    raise ValueError("Unsupported Binance environment")
+
+
+def _to_symbol(inst_id: str) -> str:
+    match = INST_RE.fullmatch(str(inst_id or "").strip().upper())
+    if not match:
+        raise ValueError("Instrument is not a USDT perpetual contract")
+    return f"{match.group(1)}USDT"
+
+
+def _from_symbol(symbol: str) -> str:
+    raw = str(symbol or "").upper()
+    if not raw.endswith("USDT") or len(raw) <= 4:
+        raise ValueError("Instrument is not a USDT perpetual contract")
+    return f"{raw[:-4]}-USDT-SWAP"
+
+
+def _floor_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        raise ValueError("Filter step must be positive")
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+class BinanceAPIError(RuntimeError):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+
+def _bool_text(value: Any) -> bool:
+    return str(value).strip().lower() in {"true", "1", "yes"}
+
+
+class UncertainSubmission(RuntimeError):
+    def __init__(self, message: str, client_id: str = "") -> None:
+        super().__init__(message)
+        self.client_id = client_id
+
+
+class BinanceExchange:
+    def __init__(self, env: Any, session: Any = None) -> None:
+        self.env = env
+        self.session = session if session is not None else requests.Session()
+        self._filters: dict[str, dict[str, Any]] = {}
+        self._hedge: bool | None = None
+        self._time_offset_ms = 0
+        self._time_synced_at = 0.0
+
+
+    def close(self) -> None:
+        closer = getattr(self.session, "close", None)
+        if callable(closer):
+            closer()
+
+    def _base_url(self) -> str:
+        return _host_for(str(getattr(self.env, "mode", "")).lower())
+
+    def _api_key(self) -> str:
+        return str(getattr(self.env, "api_key", "") or "")
+
+    def _secret(self) -> str:
+        return str(getattr(self.env, "secret_key", "") or "")
+
+    def _configured(self) -> bool:
+        configured = getattr(self.env, "configured", None)
+        if configured is not None:
+            return bool(configured)
+        return bool(self._api_key() and self._secret())
+
+    def _sync_time_offset(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self._time_synced_at and (now - self._time_synced_at) < 30.0:
+            return
+        start_ms = int(time.time() * 1000)
+        try:
+            row = self._public("/fapi/v1/time")
+        except Exception:
+            self._time_synced_at = now
+            return
+        end_ms = int(time.time() * 1000)
+        try:
+            server = int((row or {}).get("serverTime"))
+        except (TypeError, ValueError, AttributeError):
+            self._time_synced_at = now
+            return
+        mid_ms = (start_ms + end_ms) // 2
+        self._time_offset_ms = server - mid_ms
+        self._time_synced_at = now
+
+
+    def _signed_timestamp_ms(self) -> int:
+        self._sync_time_offset()
+        return int(time.time() * 1000) + int(self._time_offset_ms)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        signed: bool = False,
+        mutate: bool = False,
+        client_id: str = "",
+        retry_429: bool = True,
+        retry_time: bool = True,
+    ) -> Any:
+        method = method.upper()
+        payload: dict[str, str] = {}
+        for key, value in (params or {}).items():
+            if value is None or value == "":
+                continue
+            if isinstance(value, bool):
+                payload[key] = "true" if value else "false"
+            else:
+                payload[key] = str(value)
+        if signed:
+            if not self._configured():
+                raise ValueError("Binance credentials are not configured")
+            payload["timestamp"] = str(self._signed_timestamp_ms())
+            payload["recvWindow"] = str(RECV_WINDOW_MS)
+            unsigned = urlencode(payload)
+            signature = hmac.new(self._secret().encode(), unsigned.encode(), hashlib.sha256).hexdigest()
+            query = f"{unsigned}&signature={signature}"
+            headers = {"X-MBX-APIKEY": self._api_key()}
+        else:
+            query = urlencode(payload)
+            headers = {}
+        url = self._base_url() + path + (f"?{query}" if query else "")
+        try:
+            response = self.session.request(
+                method,
+                url,
+                headers=headers,
+                timeout=15,
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            message = _sanitize(exc, self._api_key(), self._secret())
+            if mutate:
+                raise UncertainSubmission(message, client_id) from exc
+            raise RuntimeError(message) from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status == 429 and not signed and not mutate and retry_429:
+            retry_after = getattr(response, "headers", {}) or {}
+            raw_wait = retry_after.get("Retry-After") or retry_after.get("retry-after") or 1
+            try:
+                delay = min(5.0, max(0.2, float(raw_wait)))
+            except (TypeError, ValueError):
+                delay = 1.0
+            time.sleep(delay)
+            return self._request(
+                method, path, params, signed=False, mutate=False, client_id=client_id, retry_429=False
+            )
+        if 300 <= status < 400:
+            raise RuntimeError("Binance redirected; refusing to follow credentials")
+        body = getattr(response, "text", "") or ""
+        if status == 503 and any(hint in body.lower() for hint in UNKNOWN_BODY_HINTS):
+            if mutate:
+                raise UncertainSubmission("Binance mutation result is unknown", client_id)
+            raise RuntimeError("Binance request result is unknown")
+        try:
+            payload_json = response.json()
+        except Exception as exc:
+            message = _sanitize(f"Binance returned a non-JSON response (HTTP {status})", self._api_key(), self._secret())
+            if mutate:
+                raise UncertainSubmission(message, client_id) from exc
+            raise RuntimeError(message) from exc
+        if isinstance(payload_json, dict) and isinstance(payload_json.get("code"), int) and payload_json["code"] < 0:
+            message = _sanitize(payload_json.get("msg") or "Binance request failed", self._api_key(), self._secret())
+            code = int(payload_json["code"])
+            if signed and code == -1021 and retry_time:
+                self._sync_time_offset(force=True)
+                return self._request(
+                    method, path, params, signed=True, mutate=mutate, client_id=client_id,
+                    retry_429=retry_429, retry_time=False,
+                )
+            if mutate and (code in UNKNOWN_MUTATE_CODES or status >= 500):
+                raise UncertainSubmission(message, client_id)
+            raise BinanceAPIError(code, message)
+        if status >= 500 and mutate:
+            raise UncertainSubmission(_sanitize(f"Binance request failed (HTTP {status})", self._api_key(), self._secret()), client_id)
+        if status >= 400:
+            raise RuntimeError(_sanitize(f"Binance request failed (HTTP {status})", self._api_key(), self._secret()))
+        return payload_json
+
+    def _public(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return self._request("GET", path, params, signed=False)
+
+    def _private(self, method: str, path: str, params: dict[str, Any] | None = None, *, mutate: bool = False, client_id: str = "") -> Any:
+        return self._request(method, path, params, signed=True, mutate=mutate, client_id=client_id)
+
+    def _interval(self, bar: str) -> str:
+        interval = BAR_INTERVALS.get(str(bar))
+        if not interval:
+            raise ValueError("Unsupported candle interval")
+        return interval
+
+    def _exact_symbol_row(self, rows: list[Any], symbol: str) -> dict[str, Any]:
+        matches = [
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == symbol
+        ]
+        if not matches:
+            raise RuntimeError("Binance exchangeInfo did not return the requested symbol")
+        if len(matches) > 1:
+            raise RuntimeError("Binance exchangeInfo returned duplicate rows for the requested symbol")
+        return matches[0]
+
+    def _parse_symbol_filters(self, inst_id: str, symbol: str, row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("contractType") != "PERPETUAL" or row.get("quoteAsset") != "USDT":
+            raise ValueError("Instrument is not a USDT perpetual contract")
+        raw_filters = row.get("filters")
+        if not isinstance(raw_filters, list):
+            raise RuntimeError("Binance symbol filters are malformed")
+        filters = {str(item.get("filterType")): item for item in raw_filters if isinstance(item, dict)}
+        lot = filters.get("LOT_SIZE") or {}
+        price = filters.get("PRICE_FILTER") or {}
+        notional = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
+        if not isinstance(lot, dict) or not isinstance(price, dict) or not isinstance(notional, dict):
+            raise RuntimeError("Binance symbol filters are malformed")
+        tick = str(price.get("tickSize") or "0")
+        step = str(lot.get("stepSize") or "0")
+        try:
+            if _decimal(tick) <= 0 or _decimal(step) <= 0:
+                raise RuntimeError("Binance symbol filters are malformed")
+        except ValueError as exc:
+            raise RuntimeError("Binance symbol filters are malformed") from exc
+        return {
+            "instId": inst_id,
+            "symbol": symbol,
+            "baseCcy": str(row.get("baseAsset") or inst_id.split("-")[0]),
+            "settleCcy": "USDT",
+            "state": "live" if row.get("status") == "TRADING" else str(row.get("status") or ""),
+            "tickSz": tick,
+            "lotSz": step,
+            "minSz": str(lot.get("minQty") or "0"),
+            "minNotional": str(notional.get("notional") or notional.get("minNotional") or "0"),
+            "minPrice": str(price.get("minPrice") or "0"),
+            "maxPrice": str(price.get("maxPrice") or "0"),
+        }
+
+    def _symbol_filters(self, inst_id: str) -> dict[str, Any]:
+        if inst_id in self._filters:
+            return self._filters[inst_id]
+        symbol = _to_symbol(inst_id)
+        info = self._public("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        rows = info.get("symbols") if isinstance(info, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise RuntimeError("Binance exchangeInfo is unavailable")
+        parsed = self._parse_symbol_filters(inst_id, symbol, self._exact_symbol_row(rows, symbol))
+        self._filters[inst_id] = parsed
+        return parsed
+
+    def _align_price(self, inst_id: str, price: Any) -> str:
+        meta = self._symbol_filters(inst_id)
+        tick = _decimal(meta["tickSz"])
+        value = _floor_step(_decimal(price), tick)
+        minimum = _decimal(meta["minPrice"])
+        if value <= 0 or (minimum > 0 and value < minimum):
+            raise ValueError("Price is below the exchange tick")
+        return _text(value)
+
+    def _align_qty(self, inst_id: str, size: Any, price: Any | None = None) -> str:
+        meta = self._symbol_filters(inst_id)
+        step = _decimal(meta["lotSz"])
+        minimum = _decimal(meta["minSz"])
+        quantity = _floor_step(_decimal(size), step)
+        if quantity <= 0 or quantity < minimum:
+            raise ValueError("Order quantity is below the exchange minimum")
+        if price is not None:
+            notional = quantity * _decimal(price)
+            floor = _decimal(meta["minNotional"])
+            if floor > 0 and notional < floor:
+                raise ValueError("Order notional is below the exchange minimum")
+        return _text(quantity)
+
+    def _hedge_mode(self) -> bool:
+        if self._hedge is None:
+            row = self._private("GET", "/fapi/v1/positionSide/dual")
+            if not isinstance(row, dict) or "dualSidePosition" not in row:
+                raise RuntimeError("Binance position mode is unavailable")
+            self._hedge = _bool_text(row.get("dualSidePosition"))
+        return self._hedge
+
+    def _position_side(self, pos_side: str) -> str:
+        side = str(pos_side or "").lower()
+        hedge = self._hedge_mode()
+        if hedge:
+            if side not in {"long", "short"}:
+                raise ValueError("Hedge mode requires long or short position side")
+            return "LONG" if side == "long" else "SHORT"
+        if side not in {"long", "short", "net"}:
+            raise ValueError("Invalid position direction")
+        return "BOTH"
+
+    def _close_side(self, pos_side: str) -> str:
+        side = str(pos_side or "").lower()
+        if side == "long":
+            return "SELL"
+        if side == "short":
+            return "BUY"
+        raise ValueError("Invalid position direction")
+
+    def _entry_side(self, side: str, pos_side: str) -> None:
+        pair = (str(side).lower(), str(pos_side).lower())
+        if pair not in {("buy", "long"), ("sell", "short")}:
+            raise ValueError("Entry side does not match position direction")
+    def _reject_mixed_exposure(self, inst_id: str, pos_side: str) -> None:
+        if self._hedge_mode():
+            return
+        wanted = str(pos_side).lower()
+        for row in self.positions(inst_id):
+            qty = _decimal(row.get("pos") or "0")
+            if qty == 0:
+                continue
+            existing = str(row.get("posSide") or "net").lower()
+            if existing == "net":
+                existing = "long" if qty > 0 else "short"
+            if existing != wanted:
+                raise ValueError("Conflicting opposite exposure in one-way mode")
+
+    def _group_ids(self, group: str) -> dict[str, str]:
+        ids = {
+            "EN": f"R20G{group}EN",
+            "SL": f"R20G{group}SL",
+            "TP": f"R20G{group}TP",
+            "SX": f"R20G{group}SX",
+            "CL": f"R20G{group}CL",
+        }
+        for value in ids.values():
+            if not CLIENT_ID_RE.fullmatch(value):
+                raise ValueError("Invalid client order id")
+        return ids
+
+    def _new_group(self) -> str:
+        return secrets.token_hex(6)
+
+    def _parse_group(self, client_id: str) -> tuple[str, str] | None:
+        match = GROUP_RE.fullmatch(str(client_id or ""))
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    def _query_order(self, symbol: str, *, order_id: str = "", client_id: str = "") -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        if client_id:
+            params["origClientOrderId"] = client_id
+        row = self._private("GET", "/fapi/v1/order", params)
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance order query failed")
+        return row
+
+    def _entry_live_or_filled(self, order: dict[str, Any]) -> bool:
+        status = str(order.get("status") or "").upper()
+        filled = _decimal(order.get("executedQty") or "0")
+        if status in {"NEW", "PARTIALLY_FILLED", "FILLED"}:
+            return True
+        return status in TERMINAL_ORDER_STATES and filled > 0
+
+    def _place_order(self, params: dict[str, Any], client_id: str) -> dict[str, Any]:
+        if str(params.get("type") or "").upper() == "MARKET" and "closePosition" in params:
+            raise ValueError("MARKET orders cannot include closePosition")
+        try:
+            row = self._private("POST", "/fapi/v1/order", params, mutate=True, client_id=client_id)
+        except UncertainSubmission:
+            try:
+                found = self._query_order(str(params["symbol"]), client_id=client_id)
+            except BinanceAPIError as exc:
+                if exc.code in {-2011, -2013}:
+                    raise UncertainSubmission("Binance order submission is unknown", client_id) from exc
+                raise RuntimeError("Binance order submission is unknown and could not be reconciled") from exc
+            except Exception as exc:
+                raise RuntimeError("Binance order submission is unknown and could not be reconciled") from exc
+            if str(params.get("type") or "").upper() != "MARKET" and not self._entry_live_or_filled(found):
+                raise RuntimeError("Entry order was not accepted")
+            return found
+        if not isinstance(row, dict) or not row.get("orderId"):
+            raise RuntimeError("Binance did not return a verifiable order ID")
+        if str(params.get("type") or "").upper() != "MARKET" and not self._entry_live_or_filled(row):
+            raise RuntimeError("Entry order was not accepted")
+        return row
+
+    def _query_algo(self, client_id: str) -> dict[str, Any]:
+        if not CLIENT_ID_RE.fullmatch(client_id):
+            raise ValueError("Invalid protective client order ID")
+        row = self._private("GET", "/fapi/v1/algoOrder", {"clientAlgoId": client_id})
+        if not isinstance(row, dict) or not row.get("algoId"):
+            raise RuntimeError("Binance protective order query is unavailable")
+        if row.get("clientAlgoId") not in (None, "", client_id):
+            raise RuntimeError("Binance protective order identity does not match")
+        return row
+
+    def _place_algo(self, params: dict[str, Any], client_id: str) -> dict[str, Any]:
+        try:
+            row = self._private("POST", "/fapi/v1/algoOrder", params, mutate=True, client_id=client_id)
+        except UncertainSubmission:
+            try:
+                found = self._query_algo(client_id)
+            except BinanceAPIError as exc:
+                if exc.code in {-2011, -2013}:
+                    raise UncertainSubmission("Binance algo submission is unknown", client_id) from exc
+                raise RuntimeError("Binance algo submission is unknown and could not be reconciled") from exc
+            except Exception as exc:
+                raise RuntimeError("Binance algo submission is unknown and could not be reconciled") from exc
+            return found
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance did not acknowledge algo order")
+        status = str(row.get("algoStatus") or row.get("status") or "")
+        if status and status not in {"NEW", "RUNNING", "TRIGGERING"}:
+            raise RuntimeError("Binance algo order was not accepted")
+        return row
+
+    def _cancel_order(self, symbol: str, *, order_id: str = "", client_id: str = "") -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        if client_id:
+            params["origClientOrderId"] = client_id
+        return self._private("DELETE", "/fapi/v1/order", params, mutate=True, client_id=client_id)
+
+    def _cancel_algo(self, client_algo_id: str) -> None:
+        try:
+            self._private("DELETE", "/fapi/v1/algoOrder", {"clientAlgoId": client_algo_id}, mutate=True, client_id=client_algo_id)
+        except UncertainSubmission:
+            try:
+                row = self._query_algo(client_algo_id)
+            except BinanceAPIError as exc:
+                if exc.code in {-2011, -2013}:
+                    return
+                raise
+            status = str(row.get("algoStatus") or row.get("status") or "").upper()
+            if status not in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FINISHED", "TRIGGERED"}:
+                raise RuntimeError("Binance algo cancellation is unknown")
+        except BinanceAPIError as exc:
+            if exc.code not in {-2011, -2013}:
+                raise
+
+    def _open_algos(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"algoType": "CONDITIONAL"}
+        if inst_id:
+            params["symbol"] = _to_symbol(inst_id)
+        rows = self._private("GET", "/fapi/v1/openAlgoOrders", params)
+        if rows is None:
+            raise RuntimeError("Binance open algo orders are unavailable")
+        if not isinstance(rows, list):
+            raise RuntimeError("Binance open algo orders are unavailable")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def _live_position_qty(self, inst_id: str, pos_side: str) -> Decimal:
+        wanted = str(pos_side).lower()
+        total = Decimal("0")
+        for row in self.positions(inst_id):
+            side = str(row.get("posSide") or "").lower()
+            qty = _decimal(row.get("pos") or "0")
+            if side == "net":
+                if wanted == "long" and qty > 0:
+                    total += qty
+                elif wanted == "short" and qty < 0:
+                    total += abs(qty)
+                elif wanted == "net":
+                    total += abs(qty)
+            elif side == wanted:
+                total += abs(qty)
+        return total
+
+    def _protection_params(self, inst_id: str, pos_side: str, trigger: str, kind: str, client_id: str) -> dict[str, Any]:
+        hedge = self._hedge_mode()
+        params: dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": _to_symbol(inst_id),
+            "side": self._close_side(pos_side),
+            "type": "STOP_MARKET" if kind == "SL" else "TAKE_PROFIT_MARKET",
+            "positionSide": self._position_side(pos_side),
+            "triggerPrice": trigger,
+            "workingType": "MARK_PRICE",
+            "closePosition": "true",
+            "clientAlgoId": client_id,
+        }
+        if hedge:
+            # Hedge mode must not send reduceOnly; closePosition forbids quantity.
+            params.pop("reduceOnly", None)
+            params.pop("quantity", None)
+        else:
+            params.pop("quantity", None)
+            params.pop("reduceOnly", None)
+        return params
+
+    def _confirm_algo(self, client_id: str) -> dict[str, Any]:
+        row = self._query_algo(client_id)
+        status = str(row.get("algoStatus") or row.get("status") or "")
+        if status not in {"NEW", "RUNNING", "TRIGGERING"}:
+            raise RuntimeError("Protective algo leg was not confirmed live")
+        return row
+
+    def _cancel_group(self, group: str) -> None:
+        ids = self._group_ids(group)
+        for kind in ("SL", "TP", "SX"):
+            self._cancel_algo(ids[kind])
+
+    def _pending_records(self) -> list[dict[str, Any]] | None:
+        with PENDING_LOCK:
+            try:
+                return load_pending_entries(self._pending_path())
+            except (PendingStoreCorrupt, OSError):
+                return None
+
+    def _pending_owned_groups(self, inst_id: str | None = None) -> set[str] | None:
+        rows = self._pending_records()
+        if rows is None:
+            return None
+        return {row["group"] for row in rows if inst_id is None or row["inst_id"] == inst_id}
+
+    def _sweep_orphans(self, inst_id: str, pos_side: str | None = None) -> None:
+        owned = self._pending_owned_groups(inst_id)
+        if owned is None:
+            return
+        live = {str(row.get("posSide") or "").lower(): _decimal(row.get("pos") or "0") for row in self.positions(inst_id)}
+        grouped: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in self._open_algos(inst_id):
+            parsed = self._parse_group(str(row.get("clientAlgoId") or ""))
+            if not parsed:
+                continue
+            group, kind = parsed
+            grouped.setdefault(group, {})[kind] = row
+        for group, legs in grouped.items():
+            if group in owned:
+                continue
+            sample = next(iter(legs.values()))
+            native_side = str(sample.get("positionSide") or "BOTH").upper()
+            logical = {"LONG": "long", "SHORT": "short", "BOTH": "net"}.get(native_side, "net")
+            if pos_side and logical not in {pos_side, "net"}:
+                continue
+            qty = live.get(logical, Decimal("0"))
+            if logical == "net":
+                qty = sum((abs(v) for v in live.values()), Decimal("0"))
+            complete = ("TP" in legs) and ("SL" in legs or "SX" in legs)
+            if qty == 0 or not complete:
+                self._cancel_group(group)
+
+    def _normalize_order(self, row: dict[str, Any]) -> dict[str, Any]:
+        native_side = str(row.get("positionSide") or "BOTH").upper()
+        pos_side = {"LONG": "long", "SHORT": "short"}.get(native_side, "net")
+        return {
+            "instId": _from_symbol(str(row.get("symbol"))),
+            "ordId": str(row.get("orderId") or ""),
+            "clOrdId": str(row.get("clientOrderId") or ""),
+            "posSide": pos_side,
+            "side": str(row.get("side") or "").lower(),
+            "state": ORDER_STATES.get(str(row.get("status") or ""), str(row.get("status") or "").lower()),
+            "sz": str(row.get("origQty") or "0"),
+            "accFillSz": str(row.get("executedQty") or "0"),
+            "px": str(row.get("price") or "0"),
+            "avgPx": str(row.get("avgPrice") or "0"),
+            "reduceOnly": "true" if _bool_text(row.get("reduceOnly")) else "false",
+            "cTime": str(row.get("time") or row.get("updateTime") or ""),
+            "uTime": str(row.get("updateTime") or row.get("time") or ""),
+            "quantity_unit": "base",
+        }
+
+    def _ticker_row(self, stats: dict[str, Any], book: dict[str, Any] | None = None) -> dict[str, Any]:
+        symbol = str(stats.get("symbol") or (book or {}).get("symbol") or "")
+        book = book or {}
+        return {
+            "instId": _from_symbol(symbol),
+            "last": str(stats.get("lastPrice") or "0"),
+            "bidPx": str(book.get("bidPrice") or stats.get("bidPrice") or "0"),
+            "askPx": str(book.get("askPrice") or stats.get("askPrice") or "0"),
+            "open24h": str(stats.get("openPrice") or "0"),
+            "high24h": str(stats.get("highPrice") or "0"),
+            "low24h": str(stats.get("lowPrice") or "0"),
+            "vol24h": str(stats.get("volume") or "0"),
+            "volCcy24h": str(stats.get("quoteVolume") or "0"),
+            "ts": str(stats.get("closeTime") or stats.get("time") or ""),
+        }
+
+    def instruments(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        if inst_id:
+            meta = self._symbol_filters(inst_id)
+            if meta["state"] != "live":
+                return []
+            return [{
+                "instId": meta["instId"],
+                "baseCcy": meta["baseCcy"],
+                "settleCcy": "USDT",
+                "state": "live",
+                "ctVal": "1",
+                "nativeCtVal": "1",
+                "lotSz": meta["lotSz"],
+                "minSz": meta["minSz"],
+                "tickSz": meta["tickSz"],
+                "minNotional": meta["minNotional"],
+                "quantity_unit": "base",
+            }]
+        info = self._public("/fapi/v1/exchangeInfo")
+        rows = info.get("symbols") if isinstance(info, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("Binance exchangeInfo is unavailable")
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("contractType") != "PERPETUAL" or row.get("quoteAsset") != "USDT" or row.get("status") != "TRADING":
+                continue
+            try:
+                mapped = _from_symbol(str(row["symbol"]))
+                parsed = self._parse_symbol_filters(mapped, str(row["symbol"]), row)
+            except (ValueError, RuntimeError, KeyError):
+                continue
+            self._filters[mapped] = parsed
+            result.append({
+                "instId": mapped,
+                "baseCcy": parsed["baseCcy"],
+                "settleCcy": "USDT",
+                "state": "live",
+                "ctVal": "1",
+                "nativeCtVal": "1",
+                "lotSz": parsed["lotSz"],
+                "minSz": parsed["minSz"],
+                "tickSz": parsed["tickSz"],
+                "minNotional": parsed["minNotional"],
+                "quantity_unit": "base",
+            })
+        return result
+
+    def ticker(self, inst_id: str) -> dict[str, Any]:
+        symbol = _to_symbol(inst_id)
+        stats = self._public("/fapi/v1/ticker/24hr", {"symbol": symbol})
+        book = self._public("/fapi/v1/ticker/bookTicker", {"symbol": symbol})
+        if not isinstance(stats, dict) or not isinstance(book, dict):
+            raise RuntimeError("Binance ticker unavailable")
+        return self._ticker_row(stats, book)
+
+    def tickers(self) -> dict[str, dict[str, Any]]:
+        stats = self._public("/fapi/v1/ticker/24hr")
+        books = self._public("/fapi/v1/ticker/bookTicker")
+        if not isinstance(stats, list) or not isinstance(books, list):
+            raise RuntimeError("Binance tickers unavailable")
+        book_map = {str(row.get("symbol")): row for row in books if isinstance(row, dict)}
+        live = {item["instId"] for item in self.instruments()}
+        result: dict[str, dict[str, Any]] = {}
+        for row in stats:
+            if not isinstance(row, dict):
+                continue
+            try:
+                inst_id = _from_symbol(str(row.get("symbol")))
+            except ValueError:
+                continue
+            if inst_id not in live:
+                continue
+            result[inst_id] = self._ticker_row(row, book_map.get(str(row.get("symbol"))))
+        return result
+
+    def candles(self, inst_id: str, bar: str = "15m", limit: int = 100) -> list[list[str]]:
+        from .candle_cache import get_or_fetch
+
+        def load(pull: int) -> list[list[str]]:
+            symbol = _to_symbol(inst_id)
+            rows = self._public(
+                "/fapi/v1/klines",
+                {"symbol": symbol, "interval": self._interval(bar), "limit": min(int(pull), 1500)},
+            )
+            if not isinstance(rows, list):
+                raise RuntimeError("Binance candles unavailable")
+            now = int(time.time() * 1000)
+            result: list[list[str]] = []
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 8:
+                    continue
+                close_time = int(row[6])
+                confirm = "0" if close_time > now else "1"
+                quote = str(row[7])
+                result.append([str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]), str(row[5]), quote, quote, confirm])
+            result.reverse()
+            return result
+
+        return get_or_fetch(self._base_url(), inst_id, bar, limit, load)
+
+    def orderbook(self, inst_id: str, sz: int = 5) -> dict[str, Any]:
+        symbol = _to_symbol(inst_id)
+        row = self._public("/fapi/v1/depth", {"symbol": symbol, "limit": int(sz)})
+        if not isinstance(row, dict) or "bids" not in row or "asks" not in row:
+            raise RuntimeError("Binance orderbook unavailable")
+        return {"bids": row.get("bids") or [], "asks": row.get("asks") or []}
+
+    def funding_rate(self, inst_id: str) -> float:
+        row = self._public("/fapi/v1/premiumIndex", {"symbol": _to_symbol(inst_id)})
+        if not isinstance(row, dict) or row.get("lastFundingRate") in (None, ""):
+            raise RuntimeError("Binance funding rate unavailable")
+        return float(_decimal(row["lastFundingRate"]) * 100)
+
+    def open_interest(self, inst_id: str) -> dict[str, Any]:
+        symbol = _to_symbol(inst_id)
+        oi = self._public("/fapi/v1/openInterest", {"symbol": symbol})
+        mark = self._public("/fapi/v1/premiumIndex", {"symbol": symbol})
+        if not isinstance(oi, dict) or oi.get("openInterest") in (None, ""):
+            raise RuntimeError("Binance open interest unavailable")
+        base = _decimal(oi["openInterest"])
+        price = _decimal((mark or {}).get("markPrice") or "0") if isinstance(mark, dict) else Decimal("0")
+        if price <= 0:
+            raise RuntimeError("Binance mark price unavailable for open-interest valuation")
+        return {"oi": _text(base), "oiCcy": _text(base), "oiUsd": _text(base * price), "ts": str(oi.get("time") or "")}
+
+    def long_short_ratio(self, inst_id: str) -> float | None:
+        try:
+            rows = self._public(
+                "/futures/data/globalLongShortAccountRatio",
+                {"symbol": _to_symbol(inst_id), "period": "5m", "limit": 1},
+            )
+        except RuntimeError:
+            return None
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        ratio = rows[0].get("longShortRatio")
+        if ratio in (None, ""):
+            return None
+        return float(_decimal(ratio))
+
+    def taker_volume(self, inst_id: str) -> dict[str, Any] | None:
+        symbol = _to_symbol(inst_id)
+        try:
+            rows = self._public(
+                "/futures/data/takerlongshortRatio",
+                {"symbol": symbol, "period": "5m", "limit": 1},
+            )
+        except RuntimeError:
+            return None
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        row = rows[0]
+        buy = row.get("buyVol")
+        sell = row.get("sellVol")
+        if buy in (None, "") or sell in (None, ""):
+            return None
+        try:
+            mark = self._public("/fapi/v1/premiumIndex", {"symbol": symbol})
+        except RuntimeError:
+            return None
+        price = _decimal((mark or {}).get("markPrice") or "0") if isinstance(mark, dict) else Decimal("0")
+        if price <= 0:
+            return None
+        # Convert BASE volumes to estimated USDT notional at the current mark price.
+        return {"buyVol": _text(_decimal(buy) * price), "sellVol": _text(_decimal(sell) * price)}
+
+    def balance(self) -> list[dict[str, Any]]:
+        row = self._private("GET", "/fapi/v2/account")
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance account snapshot is unavailable")
+        details = []
+        for asset in row.get("assets") or []:
+            if not isinstance(asset, dict) or asset.get("asset") != "USDT":
+                continue
+            details.append({
+                "ccy": "USDT",
+                "eq": str(asset.get("marginBalance") or "0"),
+                "availBal": str(asset.get("availableBalance") or "0"),
+                "cashBal": str(asset.get("walletBalance") or "0"),
+                "upl": str(asset.get("unrealizedProfit") or "0"),
+            })
+        if not details:
+            raise RuntimeError("Binance USDT balance is unavailable")
+        return [{"totalEq": str(row.get("totalMarginBalance") or details[0]["eq"]), "details": details}]
+
+    def positions(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        params = {"symbol": _to_symbol(inst_id)} if inst_id else None
+        rows = self._private("GET", "/fapi/v2/positionRisk", params)
+        if not isinstance(rows, list):
+            raise RuntimeError("Binance positions are unavailable")
+        hedge = self._hedge_mode()
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            amt = _decimal(row.get("positionAmt") or "0")
+            if amt == 0:
+                continue
+            try:
+                mapped = _from_symbol(str(row.get("symbol")))
+            except ValueError:
+                continue
+            native = str(row.get("positionSide") or "BOTH").upper()
+            if hedge:
+                pos_side = "long" if native == "LONG" else "short" if native == "SHORT" else ""
+                if not pos_side:
+                    continue
+                pos = abs(amt)
+            else:
+                pos_side = "net"
+                pos = amt
+            mgn = "isolated" if str(row.get("marginType") or "").lower() == "isolated" else "cross"
+            result.append({
+                "instId": mapped,
+                "posSide": pos_side,
+                "pos": _text(pos),
+                "avgPx": str(row.get("entryPrice") or "0"),
+                "markPx": str(row.get("markPrice") or "0"),
+                "upl": str(row.get("unRealizedProfit") or "0"),
+                "lever": str(row.get("leverage") or "0"),
+                "mgnMode": mgn,
+                "margin": str(row.get("isolatedMargin") or row.get("positionInitialMargin") or "0"),
+                "notionalUsd": str(row.get("notional") or "0"),
+                "liqPx": str(row.get("liquidationPrice") or "0"),
+                "posId": str(row.get("symbol") or "") + native,
+                "cTime": str(row.get("updateTime") or ""),
+                "uTime": str(row.get("updateTime") or ""),
+                "quantity_unit": "base",
+            })
+        return result
+
+    def open_orders(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        params = {"symbol": _to_symbol(inst_id)} if inst_id else None
+        rows = self._private("GET", "/fapi/v1/openOrders", params)
+        if not isinstance(rows, list):
+            raise RuntimeError("Binance open orders are unavailable")
+        return [self._normalize_order(row) for row in rows if isinstance(row, dict)]
+
+    def order_history(self, inst_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        symbols: list[str]
+        if inst_id:
+            symbols = [_to_symbol(inst_id)]
+        else:
+            symbols = sorted({_to_symbol(row["instId"]) for row in self.positions()})
+            for bill in self._income():
+                symbol = str(bill.get("symbol") or "")
+                if symbol and symbol not in symbols:
+                    symbols.append(symbol)
+        result: list[dict[str, Any]] = []
+        for symbol in symbols:
+            rows = self._private("GET", "/fapi/v1/allOrders", {"symbol": symbol, "limit": min(int(limit), 1000)})
+            if not isinstance(rows, list):
+                raise RuntimeError("Binance order history is unavailable")
+            result.extend(self._normalize_order(row) for row in rows if isinstance(row, dict))
+        result.sort(key=lambda row: int(row.get("uTime") or 0), reverse=True)
+        return result[: int(limit)]
+
+    def fills(self, inst_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+        rows = self._private(
+            "GET",
+            "/fapi/v1/userTrades",
+            {"symbol": _to_symbol(inst_id), "limit": min(int(limit), 1000)},
+        )
+        if not isinstance(rows, list):
+            raise RuntimeError("Binance user trades are unavailable")
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            native = str(row.get("positionSide") or "BOTH").upper()
+            fee = self._usdt_fee(row)
+            result.append({
+                "instId": inst_id,
+                "tradeId": str(row.get("id") or ""),
+                "ordId": str(row.get("orderId") or ""),
+                "side": str(row.get("side") or "").lower(),
+                "posSide": {"LONG": "long", "SHORT": "short"}.get(native, "net"),
+                "px": str(row.get("price") or "0"),
+                "sz": str(row.get("qty") or "0"),
+                "fee": _text(fee) if fee is not None else str(row.get("commission") or "0"),
+                "feeCcy": str(row.get("commissionAsset") or "USDT"),
+                "pnl": str(row.get("realizedPnl") or "0"),
+                "ts": str(row.get("time") or ""),
+                "quantity_unit": "base",
+            })
+        return result
+
+    def _income(self, limit: int | None = None) -> list[dict[str, Any]]:
+        if limit is not None:
+            # Dashboard callers request a bounded recent view, not a full audit scan.
+            rows = self._private("GET", "/fapi/v1/income", {"limit": min(max(int(limit), 1), 1000)})
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise RuntimeError("Binance income history is unavailable")
+            return sorted(rows, key=lambda row: int(row.get("time") or 0), reverse=True)[:int(limit)]
+        now = int(time.time() * 1000)
+        oldest_allowed = now - TRADE_LOOKBACK_MS
+        end = now
+        found: list[dict[str, Any]] = []
+        seen: set[tuple[Any, Any]] = set()
+        while end > oldest_allowed:
+            start = max(oldest_allowed, end - TRADE_WINDOW_MS)
+            page = 1
+            while True:
+                chunk = self._private(
+                    "GET",
+                    "/fapi/v1/income",
+                    {"startTime": start, "endTime": end, "page": page, "limit": 1000},
+                )
+                if not isinstance(chunk, list):
+                    raise RuntimeError("Binance income history is unavailable")
+                for row in chunk:
+                    if not isinstance(row, dict):
+                        continue
+                    key = (row.get("incomeType"), row.get("tranId"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    found.append(row)
+                if len(chunk) < 1000:
+                    break
+                page += 1
+                if page > 100:
+                    self._raise_incomplete()
+            end = start - 1
+        found.sort(key=lambda item: int(item.get("time") or 0), reverse=True)
+        return found
+
+    def _raise_incomplete(self) -> None:
+        error = RuntimeError("Binance positions history is incomplete and unavailable")
+        error.incomplete = True  # type: ignore[attr-defined]
+        error.status = "unavailable"  # type: ignore[attr-defined]
+        error.code = "positions_history_incomplete"  # type: ignore[attr-defined]
+        error.window_limited = True  # type: ignore[attr-defined]
+        raise error
+
+    def _signed_fill_delta(self, side: str, pos_side: str, qty: Decimal) -> Decimal:
+        trade_side = side.upper()
+        native = pos_side.upper()
+        if native == "LONG":
+            return qty if trade_side == "BUY" else -qty
+        if native == "SHORT":
+            return qty if trade_side == "SELL" else -qty
+        return qty if trade_side == "BUY" else -qty
+
+    def _usdt_fee(self, row: dict[str, Any]) -> Decimal | None:
+        raw = _decimal(row.get("commission") or "0")
+        if raw == 0:
+            return Decimal("0")
+        asset = str(row.get("commissionAsset") or "USDT").upper()
+        if asset != "USDT":
+            return None
+        return -raw
+
+    def _fetch_user_trades(self, symbol: str) -> list[dict[str, Any]]:
+        now = int(time.time() * 1000)
+        pending = [(now - TRADE_LOOKBACK_MS, now)]
+        found: dict[Any, dict[str, Any]] = {}
+        while pending:
+            start, end = pending.pop()
+            if end - start > TRADE_WINDOW_MS:
+                boundary = end - TRADE_WINDOW_MS
+                pending.append((start, boundary - 1))
+                start = boundary
+            chunk = self._private(
+                "GET", "/fapi/v1/userTrades",
+                {"symbol": symbol, "startTime": start, "endTime": end, "limit": 1000},
+            )
+            if not isinstance(chunk, list) or any(not isinstance(row, dict) for row in chunk):
+                raise RuntimeError("Binance user trades are unavailable")
+            if len(chunk) >= 1000:
+                if start >= end:
+                    self._raise_incomplete()
+                middle = (start + end) // 2
+                pending.extend(((middle + 1, end), (start, middle)))
+                continue
+            for row in chunk:
+                if row.get("id") is None:
+                    self._raise_incomplete()
+                found[row["id"]] = row
+        return sorted(found.values(), key=lambda item: (int(item.get("time") or 0), int(item["id"])))
+
+    def _live_signed_map(self) -> dict[tuple[str, str], Decimal]:
+        mapping: dict[tuple[str, str], Decimal] = {}
+        for row in self.positions():
+            inst = str(row.get("instId") or "")
+            side = str(row.get("posSide") or "net").lower()
+            qty = _decimal(row.get("pos") or "0")
+            if side == "long":
+                key = (inst, "LONG")
+                mapping[key] = mapping.get(key, Decimal("0")) + abs(qty)
+            elif side == "short":
+                key = (inst, "SHORT")
+                mapping[key] = mapping.get(key, Decimal("0")) + abs(qty)
+            else:
+                key = (inst, "BOTH")
+                mapping[key] = mapping.get(key, Decimal("0")) + qty
+        return mapping
+
+    def positions_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        live_before = self._live_signed_map()
+        income = self._income()
+        symbols = sorted({str(row.get("symbol") or "") for row in income if str(row.get("symbol") or "").endswith("USDT")})
+        for inst, _native in live_before:
+            symbol = _to_symbol(inst)
+            if symbol not in symbols:
+                symbols.append(symbol)
+        proven: list[dict[str, Any]] = []
+        fetched: dict[str, list[dict[str, Any]]] = {}
+        for symbol in symbols:
+            fetched[symbol] = self._fetch_user_trades(symbol)
+        live_after = self._live_signed_map()
+        if live_before != live_after:
+            self._raise_incomplete()
+        for symbol, fills in fetched.items():
+            try:
+                inst_id = _from_symbol(symbol)
+            except ValueError:
+                continue
+            buckets: dict[str, list[dict[str, Any]]] = {}
+            for row in fills:
+                if not isinstance(row, dict):
+                    continue
+                native = str(row.get("positionSide") or "BOTH").upper()
+                buckets.setdefault(native, []).append(row)
+            for native, rows in buckets.items():
+                net = sum((self._signed_fill_delta(str(row.get("side") or ""), native, _decimal(row.get("qty") or "0")) for row in rows), Decimal("0"))
+                start = live_after.get((inst_id, native), Decimal("0")) - net
+                if start != 0:
+                    self._raise_incomplete()
+                closed, missing = self._cycles_from_fills(inst_id, native, rows)
+                if missing:
+                    self._raise_incomplete()
+                proven.extend(closed)
+        proven.sort(key=lambda row: int(row.get("uTime") or 0), reverse=True)
+        return proven[: int(limit)]
+
+    def _split_fill(self, row: dict[str, Any], close_qty: Decimal, open_qty: Decimal) -> tuple[dict[str, Any], dict[str, Any]]:
+        total = close_qty + open_qty
+        close_part = dict(row)
+        open_part = dict(row)
+        close_part["qty"] = _text(close_qty)
+        open_part["qty"] = _text(open_qty)
+        raw_fee = _decimal(row.get("commission") or "0")
+        if total > 0:
+            close_part["commission"] = _text(raw_fee * close_qty / total)
+            open_part["commission"] = _text(raw_fee * open_qty / total)
+        open_part["realizedPnl"] = "0"
+        return close_part, open_part
+
+    def _cycles_from_fills(self, inst_id: str, native: str, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+        proven: list[dict[str, Any]] = []
+        running = Decimal("0")
+        cycle: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda item: (int(item.get("time") or 0), int(item.get("id") or 0))):
+            qty = _decimal(row.get("qty") or "0")
+            delta = self._signed_fill_delta(str(row.get("side") or ""), native, qty)
+            if running == 0:
+                cycle = [row]
+                running = delta
+                continue
+            next_qty = running + delta
+            if next_qty * running < 0:
+                close_qty = abs(running)
+                open_qty = abs(next_qty)
+                close_part, open_part = self._split_fill(row, close_qty, open_qty)
+                cycle.append(close_part)
+                closed = self._closed_cycle(inst_id, native, cycle)
+                if closed is None:
+                    return [], True
+                proven.append(closed)
+                cycle = [open_part]
+                running = next_qty
+                continue
+            cycle.append(row)
+            running = next_qty
+            if running == 0:
+                closed = self._closed_cycle(inst_id, native, cycle)
+                if closed is None:
+                    return [], True
+                proven.append(closed)
+                cycle = []
+        return proven, False
+
+    def _closed_cycle(self, inst_id: str, native: str, cycle: list[dict[str, Any]]) -> dict[str, Any] | None:
+        opens: list[dict[str, Any]] = []
+        closes: list[dict[str, Any]] = []
+        fee = Decimal("0")
+        direction = "short" if native == "SHORT" or (native == "BOTH" and str(cycle[0].get("side")).upper() == "SELL") else "long"
+        opening_sign = Decimal("-1") if native == "BOTH" and direction == "short" else Decimal("1")
+        for item in cycle:
+            signed_fee = self._usdt_fee(item)
+            if signed_fee is None:
+                return None
+            fee += signed_fee
+            delta = self._signed_fill_delta(str(item.get("side") or ""), native, _decimal(item.get("qty") or "0")) * opening_sign
+            if delta > 0:
+                opens.append(item)
+            elif delta < 0:
+                closes.append(item)
+        open_qty = sum((_decimal(item.get("qty") or "0") for item in opens), Decimal("0"))
+        close_qty = sum((_decimal(item.get("qty") or "0") for item in closes), Decimal("0"))
+        if open_qty <= 0 or close_qty <= 0:
+            return None
+        open_notional = sum((_decimal(item.get("price") or "0") * _decimal(item.get("qty") or "0") for item in opens), Decimal("0"))
+        close_notional = sum((_decimal(item.get("price") or "0") * _decimal(item.get("qty") or "0") for item in closes), Decimal("0"))
+        pnl = sum((_decimal(item.get("realizedPnl") or "0") for item in cycle), Decimal("0"))
+        entry_order_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for item in opens:
+            raw_id = item.get("orderId")
+            if raw_id in (None, ""):
+                continue
+            oid = str(raw_id)
+            if oid in seen_ids:
+                continue
+            seen_ids.add(oid)
+            entry_order_ids.append(oid)
+        return {
+            "instId": inst_id,
+            "direction": direction,
+            "openAvgPx": _text(open_notional / open_qty),
+            "closeAvgPx": _text(close_notional / close_qty),
+            "pnl": _text(pnl),
+            "fee": _text(fee),
+            "openFee": _text(sum((self._usdt_fee(item) or Decimal("0") for item in opens), Decimal("0"))),
+            "closeFee": _text(sum((self._usdt_fee(item) or Decimal("0") for item in closes), Decimal("0"))),
+            "lever": None,
+            "closeTotalPos": _text(close_qty),
+            "openMaxPos": _text(open_qty),
+            "cTime": str(cycle[0].get("time") or ""),
+            "uTime": str(cycle[-1].get("time") or ""),
+            "type": "1",
+            "pnlRatio": None,
+            "posId": str(cycle[0].get("orderId") or ""),
+            "entryOrderIds": entry_order_ids,
+            "quantity_unit": "base",
+        }
+
+    def bills(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = []
+        for item in self._income(limit):
+            income_type = str(item.get("incomeType") or "")
+            amount = str(item.get("income") or "0")
+            inst = ""
+            symbol = str(item.get("symbol") or "")
+            if symbol:
+                try:
+                    inst = _from_symbol(symbol)
+                except ValueError:
+                    inst = ""
+            if income_type == "REALIZED_PNL":
+                bill_type, sub_type, pnl, fee = "realized_pnl", "pnl", amount, "0"
+            elif income_type == "COMMISSION":
+                bill_type, sub_type, pnl, fee = "commission", "fee", "0", amount
+            elif income_type == "FUNDING_FEE":
+                bill_type, sub_type, pnl, fee = "funding_fee", "funding", amount, "0"
+            else:
+                bill_type, sub_type, pnl, fee = income_type.lower() or "other", income_type.lower() or "other", amount, "0"
+            rows.append({
+                "billId": f"{income_type}:{item.get('tranId')}" if item.get("tranId") not in (None, "") else str(item.get("tradeId") or ""),
+                "ts": str(item.get("time") or ""),
+                "instId": inst,
+                "type": bill_type,
+                "subType": sub_type,
+                "pnl": pnl,
+                "fee": fee,
+                "balChg": amount,
+                "ccy": str(item.get("asset") or "USDT"),
+                "ordId": "",
+                "tradeId": str(item.get("tradeId") or ""),
+            })
+        return rows[: int(limit)]
+
+    def cancel_order(self, inst_id: str, order_id: str) -> dict[str, Any]:
+        row = self._cancel_order(_to_symbol(inst_id), order_id=str(order_id))
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance cancellation was not acknowledged")
+        return self._normalize_order(row)
+
+    def close_position(
+        self,
+        inst_id: str,
+        pos_side: str,
+        *,
+        cancel_protection: bool = True,
+        client_id: str = "",
+        quantity: Any | None = None,
+    ) -> dict[str, Any]:
+        hedge = self._hedge_mode()
+        logical = str(pos_side or "").lower()
+        live = self._live_position_qty(inst_id, logical)
+        qty = live if quantity is None else _decimal(quantity)
+        if qty <= 0:
+            raise RuntimeError("No live position to close")
+        if qty > live:
+            raise RuntimeError("Close quantity exceeds live position")
+        aligned = self._align_qty(inst_id, qty)
+        if logical == "net":
+            if hedge:
+                raise ValueError("Hedge mode requires long or short position side")
+            held = self.positions(inst_id)
+            signed = _decimal(held[0].get("pos") or "0") if held else Decimal("0")
+            side = "SELL" if signed > 0 else "BUY"
+            position_side = "BOTH"
+            reduce_only = True
+        elif hedge:
+            side = self._close_side(logical)
+            position_side = "LONG" if logical == "long" else "SHORT"
+            reduce_only = False
+        else:
+            side = self._close_side(logical)
+            position_side = "BOTH"
+            reduce_only = True
+        if client_id:
+            if not CLIENT_ID_RE.fullmatch(client_id):
+                raise ValueError("Invalid client order id")
+        else:
+            client_id = f"R20C{secrets.token_hex(8)}"[:36]
+        params: dict[str, Any] = {
+            "symbol": _to_symbol(inst_id),
+            "side": side,
+            "type": "MARKET",
+            "quantity": aligned,
+            "positionSide": position_side,
+            "newClientOrderId": client_id,
+            "newOrderRespType": "RESULT",
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        if "closePosition" in params:
+            raise ValueError("MARKET orders cannot include closePosition")
+        row = self._place_order(params, client_id)
+        if cancel_protection and self._live_position_qty(inst_id, logical) == 0:
+            self._sweep_orphans(inst_id, None if logical == "net" else logical)
+        return self._normalize_order(row)
+
+    def set_leverage(self, inst_id: str, leverage: Any, pos_side: str = "long") -> dict[str, Any]:
+        _ = pos_side
+        value = _decimal(leverage)
+        if value <= 0 or value != value.to_integral_value():
+            raise ValueError("Leverage must be a positive integer")
+        row = self._private("POST", "/fapi/v1/leverage", {"symbol": _to_symbol(inst_id), "leverage": str(int(value))}, mutate=True)
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance leverage change was not acknowledged")
+        return row
+
+    def _validate_geometry(self, pos_side: str, price: Decimal, tp: Decimal, sl: Decimal) -> None:
+        action = "BUY_LONG" if pos_side == "long" else "SELL_SHORT"
+        valid, reason, _rr = validate_quote_geometry_and_rr(action, _text(price), _text(tp), _text(sl))
+        if not valid:
+            raise ValueError(reason)
+
+    def _pending_path(self):
+        return pending_state_path(self.env)
+
+    def _upsert_pending(self, record: dict[str, Any]) -> None:
+        with PENDING_LOCK:
+            path = self._pending_path()
+            try:
+                rows = load_pending_entries(path)
+            except PendingStoreCorrupt as exc:
+                raise RuntimeError("pending entry state is corrupt") from exc
+            rows = [row for row in rows if row["group"] != record["group"]]
+            rows.append(record)
+            save_pending_entries(path, rows)
+
+    def _retire_pending(self, group: str) -> None:
+        with PENDING_LOCK:
+            path = self._pending_path()
+            try:
+                rows = load_pending_entries(path)
+            except PendingStoreCorrupt as exc:
+                raise RuntimeError("pending entry state is corrupt") from exc
+            save_pending_entries(path, [row for row in rows if row["group"] != group])
+
+    def has_pending_entries(self) -> bool:
+        with PENDING_LOCK:
+            try:
+                return bool(load_pending_entries(self._pending_path()))
+            except (PendingStoreCorrupt, OSError):
+                return True
+
+    def _query_entry(self, symbol: str, client_id: str) -> dict[str, Any] | None:
+        try:
+            row = self._query_order(symbol, client_id=client_id)
+        except BinanceAPIError as exc:
+            if exc.code in {-2011, -2013}:
+                return None
+            raise
+        if not isinstance(row, dict):
+            raise RuntimeError("Binance order query failed")
+        return row
+
+    def _query_algo_optional(self, client_id: str) -> dict[str, Any] | None:
+        try:
+            return self._query_algo(client_id)
+        except BinanceAPIError as exc:
+            if exc.code in {-2011, -2013}:
+                return None
+            raise
+
+    def _algo_identity_ok(self, row: dict[str, Any], *, record: dict[str, Any], kind: str) -> bool:
+        client_id = record["client_ids"][kind]
+        if str(row.get("clientAlgoId") or "") != client_id:
+            return False
+        if not row.get("algoId"):
+            return False
+        if str(row.get("symbol") or "").upper() != _to_symbol(record["inst_id"]):
+            return False
+        if str(row.get("side") or "").upper() != self._close_side(record["pos_side"]):
+            return False
+        if str(row.get("positionSide") or "").upper() != self._position_side(record["pos_side"]):
+            return False
+        if str(row.get("workingType") or "").upper() != "MARK_PRICE":
+            return False
+        if not _bool_text(row.get("closePosition")):
+            return False
+        expected = "STOP_MARKET" if kind == "SL" else "TAKE_PROFIT_MARKET"
+        if str(row.get("orderType") or "").upper() != expected:
+            return False
+        if str(row.get("algoStatus") or "").upper() not in ALGO_LIVE_STATES:
+            return False
+        try:
+            trigger = record["sl" if kind == "SL" else "tp"]
+            if _decimal(row.get("triggerPrice") or "nan") != _decimal(trigger):
+                return False
+        except ValueError:
+            return False
+        return True
+
+    def _refresh_protection_leg(self, record: dict[str, Any], kind: str) -> None:
+        key = "sl_leg" if kind == "SL" else "tp_leg"
+        leg = record[key]
+        client_id = record["client_ids"][kind]
+        try:
+            found = self._query_algo_optional(client_id)
+        except Exception:
+            leg["unknown"] = True
+            leg["state"] = "unknown"
+            return
+        if found is None:
+            if leg["state"] in {"idle", "rejected", "finished"}:
+                return
+            if leg["state"] == "confirmed":
+                live = self._live_position_qty(record["inst_id"], record["pos_side"])
+                if live == 0:
+                    leg["state"] = "finished"
+                    leg["unknown"] = False
+                    return
+            leg["unknown"] = True
+            leg["state"] = "unknown"
+            return
+        if self._algo_identity_ok(found, record=record, kind=kind):
+            leg["state"] = "confirmed"
+            leg["unknown"] = False
+            leg["algo_id"] = str(found.get("algoId") or "")
+            return
+        status = str(found.get("algoStatus") or "").upper()
+        if status in ALGO_DEAD_STATES:
+            leg["state"] = "finished" if status in {"TRIGGERED", "FINISHED"} else "rejected"
+            leg["unknown"] = False
+            return
+        leg["unknown"] = True
+        leg["state"] = "unknown"
+
+    def _pending_order_result(self, placed: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **self._normalize_order(placed),
+            "ordId": str(placed.get("orderId") or record.get("order_id") or ""),
+            "clOrdId": record["client_ids"]["EN"],
+            "protection_mechanism": "paired_conditional",
+            "protection_status": record["protection_status"],
+            "algoId": record["group"],
+            "tpTriggerPx": record["tp"],
+            "slTriggerPx": record["sl"],
+            "quantity_unit": "base",
+        }
+
+    def _owned_live_matches_fill(self, record: dict[str, Any]) -> tuple[Decimal | None, str]:
+        filled = _decimal(record["entry_filled"])
+        baseline = _decimal(record["baseline_qty"])
+        try:
+            live = self._live_position_qty(record["inst_id"], record["pos_side"])
+        except Exception as exc:
+            return None, _sanitize(exc) or "position query failed"
+        if live != baseline + filled:
+            return None, "position does not match baseline plus filled quantity"
+        return live, ""
+
+    def _cancel_entry_remainder(self, record: dict[str, Any]) -> None:
+        record["cancel_requested"] = True
+        self._upsert_pending(record)
+        try:
+            self._cancel_order(_to_symbol(record["inst_id"]), client_id=record["client_ids"]["EN"])
+        except UncertainSubmission:
+            return
+        except BinanceAPIError as exc:
+            if exc.code not in {-2011, -2013}:
+                raise
+
+    def _cleanup_residual_algos(self, record: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        for kind in ("SL", "TP"):
+            leg = record["sl_leg" if kind == "SL" else "tp_leg"]
+            if not leg["posted"] and leg["state"] == "idle":
+                continue
+            self._refresh_protection_leg(record, kind)
+            if leg["unknown"] or leg["state"] == "unknown":
+                errors.append(f"{kind} result is unknown; original client id preserved")
+                continue
+            if leg["state"] != "confirmed":
+                continue
+            try:
+                self._cancel_algo(record["client_ids"][kind])
+            except UncertainSubmission:
+                leg["unknown"] = True
+                leg["state"] = "unknown"
+                errors.append(f"{kind} cancellation is unknown; original client id preserved")
+                continue
+            self._refresh_protection_leg(record, kind)
+            if leg["unknown"] or leg["state"] in {"unknown", "confirmed"}:
+                errors.append(f"{kind} cancellation is not confirmed; original client id preserved")
+        return errors
+
+    def _submit_protection_leg(self, record: dict[str, Any], kind: str) -> None:
+        key = "sl_leg" if kind == "SL" else "tp_leg"
+        leg = record[key]
+        if leg["posted"] or leg["state"] != "idle":
+            self._refresh_protection_leg(record, kind)
+        if leg["state"] == "confirmed":
+            return
+        if leg["unknown"] or leg["state"] == "unknown":
+            return
+        if leg["posted"] or leg["state"] in {"rejected", "finished"}:
+            return
+        client_id = record["client_ids"][kind]
+        trigger = record["sl" if kind == "SL" else "tp"]
+        params = self._protection_params(record["inst_id"], record["pos_side"], trigger, kind, client_id)
+        leg["posted"] = True
+        leg["state"] = "submitting"
+        self._upsert_pending(record)
+        try:
+            self._place_algo(params, client_id)
+        except UncertainSubmission:
+            leg["unknown"] = True
+            leg["state"] = "unknown"
+            self._upsert_pending(record)
+            self._refresh_protection_leg(record, kind)
+            return
+        except BinanceAPIError:
+            leg["state"] = "rejected"
+            leg["unknown"] = False
+            return
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "unknown" in message or "could not be reconciled" in message:
+                leg["unknown"] = True
+                leg["state"] = "unknown"
+                self._refresh_protection_leg(record, kind)
+                return
+            leg["state"] = "rejected"
+            leg["unknown"] = False
+            return
+        self._refresh_protection_leg(record, kind)
+
+    def _close_entry_fill(self, record: dict[str, Any]) -> list[str]:
+        filled = _decimal(record["entry_filled"])
+        baseline = _decimal(record["baseline_qty"])
+        close = record["close_leg"]
+        client_id = record["client_ids"]["CL"]
+        symbol = _to_symbol(record["inst_id"])
+        if not close["posted"]:
+            live, err = self._owned_live_matches_fill(record)
+            if err or live is None or filled <= 0:
+                return [err or "owned entry fill is unverified"]
+            close["posted"] = True
+            close["state"] = "submitting"
+            self._upsert_pending(record)
+            try:
+                self.close_position(
+                    record["inst_id"],
+                    record["pos_side"],
+                    cancel_protection=False,
+                    client_id=client_id,
+                    quantity=filled,
+                )
+            except RuntimeError:
+                # The intent is durable. Only query this client ID from now on.
+                close["unknown"] = True
+                close["state"] = "unknown"
+                self._upsert_pending(record)
+
+        try:
+            found = self._query_entry(symbol, client_id)
+        except Exception as exc:
+            close["unknown"] = True
+            close["state"] = "unknown"
+            return [_sanitize(exc) or "compensation close query is unknown"]
+        if found is None:
+            close["unknown"] = True
+            close["state"] = "unknown"
+            return ["compensation close is unknown; refusing to resend"]
+        try:
+            identity_ok = (
+                str(found.get("clientOrderId") or "") == client_id
+                and bool(found.get("orderId"))
+                and str(found.get("symbol") or "").upper() == symbol
+                and str(found.get("side") or "").upper() == self._close_side(record["pos_side"])
+                and str(found.get("positionSide") or "").upper() == self._position_side(record["pos_side"])
+                and str(found.get("type") or "").upper() == "MARKET"
+                and _decimal(found.get("origQty") or "nan") == filled
+                and Decimal("0") <= _decimal(found.get("executedQty") or "nan") <= filled
+            )
+        except ValueError:
+            identity_ok = False
+        if not identity_ok or str(found.get("status") or "").upper() not in TERMINAL_ORDER_STATES:
+            close["unknown"] = True
+            close["state"] = "unknown"
+            return ["compensation close identity or terminal state is unverified; refusing to resend"]
+        live = self._live_position_qty(record["inst_id"], record["pos_side"])
+        if live != baseline:
+            return ["position did not return to baseline after compensation close"]
+        close["state"] = "confirmed"
+        close["unknown"] = False
+        return self._cleanup_residual_algos(record)
+
+    def _retire_flat_after_fill(self, record: dict[str, Any]) -> tuple[dict[str, Any], list[str], bool]:
+        errors = self._cleanup_residual_algos(record)
+        if errors or any(record[key]["unknown"] or record[key]["state"] == "unknown" for key in ("sl_leg", "tp_leg", "close_leg")):
+            record["protection_status"] = "blocked"
+            return record, errors or ["protective leg result is unknown; original client id preserved"], False
+        record["protection_status"] = "flat"
+        return record, errors, True
+
+    def _protect_verified_entry(self, record: dict[str, Any]) -> tuple[dict[str, Any], list[str], bool]:
+        if record["close_leg"]["posted"]:
+            errors = self._close_entry_fill(record)
+            record["protection_status"] = "blocked" if errors else "flat"
+            return record, errors, not errors
+        live = self._live_position_qty(record["inst_id"], record["pos_side"])
+        if live == 0:
+            return self._retire_flat_after_fill(record)
+        matched, err = self._owned_live_matches_fill(record)
+        if err or matched is None:
+            record["protection_status"] = "blocked"
+            return record, [err or "owned exposure is unverified"], False
+        self._submit_protection_leg(record, "SL")
+        sl = record["sl_leg"]
+        if sl["unknown"] or sl["state"] == "unknown":
+            record["protection_status"] = "blocked"
+            return record, ["stop-loss result is unknown; original client id preserved"], False
+        if sl["state"] != "confirmed":
+            errors = self._close_entry_fill(record)
+            live_after = self._live_position_qty(record["inst_id"], record["pos_side"])
+            if sl["unknown"] or record["close_leg"]["unknown"] or errors:
+                record["protection_status"] = "blocked"
+                return record, errors or ["stop-loss failed and compensation is unresolved"], False
+            if live_after != _decimal(record["baseline_qty"]):
+                record["protection_status"] = "blocked"
+                return record, ["position did not return to baseline after stop-loss failure"], False
+            record["protection_status"] = "flat"
+            return record, [], True
+        self._submit_protection_leg(record, "TP")
+        tp = record["tp_leg"]
+        if tp["state"] == "confirmed":
+            record["protection_status"] = "protected"
+            return record, [], True
+        if tp["unknown"] or tp["state"] == "unknown":
+            record["protection_status"] = "sl_only"
+            return record, ["take-profit result is unknown; confirmed stop-loss left in place"], False
+        record["protection_status"] = "sl_only"
+        return record, [], False
+
+    def _advance_pending(self, record: dict[str, Any]) -> tuple[dict[str, Any], list[str], bool]:
+        symbol = _to_symbol(record["inst_id"])
+        client_id = record["client_ids"]["EN"]
+        try:
+            order = self._query_entry(symbol, client_id)
+        except Exception as exc:
+            record["entry_unknown"] = True
+            record["protection_status"] = "blocked"
+            return record, [_sanitize(exc) or f"entry {client_id} query is unknown"], False
+        if order is None:
+            record["entry_unknown"] = True
+            record["protection_status"] = "blocked"
+            return record, [f"entry {client_id} is not found after an unknown submission; refusing to resend"], False
+        status = str(order.get("status") or "").upper()
+        filled = _decimal(order.get("executedQty") or "0")
+        if (
+            str(order.get("clientOrderId") or "") != client_id
+            or str(order.get("symbol") or "").upper() != symbol
+            or str(order.get("side") or "").lower() != record["side"]
+            or str(order.get("positionSide") or "").upper() != self._position_side(record["pos_side"])
+            or _decimal(order.get("origQty") or "nan") != _decimal(record["qty"])
+            or not _decimal(record["entry_filled"]) <= filled <= _decimal(record["qty"])
+        ):
+            record["entry_unknown"] = True
+            record["protection_status"] = "blocked"
+            return record, ["entry identity or cumulative fill is inconsistent; original client id preserved"], False
+        record["entry_status"] = status or record["entry_status"]
+        record["entry_filled"] = _text(filled)
+        record["order_id"] = str(order.get("orderId") or record["order_id"])
+        record["entry_unknown"] = False
+        if status == "PARTIALLY_FILLED" or (filled > 0 and status not in TERMINAL_ORDER_STATES and status != "FILLED"):
+            self._cancel_entry_remainder(record)
+            record["protection_status"] = "awaiting_fill"
+            return record, [], False
+        if status == "NEW" and filled <= 0:
+            now_ms = int(time.time() * 1000)
+            if now_ms - int(record["created_ms"]) > ORDER_MAX_AGE_MS:
+                self._cancel_entry_remainder(record)
+            record["protection_status"] = "awaiting_fill"
+            return record, [], False
+        if status not in TERMINAL_ORDER_STATES:
+            record["protection_status"] = "awaiting_fill"
+            return record, [], False
+        if filled <= 0:
+            record["protection_status"] = "flat"
+            return record, [], True
+        return self._protect_verified_entry(record)
+
+    def reconcile_pending_entries(self) -> dict[str, Any]:
+        with PENDING_LOCK:
+            try:
+                records = load_pending_entries(self._pending_path())
+            except PendingStoreCorrupt:
+                return {"pending": 1, "blocked": True, "errors": ["pending entry state is corrupt"]}
+            except OSError:
+                return {"pending": 1, "blocked": True, "errors": ["pending entry state is unreadable"]}
+        errors: list[str] = []
+        remaining: list[dict[str, Any]] = []
+        terminal_events: list[str] = []
+        for record in records:
+            try:
+                record, rec_errors, retire = self._advance_pending(record)
+            except Exception as orig:
+                remaining.append(record)
+                errors.append(_sanitize(orig) or "pending entry reconciliation failed")
+                continue
+            errors.extend(rec_errors)
+            if retire:
+                if _decimal(record["entry_filled"]) <= 0:
+                    terminal_events.append(
+                        f"{record['inst_id']} 开仓单已确认终态: "
+                        f"order={record['order_id']}, status={record['entry_status']}, "
+                        f"filled={record['entry_filled']}, cancel_requested={record['cancel_requested']}；"
+                        "零成交，未建立本次仓位"
+                    )
+                continue
+            remaining.append(record)
+        with PENDING_LOCK:
+            try:
+                save_pending_entries(self._pending_path(), remaining)
+            except PendingStoreCorrupt:
+                return {
+                    "pending": max(len(remaining), 1),
+                    "blocked": True,
+                    "errors": errors + ["pending entry state is corrupt"],
+                }
+        for event in terminal_events:
+            print(f"[挂单生命周期管理] {event}", flush=True)
+        return {
+            "pending": len(remaining),
+            "blocked": bool(remaining) or bool(errors),
+            "errors": errors,
+            "terminal_events": terminal_events,
+        }
+
+    def place_protected_limit_order(
+        self,
+        inst_id: str,
+        side: str,
+        pos_side: str,
+        size: Any,
+        price: Any,
+        tp_px: Any,
+        sl_px: Any,
+    ) -> dict[str, Any]:
+        self._entry_side(side, pos_side)
+        self._reject_mixed_exposure(inst_id, pos_side)
+        px = self._align_price(inst_id, price)
+        tp = self._align_price(inst_id, tp_px)
+        sl = self._align_price(inst_id, sl_px)
+        qty = self._align_qty(inst_id, size, px)
+        self._validate_geometry(str(pos_side).lower(), _decimal(px), _decimal(tp), _decimal(sl))
+        baseline = self._live_position_qty(inst_id, str(pos_side).lower())
+        group = self._new_group()
+        ids = self._group_ids(group)
+        record = new_record(
+            group=group,
+            inst_id=inst_id,
+            side=str(side).lower(),
+            pos_side=str(pos_side).lower(),
+            qty=qty,
+            price=px,
+            tp=tp,
+            sl=sl,
+            baseline_qty=_text(baseline),
+            client_ids=ids,
+            created_ms=int(time.time() * 1000),
+        )
+        with PENDING_LOCK:
+            path = self._pending_path()
+            try:
+                existing = load_pending_entries(path)
+            except (PendingStoreCorrupt, OSError) as exc:
+                raise RuntimeError("A pending Binance entry is still unresolved") from exc
+            if existing:
+                raise RuntimeError("A pending Binance entry is still unresolved")
+            record["posted"] = True
+            save_pending_entries(path, [record])
+        symbol = _to_symbol(inst_id)
+        entry = {
+            "symbol": symbol,
+            "side": str(side).upper(),
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": qty,
+            "price": px,
+            "positionSide": self._position_side(pos_side),
+            "newClientOrderId": ids["EN"],
+            "newOrderRespType": "RESULT",
+        }
+        entry.pop("reduceOnly", None)
+        try:
+            placed = self._place_order(entry, ids["EN"])
+        except UncertainSubmission as exc:
+            record["entry_unknown"] = True
+            record["protection_status"] = "blocked"
+            self._upsert_pending(record)
+            raise RuntimeError(_sanitize(exc) or "Binance entry submission is unknown") from exc
+        except BinanceAPIError:
+            self._retire_pending(group)
+            raise
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "not accepted" in message:
+                self._retire_pending(group)
+            else:
+                record["entry_unknown"] = True
+                record["protection_status"] = "blocked"
+                self._upsert_pending(record)
+            raise
+        status = str(placed.get("status") or "").upper()
+        filled = _decimal(placed.get("executedQty") or "0")
+        record["order_id"] = str(placed.get("orderId") or "")
+        record["entry_status"] = status or "NEW"
+        record["entry_filled"] = _text(filled)
+        record["entry_unknown"] = False
+        if status == "PARTIALLY_FILLED" or (filled > 0 and status not in TERMINAL_ORDER_STATES and status != "FILLED"):
+            record["protection_status"] = "awaiting_fill"
+            self._upsert_pending(record)
+            self._cancel_entry_remainder(record)
+            return self._pending_order_result(placed, record)
+        if status in TERMINAL_ORDER_STATES:
+            if filled <= 0:
+                record["protection_status"] = "flat"
+                self._retire_pending(group)
+                raise RuntimeError("Entry order was not accepted")
+            record["protection_status"] = "awaiting_fill"
+            self._upsert_pending(record)
+            try:
+                record, errors, retire = self._protect_verified_entry(record)
+            except Exception:
+                record["protection_status"] = "blocked"
+                self._upsert_pending(record)
+                raise
+            if retire:
+                self._retire_pending(group)
+            else:
+                self._upsert_pending(record)
+            if record["protection_status"] in {"protected", "sl_only"}:
+                return self._pending_order_result(placed, record)
+            if errors:
+                raise RuntimeError(errors[0])
+            if record["protection_status"] == "flat":
+                raise RuntimeError("Stop-loss failed; the entry fill was closed back to its verified baseline")
+            raise RuntimeError("Protected entry could not be completed")
+        record["protection_status"] = "awaiting_fill"
+        self._upsert_pending(record)
+        return self._pending_order_result(placed, record)
+
+    def _logical_pos_side(self, row: dict[str, Any]) -> str:
+        native = str(row.get("positionSide") or "BOTH").upper()
+        return {"LONG": "long", "SHORT": "short"}.get(native, "net")
+
+    def protection_orders(self, inst_id: str) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in self._open_algos(inst_id):
+            parsed = self._parse_group(str(row.get("clientAlgoId") or ""))
+            if not parsed:
+                continue
+            group, kind = parsed
+            grouped.setdefault(group, {})[kind] = row
+        result = []
+        for group, legs in grouped.items():
+            tp = legs.get("TP")
+            sl = legs.get("SL") or legs.get("SX")
+            if not tp or not sl:
+                continue
+            sample = tp
+            close_all = _bool_text(tp.get("closePosition")) and _bool_text(sl.get("closePosition"))
+            pos_side = self._logical_pos_side(sample)
+            size = self._live_position_qty(inst_id, pos_side if pos_side != "net" else "net")
+            result.append({
+                "algoId": group,
+                "instId": inst_id,
+                "tpTriggerPx": str(tp.get("triggerPrice") or tp.get("stopPrice") or ""),
+                "slTriggerPx": str(sl.get("triggerPrice") or sl.get("stopPrice") or ""),
+                "posSide": pos_side,
+                "sz": _text(size) if size else "",
+                "state": "live",
+                "ordType": "paired_conditional",
+                "closeAll": close_all,
+                "protection_mechanism": "paired_conditional",
+                "quantity_unit": "base",
+            })
+        return result
+
+    def place_protection(self, inst_id: str, pos_side: str, size: Any, tp_px: Any, sl_px: Any) -> dict[str, Any]:
+        if str(pos_side).lower() not in {"long", "short"}:
+            raise ValueError("Invalid position direction")
+        px_ref = self.ticker(inst_id)["last"]
+        tp = self._align_price(inst_id, tp_px)
+        sl = self._align_price(inst_id, sl_px)
+        qty = self._align_qty(inst_id, size, px_ref)
+        self._validate_geometry(str(pos_side).lower(), _decimal(px_ref), _decimal(tp), _decimal(sl))
+        owned = self._pending_owned_groups(inst_id)
+        if owned is None or owned:
+            raise RuntimeError("A pending Binance entry still owns protection for this instrument")
+        self._sweep_orphans(inst_id, str(pos_side).lower())
+        group = self._new_group()
+        ids = self._group_ids(group)
+        sl_row = None
+        try:
+            sl_row = self._place_algo(self._protection_params(inst_id, pos_side, sl, "SL", ids["SL"]), ids["SL"])
+            self._confirm_algo(ids["SL"])
+            self._place_algo(self._protection_params(inst_id, pos_side, tp, "TP", ids["TP"]), ids["TP"])
+            self._confirm_algo(ids["TP"])
+        except Exception as exc:
+            if sl_row is not None and self._live_position_qty(inst_id, pos_side) > 0:
+                pass
+            else:
+                self._cancel_group(group)
+            raise RuntimeError(_sanitize(exc)) from exc
+        return {
+            "algoId": group,
+            "ordId": group,
+            "tpTriggerPx": tp,
+            "slTriggerPx": sl,
+            "sz": qty,
+            "protection_mechanism": "paired_conditional",
+            "ordType": "paired_conditional",
+            "closeAll": True,
+            "quantity_unit": "base",
+        }
+
+    def amend_stop(self, inst_id: str, algo_id: str, new_sl: Any) -> dict[str, Any]:
+        sl = self._align_price(inst_id, new_sl)
+        group = str(algo_id)
+        owned = self._pending_owned_groups(inst_id)
+        if owned is None or group in owned:
+            raise RuntimeError("Pending protection group cannot be amended")
+        ids = self._group_ids(group)
+        live = {item["algoId"]: item for item in self.protection_orders(inst_id)}
+        current = live.get(group)
+        if not current or not current.get("tpTriggerPx"):
+            raise RuntimeError("Existing paired protection was not found")
+        pos_side = current["posSide"]
+        live_kinds = set()
+        for row in self._open_algos(inst_id):
+            parsed = self._parse_group(str(row.get("clientAlgoId") or ""))
+            if parsed and parsed[0] == group:
+                live_kinds.add(parsed[1])
+        new_kind, old_kind = ("SL", "SX") if "SX" in live_kinds else ("SX", "SL")
+        replacement = None
+        try:
+            replacement = self._place_algo(self._protection_params(inst_id, pos_side, sl, "SL", ids[new_kind]), ids[new_kind])
+            self._confirm_algo(ids[new_kind])
+        except Exception as exc:
+            if replacement is not None:
+                self._cancel_algo(ids[new_kind])
+            raise RuntimeError(_sanitize(exc)) from exc
+        self._cancel_algo(ids[old_kind])
+        return {
+            "algoId": group,
+            "slTriggerPx": sl,
+            "tpTriggerPx": current.get("tpTriggerPx"),
+            "protection_mechanism": "paired_conditional",
+        }
+
+    def cancel_protection(self, inst_id: str, algo_id: str) -> dict[str, Any]:
+        owned = self._pending_owned_groups(inst_id)
+        if owned is None or str(algo_id) in owned:
+            raise RuntimeError("Pending protection group cannot be cancelled")
+        self._cancel_group(str(algo_id))
+        return {"algoId": str(algo_id), "state": "canceled"}
+
+# ---------------------------------------------------------------------------
+# 环境构建辅助：从 astra_gateway.secrets + ASTRA_ 环境变量构建币安 env
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class BinanceEnvironment:
+    """币安账户环境（duck-typed，供 ``BinanceExchange`` 消费）。
+
+    凭证读取优先级与 ``registry.venue_credentials`` 一致：
+    ``BINANCE_{MODE}_API_KEY``（demo/live 分档）→ 回退 ``BINANCE_API_KEY`` 通用档。
+    mode 由 ``ASTRA_BINANCE_ENV`` 决定（demo/live），默认 demo（与 OKX 对齐）。
+    """
+    mode: str
+    api_key: str = field(default="", repr=False)
+    secret_key: str = field(default="", repr=False)
+
+    @property
+    def exchange(self) -> str:
+        return "binance"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key and self.secret_key)
+
+
+def make_binance_env(values: dict[str, str] | None = None) -> BinanceEnvironment:
+    """(可选 values) → 币安账户环境。values 缺失时从密钥库 + 进程环境读取。"""
+    import os
+    env: dict[str, str] = {}
+    try:
+        from astra_gateway.secrets import load_secrets
+        env.update(load_secrets())
+    except Exception:
+        pass
+    if values:
+        env.update(values)
+    # 进程环境优先（与 config.load_dotenv 的 setdefault 语义一致）
+    for key, value in os.environ.items():
+        env.setdefault(key, value)
+
+    mode = str(env.get("ASTRA_BINANCE_ENV") or "demo").strip().lower()
+    if mode not in {"demo", "live"}:
+        mode = "demo"
+    prefix = f"BINANCE_{mode.upper()}"
+    api_key = str(env.get(f"{prefix}_API_KEY") or env.get("BINANCE_API_KEY") or "").strip()
+    secret_key = str(env.get(f"{prefix}_SECRET_KEY") or env.get("BINANCE_SECRET_KEY") or "").strip()
+    return BinanceEnvironment(mode=mode, api_key=api_key, secret_key=secret_key)
+
+
+# ---------------------------------------------------------------------------
+# 公开行情面适配器（BaseExchangeAdapter 子类，fail-soft 返回 None）
+# ---------------------------------------------------------------------------
+class BinancePublicAdapter(BaseExchangeAdapter):
+    """币安 USDⓈ-M 永续的公开行情适配器（只读，无签名、无下单）。
+
+    与 ``BinanceExchange``（自包含完整私有面）互补：本类接入 ``BaseExchangeAdapter``
+    抽象，供 ``registry`` 多所聚合矩阵统一入口使用。公开方法 fail-soft（失败返回
+    None），与 ``base`` 只读契约一致。
+    """
+
+    live_url = LIVE_HOST
+    test_url = DEMO_HOST
+    base_url = LIVE_HOST
+
+    capabilities = ExchangeCapabilities(
+        venue="binance",
+        display_name="Binance USDⓈ-M USDT 永续",
+        symbol_template="{base}USDT",
+        quote="USDT",
+        quantity_unit="base_asset",        # 币本位数量，非张
+        signed_size=False,
+        supports_attached_tp_sl=False,     # 币安无 attachAlgoOrds（走独立算法单）
+        trigger_price_default="last",
+        max_candle_limit=1500,
+        bar_case="lower",                  # 币安 interval 全小写
+        has_top_trader_ratio=False,        # 币安无此免费口径
+        has_taker_ratio=False,
+        supports_account=False,            # 私有面由 BinanceExchange 提供，本类恒关
+        supports_orders=False,
+        mainland_ip_restricted=True,       # 币安对大陆 IP 有限制
+        rate_limit_note="fapi 公共行情约 2400 weight/min，注意退避",
+        order_id_type="int64_id_string",   # 币安 orderId 是 int64，响应带 id 字段
+        native_amend=False,
+        decimal_amount=False,
+        # 不声明 position_modes / entry_ready_position_modes：本类仅公开行情面
+        # （supports_account=False），不碰账户、也无 detect_position_mode；持仓模式
+        # 语义由自包含私有面 BinanceExchange 处理，不在此能力表出现。
+        conditional_family="algo_service",  # 币安独立算法单（algoOrder）
+        protection_semantics="paired_conditional：SL/TP 为独立算法单（clientAlgoId 幂等），"
+                             "由 BinanceExchange 的 durable pending 状态机保证原子性",
+    )
+
+    def _public(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """币安 fapi 公共 GET；失败返回 None（fail-soft，与 base 一致）。"""
+        return self._public_get(path, params, timeout=6.0)
+
+    # ------------------------------------------------------------------
+    # 命名转译：币安原生是 BTCUSDT（无 -SWAP 后缀）
+    # ------------------------------------------------------------------
+    def native_symbol(self, symbol: str) -> str:
+        return f"{canonical_base(symbol)}USDT"
+
+    def canonical(self, inst_id: str) -> str:
+        return canonical_base(inst_id)
+
+    def to_bar(self, bar: str) -> str:
+        # 宽松回退：未知周期保留小写原文（公开面不因周期名拒绝，fail-soft）
+        return BAR_INTERVALS.get(str(bar or "15m").strip(), str(bar or "15m").strip().lower())
+
+    # ------------------------------------------------------------------
+    # 公共行情（fail-soft，失败返回 None）
+    # ------------------------------------------------------------------
+    def fetch_ticker(self, symbol: str) -> dict[str, Any] | None:
+        sym = self.native_symbol(symbol)
+        stats = self._public("/fapi/v1/ticker/24hr", {"symbol": sym})
+        book = self._public("/fapi/v1/ticker/bookTicker", {"symbol": sym})
+        if not isinstance(stats, dict):
+            return None
+        book = book if isinstance(book, dict) else {}
+        try:
+            return {
+                "venue": "binance", "inst_id": _from_symbol(sym),
+                "last": float(stats.get("lastPrice") or 0) or None,
+                "bid": float(book.get("bidPrice") or 0) or None,
+                "ask": float(book.get("askPrice") or 0) or None,
+                "open_24h": float(stats.get("openPrice") or 0) or None,
+                "high_24h": float(stats.get("highPrice") or 0) or None,
+                "low_24h": float(stats.get("lowPrice") or 0) or None,
+                "chg_24h_pct": float(stats.get("priceChangePercent") or 0),
+                "vol_24h_base": float(stats.get("volume") or 0),
+                "quote_vol_24h": round(float(stats.get("quoteVolume") or 0), 8),
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def fetch_candles(self, symbol: str, bar: str = "15m",
+                      limit: int = 100) -> list | None:
+        sym = self.native_symbol(symbol)
+        rows = self._public("/fapi/v1/klines", {
+            "symbol": sym, "interval": self.to_bar(bar),
+            "limit": min(int(limit), self.capabilities.max_candle_limit),
+        })
+        if not isinstance(rows, list):
+            return None
+        now = int(time.time() * 1000)
+        result: list = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 8:
+                continue
+            close_time = int(row[6])
+            confirm = "0" if close_time > now else "1"
+            quote = str(row[7])
+            # 归一成 9 字段：[ts,o,h,l,c,vol,volCcy,volCcyQuote,confirm]
+            result.append([str(row[0]), str(row[1]), str(row[2]), str(row[3]),
+                           str(row[4]), str(row[5]), quote, quote, confirm])
+        result.reverse()  # 币安返回升序（旧在前），统一成最新在前
+        return result
+
+    def fetch_funding_rate(self, symbol: str) -> float | None:
+        sym = self.native_symbol(symbol)
+        row = self._public("/fapi/v1/premiumIndex", {"symbol": sym})
+        if not isinstance(row, dict) or row.get("lastFundingRate") in (None, ""):
+            return None
+        try:
+            return float(_decimal(row["lastFundingRate"]) * 100)
+        except (ValueError, TypeError):
+            return None
+
+    def fetch_orderbook(self, symbol: str, depth: int = 20) -> dict[str, Any] | None:
+        sym = self.native_symbol(symbol)
+        row = self._public("/fapi/v1/depth", {"symbol": sym, "limit": int(depth)})
+        if not isinstance(row, dict) or "bids" not in row or "asks" not in row:
+            return None
+        return {"venue": "binance", "bids": row.get("bids") or [],
+                "asks": row.get("asks") or []}
+
+    def _load_spec(self, inst_id: str) -> InstrumentSpec | None:
+        sym = self.native_symbol(inst_id)
+        info = self._public("/fapi/v1/exchangeInfo")
+        if not isinstance(info, dict):
+            return None
+        rows = info.get("symbols")
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict) or row.get("symbol") != sym:
+                continue
+            if row.get("status") != "TRADING":
+                return InstrumentSpec(
+                    venue="binance", inst_id=inst_id, base=self.canonical(inst_id),
+                    tick_size=0.1, step_size=1.0, ct_val=1.0, min_size=1.0,
+                    status="closed", raw=row,
+                )
+            tick_size = step_size = min_size = 0.0
+            for f in row.get("filters", []):
+                if not isinstance(f, dict):
+                    continue
+                if f.get("filterType") == "PRICE_FILTER":
+                    tick_size = float(f.get("tickSize") or 0.1)
+                elif f.get("filterType") == "LOT_SIZE":
+                    step_size = float(f.get("stepSize") or 1.0)
+                    min_size = float(f.get("minQty") or 1.0)
+            return InstrumentSpec(
+                venue="binance", inst_id=inst_id, base=self.canonical(inst_id),
+                tick_size=tick_size or 0.1,
+                step_size=step_size or 1.0,
+                ct_val=1.0,                # base_asset 语义恒 1.0
+                min_size=min_size or 1.0,
+                max_leverage=0.0,
+                status="trading",
+                raw=row,
+            )
+        return None
+
+
+__all__ = ["BinanceExchange", "BinancePublicAdapter", "BinanceEnvironment",
+           "make_binance_env", "LIVE_HOST", "DEMO_HOST"]

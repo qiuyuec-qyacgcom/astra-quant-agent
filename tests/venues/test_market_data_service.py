@@ -75,12 +75,14 @@ class TestClosedOkxCandles(unittest.TestCase):
         self.assertEqual(out[0][8], "1")
         self.assertEqual(out[1][8], "1")
 
-    def test_missing_or_short_rows_are_not_confirmed(self):
-        # 缺 confirm 字段 / 长度不足 9 的行，一律不算已收盘
+    def test_missing_or_short_rows_are_kept_not_confirmed(self):
+        # 缺 confirm 字段 / 长度不足 9 的行，是 OKX 常规 candles 接口的正常形态
+        # （`/api/v5/market/candles` 只返回 6 字段、不含 confirm）——
+        # 「缺失≠未收盘」，必须保留，否则真实行情数据会被整批误丢。
         short = [["1", "2", "3", "4", "5", "6"]]
-        self.assertEqual(closed_okx_candles(short), [])
+        self.assertEqual(closed_okx_candles(short), short)
         missing_confirm = [["1", "2", "3", "4", "5", "6", "7", "8"]]
-        self.assertEqual(closed_okx_candles(missing_confirm), [])
+        self.assertEqual(closed_okx_candles(missing_confirm), missing_confirm)
 
     def test_non_list_input_is_empty(self):
         self.assertEqual(closed_okx_candles(None), [])

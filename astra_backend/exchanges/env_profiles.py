@@ -32,6 +32,9 @@ class EnvProfile:
 PROFILES: Dict[Tuple[str, str], EnvProfile] = {
     ("okx", "live"): EnvProfile("okx", "live", ("https://www.okx.com",)),
     ("okx", "demo"): EnvProfile("okx", "demo", ("https://www.okx.com",), simulated_trading=True),
+    # 币安（公开行情面）：live 走 fapi，demo 走 demo-fapi（独立域名，非头开关）
+    ("binance", "live"): EnvProfile("binance", "live", ("https://fapi.binance.com",)),
+    ("binance", "demo"): EnvProfile("binance", "demo", ("https://demo-fapi.binance.com",)),
 }
 
 #: ASTRA_{VENUE}_TESTNET=1 旧布尔开关 → 沙盒档映射（US-001 兼容层）。

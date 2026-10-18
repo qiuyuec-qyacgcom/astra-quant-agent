@@ -300,10 +300,10 @@ class NoRawDualReadTest(unittest.TestCase):
         手抄名单必然漏 —— 改成直接和 `git show <改动前>` 对比依赖集合，
         只有**新增**才算违规。
         """
-        import subprocess
-        old = subprocess.run(["git", "show", f"{self.PRE}:scripts/sync_web_data.py"],
-                             capture_output=True, text=True, cwd=str(ROOT))
-        self.assertEqual(old.returncode, 0, old.stderr)
+        # ⚠️ 基线取自改名前提交；浅克隆环境缺失该 commit 时由 git_show 优雅 skip
+        #    （见 tests/extraction/rename_baseline.git_show），而非硬失败。
+        from tests.extraction.rename_baseline import git_show
+        old_src = git_show(f"{self.PRE}:scripts/sync_web_data.py")
 
         def mods_of(text: str) -> set:
             out = set()
@@ -318,7 +318,7 @@ class NoRawDualReadTest(unittest.TestCase):
         #    误判成"新增第三方依赖 `astra_backend`"。用本仓已有的基线归一助手，
         #    把两侧放到同一命名空间下再比（这是"声明一次"而非临时放行）。
         from tests.extraction.rename_baseline import normalize
-        added = mods_of(MODULE.read_text(encoding="utf-8")) - mods_of(normalize(old.stdout))
+        added = mods_of(MODULE.read_text(encoding="utf-8")) - mods_of(normalize(old_src))
         # ⚠️ 用户约束是"禁止增减**依赖**"，指的是第三方包；标准库不是依赖。
         #    本刀只新增了 `typing`（stdlib），故按 stdlib 白名单放行，
         #    第三方新增仍然会被抓住。

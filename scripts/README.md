@@ -26,6 +26,7 @@
 | `generate_snapshots.py` | 102 | 定时 | 生成 `snapshots.json` 供前端曲线 |
 | `gateway_liveness.py` | 121 | 由 `astra_watchdog.sh gateway` 每 30s 调用 | 网关存活判据（**退出码即语义**：0 健康 / 1 进程不存在 / 2 心跳停更 / 3 心跳缺失）。判据是 worker 每轮循环写的存活心跳，而不是周期产物够不够新 —— 用户**可以合法关停交易**，那时周期产物本就不更新，用它当判据会造成误杀循环 |
 | `sync_web_data.py` | 346 | 由 `daemon_web_sync.py` 每轮调用 | 生成前端 `trading_data.json` 缓存（凭证未配则 **fail-closed**，绝不用 0 覆盖好缓存） |
+| `live_preflight.py` | 249 | 实盘切换前手动运行 | 只读体检（阶段 0）：账户模式/持仓模式/计价币白名单三项前提核验，**绝不下一单** |
 
 ## 交易核心
 
@@ -37,6 +38,7 @@
 | `market_data_service.py` | 562 | 零进程直连公共行情服务；`_public_get/_public_post` 带**耗时/成败埋点**（调用期 `note_call`/`note_failure`，取值行为一字不变） |
 | `market_data_health.py` | 266 | 行情取数可观测性：失败**计数 + 每类一次性告警**（第 137 刀）+ 调用**耗时/成功率/百分位**与跨进程快照 `data/market_data_health.json`（第 138 刀；worker 每周期写、后端 `/metrics` 读） |
 | `market_stream.py` | 481 | 公共行情 **WebSocket 只读层**（OKX 帧解析归一 / 有界 tick 缓冲 / 健康账本与陈旧度 / `--probe` 探测 CLI）。**不常驻、不接决策与下单路径**；REST 取数一字未动。快照 `data/market_stream_health.json` 经 `/metrics` 暴露（可选源 `required="0"`） |
+| `candle_data.py` | 21 | OKX K 线的**已确认**过滤（`closed_okx_candles`），交易与回测共用 |
 | `order_risk.py` | 60 | 报价与风控的**确定性**安全检查（共享） |
 | `backtest_engine.py` | 382 | 多资产回测与统计验证引擎（门面，部件在 `backtest/`） |
 
@@ -46,6 +48,7 @@
 |---|---|---|
 | `okx_rest.py` | 552 | OKX V5 签名 REST 客户端（请求契约显式） |
 | `okx_runtime.py` | 87 | OKX 实盘/模拟盘凭证的单一来源 |
+| `binance_order_maintenance.py` | 125 | 币安 durable pending 对账入口（无凭证 fail-soft 跳过，零网络） |
 | `sync_full_ledger.py` | 724 | OKX 持仓历史 → 本地台账同步 |
 | `archive_ledger.py` | 198 | 台账分片归档（**默认 dry-run**） |
 | `risk_constants.py` | 175 | 执行层风控参数单一事实源 |
@@ -83,6 +86,8 @@
 | `backup_upload.py` | 282 | 备份上传目标：S3 / OSS / WebDAV / 百度网盘 |
 | `self_improvement_engine.py` | 782 | LLM 原生自省与策略演化引擎 |
 | `local_lock.py` | 114 | `file_lock` 的**本地兜底**实现（跨主机锁的降级路径） |
+| `file_lock.py` | 73 | 跨平台非阻塞 `flock` 周期守卫（POSIX 直用 `fcntl`，Windows 经 `fcntl_compat` 降级），供 AI 大脑 / 因子交易 / 自进化等单飞守护进程入口共用 |
+| `sync_analysis_archive.py` | 39 | **只读**独立复盘归档作业：拉取 OKX 历史回填复盘库，**绝不下发交易订单** |
 | `qq_notifier.py` | 157 | 通知发布器，桥接 AstraQuant 网关 |
 | `db_manager.py` | 282 | SQLite 连接/建表管理 |
 | `debug_aggregate_orders.py` | 54 | **调试脚本**：聚合挂单排查 |

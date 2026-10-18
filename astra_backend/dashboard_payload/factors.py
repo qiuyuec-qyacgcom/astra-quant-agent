@@ -181,7 +181,11 @@ def _build_factors_from_local_files(factor_file: str | os.PathLike[str], decisio
             "chg24h": chg_val,
             "bidPx": raw_t.get("bidPx", ins.get("price", lib_item.get("microstructure", {}).get("bid_px", "--"))),
             "askPx": raw_t.get("askPx", ins.get("price", lib_item.get("microstructure", {}).get("ask_px", "--"))),
-            "fundingRate": ai_info.get("raw_funding_rate") or (f"{lib_item.get('smart_money_derivatives', {}).get('funding_rate_pct', 0.0):.4f}%" if "funding_rate_pct" in lib_item.get("smart_money_derivatives", {}) else "--"),
+            "fundingRate": ai_info.get("raw_funding_rate") or (
+                (lambda fr: f"{fr:.4f}%" if isinstance(fr, (int, float)) and fr is not None else "--")(
+                    lib_item.get("smart_money_derivatives", {}).get("funding_rate_pct")
+                )
+            ),
             "oiUsd": ai_info.get("raw_oi") or lib_item.get("smart_money_derivatives", {}).get("oi_usd", "--"),
             "takerNetUsd": ai_info.get("raw_taker_vol") or lib_item.get("volume_money_flow", {}).get("taker_net_usd", "--"),
             "lsRatio": ai_info.get("raw_ls_ratio") or lib_item.get("smart_money_derivatives", {}).get("long_short_ratio", "--"),

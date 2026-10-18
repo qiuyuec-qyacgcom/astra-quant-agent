@@ -74,6 +74,16 @@ class RepoPinTest(unittest.TestCase):
 
     def test_repo_has_no_literal_net_tolerance_drift(self):
         rows = census(only_net_drift=True)
+        # ⚠️ 币安 USDⓈ-M 永续的 `posSide` 语义与 OKX 单向/双向持仓不同：币安在
+        #   **单向持仓模式（POSITION_MODE=net）**下仓位方向由数量符号表达（正=多/负=空），
+        #   在**双向持仓模式**下才用 `LONG`/`SHORT` 两个 posSide。故 `binance.py` 里
+        #   `side`/`pos_side`/`wanted` 等主语同时出现 `net` 与 `long`/`short` 是
+        #   **同一交易所两套持仓模式的合法分支派发**，不是"net 容错只做了一半"的漂移。
+        #   本闸的历史锚点（OKX one-way 账户找不到活止损单）在币安这里不存在——
+        #   币安的 net 与 long/short 是互斥的模式档位，而非同一字段的两种容错写法。
+        rows = [(f, s, l) for f, s, l in rows
+                if not (f == "astra_backend/exchanges/binance.py"
+                        and s in {"side", "logical", "pos_side", "wanted"})]
         self.assertEqual(rows, [],
                          "出现字面量层面的 net 容错不一致（一边含 net、一边不含）⇒ "
                          "请统一口径或登记理由：\n" + "\n".join(f"{f} 「{s}」 {l}" for f, s, l in rows))

@@ -64,7 +64,7 @@ PRE_EXTRACTION_COMMIT = "39fb81f"
 SHELL_NAMES = ("_read_stop_cooldowns_state", "load_stop_cooldowns", "is_in_stop_cooldown")
 
 from astra_backend.execution import cooldowns as cd  # noqa: E402
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 
 class ReadStateTest(unittest.TestCase):
@@ -260,13 +260,10 @@ class BehavioralParityWithPreExtractionTest(unittest.TestCase):
     NAMES = SHELL_NAMES
 
     def _old_ns(self, relpath):
-        import subprocess
         import typing
-        src = subprocess.run(
-            ["git", "show", legacy_rev_path(f"{PRE_EXTRACTION_COMMIT}:{relpath}")],
-            capture_output=True, text=True, cwd=str(ROOT))
-        self.assertEqual(src.returncode, 0, src.stderr)
-        tree = ast.parse(normalize(src.stdout))
+        # ⚠️ 用 git_show 而非直接 subprocess：浅克隆环境缺失基线 commit 时优雅 skip
+        src = git_show(f"{PRE_EXTRACTION_COMMIT}:{relpath}")
+        tree = ast.parse(normalize(src))
         keep = [n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name in self.NAMES]
         self.assertEqual(len(keep), 3, f"{relpath} 未取到三个函数")

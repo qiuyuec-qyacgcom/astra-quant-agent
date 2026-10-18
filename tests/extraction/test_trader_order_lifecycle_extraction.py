@@ -22,7 +22,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -89,10 +89,8 @@ _DELTA_REWRITES = (
 
 
 def _old_tree() -> ast.Module:
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/ai_factor_trader.py")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return ast.parse(normalize(r.stdout))
+    src = git_show(f"{PRE}:scripts/ai_factor_trader.py")
+    return ast.parse(normalize(src))
 
 
 def _normalised_moved_tree() -> ast.Module:

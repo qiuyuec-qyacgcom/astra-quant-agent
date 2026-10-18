@@ -78,10 +78,9 @@ def _routes_in(node_src: str) -> list:
 
 class StrategyRouterSplitTest(unittest.TestCase):
     def _baseline_routes(self) -> list:
-        r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:{BASELINE}")],
-                           capture_output=True, text=True, cwd=str(ROOT))
-        self.assertEqual(r.returncode, 0, f"基线取不到：{r.stderr[:200]}")
-        return _routes_in(r.stdout)
+        from tests.extraction.rename_baseline import git_show
+        src = git_show(f"{PRE}:{BASELINE}")
+        return _routes_in(src)
 
     def test_removed_interceptor_subrouter_is_exactly_eight_routes(self):
         """自检：摘掉的那一段子路由必须是 8 条 —— 数字变了就要重新解释。"""
@@ -142,17 +141,18 @@ class StrategyRouterSplitTest(unittest.TestCase):
     def test_old_module_path_still_importable(self):
         """外部 `from astra_backend.routers.strategy import router` 必须照旧可用。
 
-        ⚠️ 本仓 FastAPI 版本的 `include_router` 是**惰性**的：聚合器的 `routes`
-        里放的是 `_IncludedRouter` **句柄**（`len(INCLUDE_ORDER)` 个子路由），真正的
-        路由在应用规格解析时才展开 —— 故此处只断言"句柄数 + 可挂载"，
-        实际条数由 `test_live_openapi_route_surface_unchanged` 从 OpenAPI 规格校验。
+        ⚠️ FastAPI ≥0.110 的 `include_router` 是**立即展开**的：聚合器的 `routes`
+        里直接放展开后的 `APIRoute`（数量 = 实际路由条数，而非 `len(INCLUDE_ORDER)`
+        个惰性句柄）。旧版本才是 `_IncludedRouter` 句柄 —— 本仓已是新版，
+        故此处只断言"路由已展开且可挂载"，实际条数由
+        `test_live_openapi_route_surface_unchanged` 从 OpenAPI 规格校验。
         """
+        from fastapi.routing import APIRoute
         from astra_backend.routers.strategy import router
         self.assertTrue(hasattr(router, "routes"))
-        self.assertEqual(len(router.routes), len(INCLUDE_ORDER),
-                         f"聚合器应有 {len(INCLUDE_ORDER)} 个子路由句柄（惰性 include）")
-        self.assertTrue(all(type(r).__name__ == "_IncludedRouter" for r in router.routes),
-                        "应为 FastAPI 的惰性 include 句柄")
+        self.assertGreater(len(router.routes), 0, "聚合器应已展开至少一条路由")
+        self.assertTrue(all(isinstance(r, APIRoute) for r in router.routes),
+                        "FastAPI 新版应已把 include_router 立即展开为 APIRoute")
 
     def test_judgment_actually_notices_a_change(self):
         src = (PKG / "council.py").read_text(encoding="utf-8")

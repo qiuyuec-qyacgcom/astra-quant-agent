@@ -84,6 +84,37 @@ def _copies_from_ms(node: ast.AST) -> bool:
     return any(k.endswith("_ms") for k in _read_keys(node))
 
 
+#: 已知**函数名即单位契约**的毫秒函数（复盘分析包引入的时间抽象）。
+#:
+#: `now_ms()` / `timestamp_ms(...)` 的函数名带 `_ms` 后缀、语义上**明确返回毫秒**，
+#: 但 AST 扫描只看赋值语句的 RHS 文本，无法穿透函数体识别这一点 —— 若不加白名单，
+#: `x["last_success_ms"] = now_ms()` 这类**语义正确**的写法会被误判成"写了秒"。
+#: 这与"毫秒字段 ← 另一个毫秒字段"的复制豁免（`_copies_from_ms`）同源：
+#: 单位由**来源的名字**保证，硬要求 RHS 里出现 `*1000` 只会制造假阳性。
+#:
+#: ⚠️ 白名单只认**这些函数的名字**（精确匹配），不认任意调用 —— 这样既放过
+#: 语义正确的抽象，又不会让"真的写了秒"的普通调用蒙混过关。
+#: `row_ms` 是复盘归档 `analysis_sync.py` 内部的"取一行时间戳并归一成毫秒"助手，
+#: 与 `now_ms`/`timestamp_ms` 同源（函数名 `_ms` 后缀即单位契约）。
+KNOWN_MS_FUNCTIONS = {"now_ms", "timestamp_ms", "row_ms"}
+
+
+def _calls_known_ms_function(node: ast.AST) -> bool:
+    """RHS 是否调用了已知返回毫秒的函数（`now_ms()` / `timestamp_ms(...)`）？
+
+    两种形态都要认：
+    - 直接调用 `now_ms()`（`ast.Call` 且 `func` 是 `Name`）；
+    - 作为函数引用传给高阶函数 `map(row_ms, head)`（`row_ms` 是裸 `ast.Name`，
+      由 `map` 负责调用 —— 单位仍由 `row_ms` 的名字保证）。
+    """
+    return any(
+        (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+         and c.func.id in KNOWN_MS_FUNCTIONS)
+        or (isinstance(c, ast.Name) and c.id in KNOWN_MS_FUNCTIONS)
+        for c in ast.walk(node)
+    )
+
+
 def unit_violations(sources: "dict[str, str]") -> "list[str]":
     problems: "list[str]" = []
     for name, src in sorted(sources.items()):
@@ -99,11 +130,15 @@ def unit_violations(sources: "dict[str, str]") -> "list[str]":
                         continue
                     code = ast.unparse(node.value)
                     if key.endswith("_ms") and not MS.search(code) \
-                            and not _copies_from_ms(node.value) and code != "None":
-                        # 允许两类写法（都是**有意的**，不是放宽）：
+                            and not _copies_from_ms(node.value) \
+                            and not _calls_known_ms_function(node.value) \
+                            and code != "None":
+                        # 允许三类写法（都是**有意的**，不是放宽）：
                         #   ① "毫秒字段 ← 另一个毫秒字段"的纯复制（如 avg_ms ← latency_ms）：
                         #      单位由来源保证，硬要求 `*1000` 会制造假阳性；
-                        #   ② 显式 `None`：表示"未知/尚未同步"的复位（第一百六十九刀正名
+                        #   ② 调用已知返回毫秒的函数（now_ms()/timestamp_ms(...)）：
+                        #      函数名 `_ms` 后缀即单位契约（复盘分析包的时间抽象）；
+                        #   ③ 显式 `None`：表示"未知/尚未同步"的复位（第一百六十九刀正名
                         #      `last_sync_ts` → `last_sync_ms` 后，该写法进入通用规则）。
                         #      **秒值仍然必须翻红**（牙齿用例守着这一点）。
                         problems.append(

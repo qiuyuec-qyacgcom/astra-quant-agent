@@ -16,6 +16,11 @@ class EquityHistoryIsolationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         (self.root / "data").mkdir()
+        # ⚠️ 用「今天」而非硬编码日期：`equity_history(days=30)` 只回看 30 天，
+        #   硬编码的日期会随时间推移滑出窗口（KeyError）。今天永远在窗口内。
+        import datetime as _dt
+        _tz8 = _dt.timezone(_dt.timedelta(hours=8))
+        self.today = _dt.datetime.now(_tz8).date().isoformat()
 
     def _run(self, rows, mode="demo"):
         (self.root / "data" / "trading_ledger.json").write_text(
@@ -29,9 +34,10 @@ class EquityHistoryIsolationTests(unittest.TestCase):
             return dash.equity_history(days=30)
 
     def test_other_environment_rows_excluded(self):
+        d = self.today
         out = self._run([
-            {"id": "a", "status": "closed", "environment": "demo", "close_time": "2026-09-13 10:00:00", "net_pnl": 5.0},
-            {"id": "b", "status": "closed", "environment": "live", "close_time": "2026-09-13 11:00:00", "net_pnl": -900.0},
+            {"id": "a", "status": "closed", "environment": "demo", "close_time": f"{d} 10:00:00", "net_pnl": 5.0},
+            {"id": "b", "status": "closed", "environment": "live", "close_time": f"{d} 11:00:00", "net_pnl": -900.0},
         ], mode="demo")
         self.assertEqual(out["environment"], "demo")
         self.assertEqual(out["excluded_rows"]["other_environment"], 1)
@@ -39,21 +45,23 @@ class EquityHistoryIsolationTests(unittest.TestCase):
         self.assertGreater(total, 0)  # live 的 -900 不得混入 demo 曲线
 
     def test_unknown_status_not_counted_as_closed(self):
+        d = self.today
         out = self._run([
-            {"id": "a", "status": "closed", "environment": "demo", "close_time": "2026-09-13 10:00:00", "net_pnl": 5.0},
-            {"id": "b", "status": "持仓中", "environment": "demo", "close_time": "2026-09-13 12:00:00", "net_pnl": -700.0},
-            {"id": "c", "environment": "demo", "close_time": "2026-09-13 12:30:00", "net_pnl": -300.0},
+            {"id": "a", "status": "closed", "environment": "demo", "close_time": f"{d} 10:00:00", "net_pnl": 5.0},
+            {"id": "b", "status": "持仓中", "environment": "demo", "close_time": f"{d} 12:00:00", "net_pnl": -700.0},
+            {"id": "c", "environment": "demo", "close_time": f"{d} 12:30:00", "net_pnl": -300.0},
         ], mode="demo")
         day_vals = {d["date"]: d["equity"] for d in out["days"]}
-        self.assertEqual(day_vals["2026-09-13"], 1005.0)
+        self.assertEqual(day_vals[d], 1005.0)
 
     def test_unlabeled_legacy_rows_kept_and_counted(self):
+        d = self.today
         out = self._run([
-            {"id": "a", "status": "closed", "close_time": "2026-09-13 10:00:00", "net_pnl": 7.0},
+            {"id": "a", "status": "closed", "close_time": f"{d} 10:00:00", "net_pnl": 7.0},
         ], mode="demo")
         self.assertEqual(out["excluded_rows"]["unlabeled_environment"], 1)
         day_vals = {d["date"]: d["equity"] for d in out["days"]}
-        self.assertEqual(day_vals["2026-09-13"], 1007.0)
+        self.assertEqual(day_vals[d], 1007.0)
 
 
 if __name__ == "__main__":

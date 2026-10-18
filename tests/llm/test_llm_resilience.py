@@ -230,12 +230,12 @@ class LLMResilienceTests(unittest.TestCase):
         self.assertFalse(events[0]["succeeded"])
 
     def test_single_model_timeout_keeps_legacy_message(self):
+        """单模型超时仍抛 TimeoutError（2026-10 看门狗改版后文案更精确：区分超时阶段）。"""
         llm_manager.update_llm_settings(request_attempts=1, fallback_model_ids=[])
         with patch("astra_backend.llm_manager.urllib.request.urlopen", side_effect=socket.timeout("timed out")):
             with self.assertRaises(TimeoutError) as ctx:
                 llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=10)
-        self.assertIn("LLM 推演超时", str(ctx.exception))
-        self.assertIn("调大思考上限时间", str(ctx.exception))
+        self.assertIn("LLM 请求超时", str(ctx.exception))
 
     def test_single_model_http_error_keeps_legacy_runtime_error(self):
         llm_manager.update_llm_settings(request_attempts=1, fallback_model_ids=[])
@@ -265,7 +265,13 @@ class LLMResilienceTests(unittest.TestCase):
     def test_504_still_retries_when_no_fallback(self):
         """未配置回退时保持旧语义：504 仍按请求次数重试同一模型。"""
         llm_manager.update_llm_settings(request_attempts=2, fallback_model_ids=[])
-        with patch("astra_backend.llm_manager.urllib.request.urlopen", side_effect=http_error(504, "error code: 504")) as mock_open:
+
+        def fake_open(req, timeout=None):
+            # 每次 raise 一个新实例：新 transport 会在 except 块中 exc.close()，
+            # 复用同一 HTTPError 实例会导致第二次重试读到已关闭的 BytesIO。
+            raise http_error(504, "error code: 504")
+
+        with patch("astra_backend.llm_manager.urllib.request.urlopen", side_effect=fake_open) as mock_open:
             with self.assertRaises(RuntimeError) as ctx:
                 llm_manager.execute_llm_request(messages=[{"role": "user", "content": "hi"}], timeout=10)
         self.assertEqual(mock_open.call_count, 2)

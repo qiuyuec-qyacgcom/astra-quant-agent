@@ -25,7 +25,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from tests.extraction.rename_baseline import legacy_rev_path, normalize
+from tests.extraction.rename_baseline import git_show, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -48,10 +48,8 @@ EXPECTED_KEYS = {
 
 
 def _baseline_stmt() -> ast.Assign:
-    r = subprocess.run(["git", "show", legacy_rev_path(f"{PRE}:scripts/self_improvement_engine.py")],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    fn = next(n for n in ast.parse(normalize(r.stdout)).body
+    src = git_show(f"{PRE}:scripts/self_improvement_engine.py")
+    fn = next(n for n in ast.parse(normalize(src)).body
               if isinstance(n, ast.FunctionDef) and n.name == OWNER)
     return fn.body[40]
 

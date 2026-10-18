@@ -28,6 +28,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from astra_backend import analysis_capture
+
 try:                                    # 与 scale_out.py 同源；独立运行时兜底
     from scripts.risk_constants import SCALE_OUT_RATIO
 except Exception:                       # pragma: no cover
@@ -181,6 +183,9 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     if "entryTs" not in t:
         t["entryTs"] = now_ts
 
+    t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
+    t["lowWaterMark"] = min(t.get("lowWaterMark", cur_px), cur_px)
+    analysis_capture.emit("position.sample", {"position": curr_pos, "tracker": dict(t), "sampling_note": "巡检采样，非逐笔极值"})
     # Peak Profit Tracking
     if is_long:
         t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
@@ -211,7 +216,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             action_type="硬止损", side_suffix="硬止损",
             pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=pnl_val,
             remark=f"价格 {cur_px} 触及保护止损 {hard_stop_px}，交易所确认平仓",
-        ))
+        ), position=curr_pos)
         add_stop_cooldown(inst_id, "long" if is_long else "short", "硬止损")
         trackers.pop(pos_key, None)
         return True, "已硬止损"
@@ -264,7 +269,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             pos_sz=pos_sz, cur_px=cur_px,
             fee=_close_fee(pos_sz, ct_val, cur_px, TAKER_FEE_RATE), pnl=pnl_val,
             remark=f"云端 OCO 无法达到全仓覆盖，交易所确认安全平仓：{protection_detail}",
-        ))
+        ), position=curr_pos)
         add_stop_cooldown(inst_id, _pos_side, "云端保护失效")
         trackers.pop(pos_key, None)
         return True, "保护失效安全退出"
@@ -289,7 +294,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             action_type="时间止损", side_suffix="无波动出场",
             pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=curr_pos["upl"],
             remark=f"持仓超 {max_hold_hours:g} 小时无突破，主动平仓释放配比",
-        ))
+        ), position=curr_pos)
         if pos_key in trackers: del trackers[pos_key]
         return True, "时间止损"
 
@@ -344,7 +349,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 action_type="阶梯锁利", side_suffix="阶梯锁利平仓",
                 pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=pnl_val,
                 remark=f"最高 {t['highWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
-            ))
+            ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已阶梯锁利"
 
@@ -362,7 +367,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 action_type="移动止盈", side_suffix="高点回撤止盈",
                 pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=pnl_val,
                 remark=f"最高 {t['highWaterMark']} 动能回撤触及移动止盈线",
-            ))
+            ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已移动止盈"
 
@@ -405,7 +410,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 action_type="阶梯锁利", side_suffix="阶梯锁利平仓",
                 pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=pnl_val,
                 remark=f"最低 {t['lowWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
-            ))
+            ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已阶梯锁利"
 
@@ -423,7 +428,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 action_type="移动止盈", side_suffix="低点反弹止盈",
                 pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=pnl_val,
                 remark=f"最低 {t['lowWaterMark']} 动能反弹触及移动止盈线",
-            ))
+            ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
             return True, "已移动止盈"
 

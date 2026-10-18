@@ -18,6 +18,34 @@ MAX_FALLBACK_MODELS = 5
 # 整条模型链的总等待软预算（只在新一次尝试发起前检查，不切断进行中的请求）；
 # 必须低于网关 trader 任务 840s 超时，避免整轮推演被调度器硬杀。
 FAILOVER_MAX_TOTAL_WAIT = float(os.getenv("LLM_FAILOVER_MAX_WAIT_SECONDS", "600"))
+
+
+def _nonnegative_timeout_env(name: str, default: float) -> float:
+    """读取可选的看门狗超时；0 显式关闭该看门狗。非法值回退默认。"""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(0.0, value)
+
+
+# ── 流式响应看门狗（LanQin996 fork 移植，2026-10）──
+# 响应头看门狗：发出请求后等待首个响应头的上限。超过则按超时切换备用模型。
+RESPONSE_START_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_RESPONSE_START_TIMEOUT_SECONDS", 45.0
+)
+# 仅思考看门狗：收到思考内容但迟迟未收到最终答案的上限。
+REASONING_ONLY_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_REASONING_ONLY_TIMEOUT_SECONDS", 60.0
+)
+# Qwen3 直接恢复：结构化 JSON 请求失败后，用关闭思考的直答重试的超时上限。
+QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS = _nonnegative_timeout_env(
+    "LLM_QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS", 60.0
+)
+try:
+    QWEN_DIRECT_RECOVERY_MAX_TOKENS = max(256, int(os.getenv("LLM_QWEN_DIRECT_RECOVERY_MAX_TOKENS", "8192")))
+except (TypeError, ValueError):
+    QWEN_DIRECT_RECOVERY_MAX_TOKENS = 8192
 SUPPORTED_API_FORMATS = [
     {"id": "openai_chat", "name": "OpenAI Chat (/chat/completions)", "desc": "标准 ChatML 对话格式，兼容 OpenAI/Gemini/DeepSeek/主流中继"},
     {"id": "openai_responses", "name": "OpenAI Responses (/responses)", "desc": "OpenAI 专属 Responses API 结构化接口"},

@@ -101,6 +101,11 @@ data/.r20_*
 # 不上 `data/*.json`，实测被 `git add -A` 收进过仓库。新版本已改到 .archive/，
 # 这里同时挡住残留。
 data/*.pre-astra
+# 测试临时产物（无扩展名）：`data/tmp*`（JSON 快照临时文件，测试跑完残留）
+# 与根层 `.<object object ...>.lock`（测试把 Python 对象误当文件名的空锁文件）。
+# 按扩展名列举的老规则盖不住"无扩展名/怪异名"的运行时残留，故按前缀兜底。
+data/tmp*
+.<object object*.lock
 data/credentials/
 data/policy_archives/
 trading.html

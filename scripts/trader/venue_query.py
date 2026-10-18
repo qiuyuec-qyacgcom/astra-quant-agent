@@ -56,8 +56,8 @@ def venue_execution_ready(venue: str, environment: str,
 
     - OKX：实盘/模拟盘执行走本 trader 的 V5 直签链路（不经适配器），就绪条件 =
       当前冻结环境凭证齐备且档位一致；
-    - 其余场所：登记表里已经没有它们（本系统为 OKX 专用），`is_registered` 直接
-      否决；这段按 registry 判定的通用逻辑保留给将来重新登记的新所
+    - 其余场所：登记表里只有币安（公开行情面，`supports_orders=False` 恒关执行闸），
+      实际不构成候选；这段按 registry 判定的通用逻辑保留给将来重新登记并开闸的新所
       （`registry.execution_open` 单源判定——开闸即自动成为真候选，无需改这里）。
     """
     key = str(venue or "").strip().lower()
@@ -87,7 +87,8 @@ def fetch_other_venue_positions(environment: str,
                               venue_execution_ready) -> Tuple[bool, Dict[str, List[Dict[str, Any]]], str]:
     """跨所持仓快照（多所封顶用）：非 OKX 且已开闸场所的活跃持仓。
 
-    登记场所集今天已经收敛为 `{"okx"}` ⇒ 本函数结构性返回 `(True, {}, "")`：
+    登记场所集今天为 `{"binance", "okx"}`，但币安仅公开行情面（`execution_open`
+    恒 False）⇒ 本函数结构性返回 `(True, {}, "")`：
     OKX 自身的仓位走直签链路单独计数，不重复计入这里。保留本函数是为了守住
     "多所"这一层的接口形状（将来重新登记新所即自动生效）。
 

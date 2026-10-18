@@ -209,7 +209,10 @@ class CallShellTests(FacadeBase):
                                      model="m", allow_fallback=False)
         impl.assert_called_once_with(active, resolve, recorder,
                                      [{"role": "user", "content": "hi"}],
-                                     "m", None, None, None, None, 0.2, None, None, False)
+                                     "m", None, None, None, None, 0.2, None, None, False,
+                                     attempt_call=LM._attempt_llm_call,
+                                     max_total_wait=LM.FAILOVER_MAX_TOTAL_WAIT,
+                                     recovery_timeout=LM.QWEN_DIRECT_RECOVERY_TIMEOUT_SECONDS)
         self.assertEqual(out, ("t", "c", {}, 200))
 
     def test_lookup_api_path_passes_the_resolver(self):
