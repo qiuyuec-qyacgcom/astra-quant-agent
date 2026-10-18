@@ -7,7 +7,7 @@
 |---|---|
 | `base.py` | `ExchangeCapabilities` 能力表 / `InstrumentSpec` / `BaseExchangeAdapter` |
 | `okx.py` | OKX V5 公共行情只读适配器 |
-| `binance.py` | 币安 USDⓈ-M USDT 永续：`BinancePublicAdapter`（公开行情面）+ 自包含 `BinanceExchange`（私有交易面）+ `BinanceTradingAdapter`（桥接私有面进 `BaseExchangeAdapter`，供 registry 与主交易循环） |
+| `binance.py` | 币安 USD-M USDT 永续：`BinancePublicAdapter`（公开行情面）+ 自包含 `BinanceExchange`（私有交易面）+ `BinanceTradingAdapter`（桥接私有面进 `BaseExchangeAdapter`，供 registry 与主交易循环） |
 | `binance_pending.py` | 币安 durable pending-entry 状态存储（崩溃可恢复、账户级隔离） |
 | `candle_cache.py` | 进程级 K 线 memoization + inflight 合并 |
 | `env_profiles.py` | `(venue, environment)` → 端点档单一入口（US-001） |

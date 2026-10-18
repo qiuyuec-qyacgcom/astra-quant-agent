@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 
-AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘口微结构）与 Python 确定性物理风控相结合，并通过 **OKX** 与 **币安 USDⓈ-M 永续** 原生 API 实现限价入场与双腿云端止损止盈。
+AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘口微结构）与 Python 确定性物理风控相结合，并通过 **OKX** 与 **币安 USD-M 永续** 原生 API 实现限价入场与双腿云端止损止盈。
 
 [界面预览](#界面预览) · [核心能力](#核心能力概览) · [快速开始](#快速开始) · [核心优势](#核心优势) · [开户返佣](#交易所开户与手续费返现) · [系统架构](#系统架构) · [量化因子](#行情与微观结构因子) · [风控模型](#资金管理与风控参数) · [部署指南](#部署指南) · [代码地图](#代码结构入口)
 
@@ -28,7 +28,7 @@ AstraQuant豪华3000型 是一套**端到端自主量化交易系统**，从行�
 | **🧠 研判层** | 多模型投委会协同 | DeepSeek / Claude / GPT / Qwen 分任宏观、趋势、盘口、逆向席位；共享前缀提示词缓存实现亚秒级首字响应 |
 | **📊 因子层** | 高频衍生品微结构 | CVD 订单流、L2 盘口失衡 (OBI)、资金费率、期权 IV 偏度、VWAP 筹码中枢等 6 类非滞后因子 |
 | **🛡️ 风控层** | 确定性物理闸门 | 一票否决式仓位钳制、R:R ≥ 2.0 下限、日内熔断、动态杠杆 2–5x、100% 云端 OCO 止损覆盖 |
-| **⚡ 执行层** | 交易所原生下单 | OKX 与币安 USDⓈ-M 永续被动 Maker 限价单 + 双腿云端保护单，币安执行 fail-closed 开闸 |
+| **⚡ 执行层** | 交易所原生下单 | OKX 与币安 USD-M 永续被动 Maker 限价单 + 双腿云端保护单，币安执行 fail-closed 开闸 |
 | **🔁 闭环层** | 复盘·自进化·回测 | 40+ 埋点闭环复盘、LLM 经验自进化中枢、多资产回测引擎（Sharpe / Sortino / Calmar / 回撤 / 胜率） |
 | **🧰 工程层** | 可靠性治理 | LLM 流式看门狗、行情防伪造、实盘切换前只读体检、SQLite 连接治理、Prometheus/Grafana 可观测 |
 
@@ -76,12 +76,12 @@ git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-
 
 ## 交易所开户与手续费返现
 
-> **交易接口兼容性声明**：AstraQuant 量化执行引擎原生支持 **OKX** 与 **币安 USDⓈ-M 永续合约**（币安执行经 `ASTRA_BINANCE_EXECUTION` 双轴 fail-closed 判定）。芝麻开门 (Gate.io) 仅作为社区合作推荐开户通道提供手续费返现优惠，本系统暂不支持 Gate.io 的 API 直连下单。
+> **交易接口兼容性声明**：AstraQuant 量化执行引擎原生支持 **OKX** 与 **币安 USD-M 永续合约**（币安执行经 `ASTRA_BINANCE_EXECUTION` 双轴 fail-closed 判定）。芝麻开门 (Gate.io) 仅作为社区合作推荐开户通道提供手续费返现优惠，本系统暂不支持 Gate.io 的 API 直连下单。
 
 | 交易所 | 平台角色与兼容性 | 专属开户通道 | 邀请码 | 特别说明 |
 |---|---|---|---|---|
 | **OKX 欧易** | **系统实盘直连** (核心执行支持) | [前往 OKX 注册开户](https://www.mitnpkwxvfr.net/join/O5XCV2BS) | `O5XCV2BS` | 支持新用户及 **180 天未登录老用户重新绑定** 享受费率返还 |
-| **Binance 币安** | **系统实盘直连** (USDⓈ-M 永续，fail-closed 开闸) | [前往币安注册开户](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | 专属手续费减免链接；执行开闸由 `ASTRA_BINANCE_EXECUTION` 控制 |
+| **Binance 币安** | **系统实盘直连** (USD-M 永续，fail-closed 开闸) | [前往币安注册开户](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | 专属手续费减免链接；执行开闸由 `ASTRA_BINANCE_EXECUTION` 控制 |
 | **Gate.io 芝麻开门** | 仅生态合作推广 (不支持 API 交易) | [前往 Gate 注册开户](https://www.gate.io) | — | 官网入口；量化系统暂不支持直连下单 |
 
 ---
@@ -100,7 +100,7 @@ AstraQuant 从社区 fork 家族中**精选合并**了高价值改进，同时�
 
 | 优势 | 说明 | 来源 |
 |---|---|---|
-| **币安 USDⓈ-M 交易** | `BinanceTradingAdapter`（`supports_orders=True`）已接入下单主路径，含币本位换算（`margin×lev/price`）与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 | cnlimiter |
+| **币安 USD-M 交易** | `BinanceTradingAdapter`（`supports_orders=True`）已接入下单主路径，含币本位换算（`margin×lev/price`）与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 | cnlimiter |
 | **交易复盘分析** | 完整闭环复盘套件——8 个后端模块（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`）+ 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁；默认开启，`ASTRA_TESTING=1`（无 DB）时退化为 no-op。 | LanQin996 |
 | **LLM 流式看门狗 + Qwen3 直恢复** | 响应头看门狗（45s）与仅思考看门狗（60s）在卡死时切换备用模型；Qwen3 直恢复（60s）对结构化 JSON 请求失败用关闭思考的直答重试。均经 `.env` 调参（设 0 关闭）。 | LanQin996 |
 | **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎（`scripts/calculus_engine.py` + 离线 `calculus_replay.py` CLI）。作为**独立数理库**引入，未接入任何决策/下单链路；缺数据返回 `valid=False`（绝不伪造结论）。 | cnlimiter |
@@ -119,7 +119,7 @@ AstraQuant 从社区 fork 家族中**精选合并**了高价值改进，同时�
 1. 市场因子采集与清洗    ──> 资金费率、CVD 订单流背离、L2 深度 OBI、期权波动率偏度、VWAP 筹码中枢
 2. 多模型投委会综合分析  ──> 宏观、趋势动量、盘口微结构席位独立分析并输出标准机器契约
 3. Python 物理风控闸门  ──> 几何报价校验、仓位硬顶钳制、期望盈亏比底线、日内熔断审查（一票否决）
-4. 交易所执行与云端双腿防护 ──> 被动 BBO Maker 限价单 (OKX / 币安 USDⓈ-M)、分批止盈腿 (TP1/TP2) 与 100% 云端 OCO 止损
+4. 交易所执行与云端双腿防护 ──> 被动 BBO Maker 限价单 (OKX / 币安 USD-M)、分批止盈腿 (TP1/TP2) 与 100% 云端 OCO 止损
 ```
 
 ---
@@ -282,7 +282,7 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 
 | 改动 | 说明 |
 |---|---|
-| **币安 USDⓈ-M 交易** | 原生 `BinanceTradingAdapter` 接入下单主路径，含币本位换算与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 |
+| **币安 USD-M 交易** | 原生 `BinanceTradingAdapter` 接入下单主路径，含币本位换算与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 |
 | **交易复盘分析** | 完整闭环复盘套件（8 个后端模块、40 处埋点、`AnalysisPage.vue` 前端），原项目缺失。 |
 | **LLM 流式看门狗** | 响应头看门狗（45s）与仅思考看门狗（60s）加 Qwen3 直恢复，均经 `.env` 调参。 |
 | **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎，作为独立数理库引入（未接入任何决策链路）。 |

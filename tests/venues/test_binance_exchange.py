@@ -1,4 +1,4 @@
-"""Offline Binance USDⓈ-M adapter tests. No network, no credentials, injectable transport."""
+"""Offline Binance USD-M adapter tests. No network, no credentials, injectable transport."""
 from __future__ import annotations
 
 import hashlib
