@@ -1,4 +1,4 @@
-"""Binance USD-M USDT 永续适配器（完整私有面 + 公开行情面）。
+"""Binance USDⓈ-M USDT 永续适配器（完整私有面 + 公开行情面）。
 
 移植自 cnlimiter/r20-quantum-trader 的 ``feat/binance-upstream`` 分支
 （``r20_exchange/binance.py``），适配本仓 ``astra_backend`` 结构：
@@ -2099,7 +2099,7 @@ def make_binance_env(values: dict[str, str] | None = None) -> BinanceEnvironment
 # 公开行情面适配器（BaseExchangeAdapter 子类，fail-soft 返回 None）
 # ---------------------------------------------------------------------------
 class BinancePublicAdapter(BaseExchangeAdapter):
-    """币安 USD-M 永续的公开行情适配器（只读，无签名、无下单）。
+    """币安 USDⓈ-M 永续的公开行情适配器（只读，无签名、无下单）。
 
     与 ``BinanceExchange``（自包含完整私有面）互补：本类接入 ``BaseExchangeAdapter``
     抽象，供 ``registry`` 多所聚合矩阵统一入口使用。公开方法 fail-soft（失败返回
@@ -2112,7 +2112,7 @@ class BinancePublicAdapter(BaseExchangeAdapter):
 
     capabilities = ExchangeCapabilities(
         venue="binance",
-        display_name="Binance USD-M USDT 永续",
+        display_name="Binance USDⓈ-M USDT 永续",
         symbol_template="{base}USDT",
         quote="USDT",
         quantity_unit="base_asset",        # 币本位数量，非张
@@ -2262,7 +2262,7 @@ class BinancePublicAdapter(BaseExchangeAdapter):
 
 
 class BinanceTradingAdapter(BinancePublicAdapter):
-    """币安 USD-M USDT 永续的**交易**适配器（桥接 ``BinanceExchange`` 私有面）。
+    """币安 USDⓈ-M USDT 永续的**交易**适配器（桥接 ``BinanceExchange`` 私有面）。
 
     与 ``BinancePublicAdapter``（只读行情）互补：本类在继承其命名转译/行情/规格的
     基础上，组合一个 ``BinanceExchange`` 实例，把币安的私有交易面（下单/平仓/持仓/

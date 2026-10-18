@@ -74,7 +74,7 @@ class RepoPinTest(unittest.TestCase):
 
     def test_repo_has_no_literal_net_tolerance_drift(self):
         rows = census(only_net_drift=True)
-        # ⚠️ 币安 USD-M 永续的 `posSide` 语义与 OKX 单向/双向持仓不同：币安在
+        # ⚠️ 币安 USDⓈ-M 永续的 `posSide` 语义与 OKX 单向/双向持仓不同：币安在
         #   **单向持仓模式（POSITION_MODE=net）**下仓位方向由数量符号表达（正=多/负=空），
         #   在**双向持仓模式**下才用 `LONG`/`SHORT` 两个 posSide。故 `binance.py` 里
         #   `side`/`pos_side`/`wanted` 等主语同时出现 `net` 与 `long`/`short` 是

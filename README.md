@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 
-AstraQuant combines large language models (macro, technical, and microstructure analysis) with deterministic Python risk management and exchange-native conditional order execution on **OKX** and **Binance USD-M**.
+AstraQuant combines large language models (macro, technical, and microstructure analysis) with deterministic Python risk management and exchange-native conditional order execution on **OKX** and **Binance USDⓈ-M**.
 
 [Preview](#preview) · [Capabilities](#capability-overview) · [Quick Start](#quick-start) · [Key Advantages](#key-advantages) · [Referral](#exchange-referral--fee-rebates) · [Architecture](#system-architecture) · [Market Factors](#market-microstructure-factors) · [Risk Control](#capital-management--risk-control) · [Deploy](#deploy) · [Code Map](#code-map)
 
@@ -28,7 +28,7 @@ AstraQuant combines large language models (macro, technical, and microstructure 
 | **🧠 Analysis** | Multi-model committee | DeepSeek / Claude / GPT / Qwen seated as macro, trend, microstructure, and contrarian analysts; shared-prefix prompt caching for sub-second time-to-first-token |
 | **📊 Factors** | High-frequency microstructure | CVD order flow, L2 order-book imbalance (OBI), funding rate, option IV skew, VWAP point of control — 6 families of non-lagging factors |
 | **🛡️ Risk** | Deterministic physical gates | Veto-authority position clamps, R:R ≥ 2.0 floor, intraday circuit breaker, dynamic 2–5× leverage, 100% cloud OCO stop coverage |
-| **⚡ Execution** | Exchange-native orders | Passive maker limit orders on OKX and Binance USD-M perpetuals with two-leg cloud protection; Binance execution is fail-closed |
+| **⚡ Execution** | Exchange-native orders | Passive maker limit orders on OKX and Binance USDⓈ-M perpetuals with two-leg cloud protection; Binance execution is fail-closed |
 | **🔁 Loop** | Review · evolution · backtest | 40+ instrumentation points for closed-loop review, LLM self-evolution hub, multi-asset backtest engine (Sharpe / Sortino / Calmar / drawdown / win rate) |
 | **🧰 Engineering** | Reliability governance | LLM streaming watchdogs, market-data anti-forgery, read-only live preflight, SQLite connection governance, Prometheus/Grafana observability |
 
@@ -76,12 +76,12 @@ git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-
 
 ## Exchange Referral & Fee Rebates
 
-> **Trading API Compatibility Notice**: AstraQuant's autonomous execution engine natively supports **OKX** and **Binance USD-M** (perpetual futures). Binance execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. Gate.io is a community partner link provided solely for registration discounts and fee rebates; the trading engine does not support direct API execution on Gate.io.
+> **Trading API Compatibility Notice**: AstraQuant's autonomous execution engine natively supports **OKX** and **Binance USDⓈ-M** (perpetual futures). Binance execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. Gate.io is a community partner link provided solely for registration discounts and fee rebates; the trading engine does not support direct API execution on Gate.io.
 
 | Exchange | Role & Compatibility | Referral Link | Code | Special Note |
 |---|---|---|---|---|
 | **OKX** | **Native Trading Supported** (Primary Engine Target) | [Register on OKX](https://www.mitnpkwxvfr.net/join/O5XCV2BS) | `O5XCV2BS` | Supports new accounts & **dormant accounts (inactive > 180 days)** |
-| **Binance** | **Native Trading Supported** (USD-M Perpetuals, fail-closed) | [Register on Binance](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | Exclusive fee rebate link; execution gated by `ASTRA_BINANCE_EXECUTION` |
+| **Binance** | **Native Trading Supported** (USDⓈ-M Perpetuals, fail-closed) | [Register on Binance](https://www.bsmkweb.cc/register?ref=37575575) | `37575575` | Exclusive fee rebate link; execution gated by `ASTRA_BINANCE_EXECUTION` |
 | **Gate.io** | Partner Promotion Only (No API Trading) | [Register on Gate](https://www.gate.io) | — | Official site; not supported by trading engine |
 
 ---
@@ -100,7 +100,7 @@ AstraQuant consolidates the best improvements from a family of community forks w
 
 | Advantage | What it does | Source lineage |
 |---|---|---|
-| **Binance USD-M Trading** | `BinanceTradingAdapter` (`supports_orders=True`) wired into the order-submit path with coin-margin sizing (`margin×lev/price`) and protected OCO brackets; execution gate is fail-closed on `ASTRA_BINANCE_EXECUTION`. | cnlimiter |
+| **Binance USDⓈ-M Trading** | `BinanceTradingAdapter` (`supports_orders=True`) wired into the order-submit path with coin-margin sizing (`margin×lev/price`) and protected OCO brackets; execution gate is fail-closed on `ASTRA_BINANCE_EXECUTION`. | cnlimiter |
 | **Trade Review & Analytics** | Full closed-loop review suite — 8 backend modules (`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`), 40 instrumentation points across 11 trading scripts, an `AnalysisPage.vue` frontend, and cross-platform file locks. Enabled by default; degrades to a no-op under `ASTRA_TESTING=1` without a DB. | LanQin996 |
 | **LLM Streaming Watchdogs + Qwen3 Recovery** | Response-start watchdog (45s) and reasoning-only watchdog (60s) switch to fallback models on stalls; Qwen3 direct-recovery (60s) retries failed structured-JSON requests with reasoning disabled. All tunable via `.env` (set `0` to disable). | LanQin996 |
 | **Causal Calculus Engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine (`scripts/calculus_engine.py` + offline `calculus_replay.py` CLI). Imported as a standalone math library — **not** wired into any decision or order path; returns `valid=False` on insufficient data (never fabricates conclusions). | cnlimiter |
@@ -119,7 +119,7 @@ AstraQuant executes on a 15-minute trading cycle across four decoupled boundarie
 1. Market Ingestion & Factors    ──> CVD, Orderbook Imbalance (OBI), Funding Rate, Options IV Skew, VWAP
 2. Multi-Model Council (LLMs)   ──> Macro, Trend, and Microstructure seats analyze & synthesize order intent
 3. Python Physical Risk Gates   ──> Sizing clamps, R:R floor verification, same-direction cap, circuit breaker
-4. Exchange Execution & Cloud OCO ──> Passive BBO Maker limits (OKX / Binance USD-M), scale-out TP legs, 100% cloud stop-loss
+4. Exchange Execution & Cloud OCO ──> Passive BBO Maker limits (OKX / Binance USDⓈ-M), scale-out TP legs, 100% cloud stop-loss
 ```
 
 ---
@@ -282,7 +282,7 @@ This repository is a maintained fork of the original [`0xethanq/astra-quant-agen
 
 | Change | Description |
 |---|---|
-| **Binance USD-M trading** | Native `BinanceTradingAdapter` wired into the order-submit path with coin-margin sizing and protected OCO brackets; execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. |
+| **Binance USDⓈ-M trading** | Native `BinanceTradingAdapter` wired into the order-submit path with coin-margin sizing and protected OCO brackets; execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. |
 | **Trade review & analytics** | A full closed-loop review suite (8 backend modules, 40 instrumentation points, `AnalysisPage.vue`) that the upstream project lacked. |
 | **LLM streaming watchdogs** | Response-start (45s) and reasoning-only (60s) watchdogs plus Qwen3 direct-recovery, all `.env`-tunable. |
 | **Causal calculus engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine, imported as a standalone math library (not wired into any decision path). |
