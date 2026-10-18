@@ -29,7 +29,12 @@ def load_dotenv(path: Path) -> None:
         # `ASTRA_ADMIN_DB` 覆盖失效、`Path('') == '.'` 连不上 sqlite。空值 = 未配置。
         if value == "":
             continue
-        os.environ[key.strip()] = value
+        # 环境变量优先：进程环境里已显式设置的键（如测试沙箱 `tests/__init__.py`
+        # 用 `setdefault` 预置的 `ASTRA_LEDGER_SYNC_DISABLED=1`、各 DB 沙箱路径）不应被
+        # `.env` 文件的默认值覆盖。用 `setdefault` 而非直接赋值，正是为了让"真实环境
+        # 注入 > .env 文件"这一标准优先级成立——否则 `.env` 里的 `ASTRA_SESSION_FORCE=0`
+        # 等非空默认值会把测试沙箱的隔离配置冲掉。
+        os.environ.setdefault(key.strip(), value)
 
 
 load_dotenv(ROOT / ".env")

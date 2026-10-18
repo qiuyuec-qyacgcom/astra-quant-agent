@@ -105,6 +105,12 @@ def run_gateway_job(
         raise HTTPException(status_code=500, detail=f"任务脚本不存在：{script_path}")
 
     cmd = [sys.executable, str(script_path), *job_cfg["args"]]
+    # 会话级标志（`ASTRA_SESSION_FORCE`）只属于「立即运行 trader」这一个显式意图，
+    # 不应通过 `.env` 全局注入、再被 `os.environ` 继承泄漏给所有网关子进程。
+    # 这里先从父环境剥离，再叠加 job 自己的 env（trader 会在下面显式置 1），
+    # 保证 `factor_library` 等无关任务不带这个标志。
+    child_env = {k: v for k, v in os.environ.items() if k != "ASTRA_SESSION_FORCE"}
+    child_env.update(job_cfg.get("env") or {})
     try:
         result = subprocess.run(
             cmd,
@@ -112,7 +118,7 @@ def run_gateway_job(
             text=True,
             capture_output=True,
             timeout=job_cfg["timeout"],
-            env={**os.environ, **(job_cfg.get("env") or {})},
+            env=child_env,
         )
     except subprocess.TimeoutExpired:
         audit_record(
