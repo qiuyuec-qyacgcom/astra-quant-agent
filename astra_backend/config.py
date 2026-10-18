@@ -22,7 +22,14 @@ def load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ[key.strip()] = value.strip().strip('"').strip("'")
+        value = value.strip().strip('"').strip("'")
+        # 空值占位（如 env.example 里 `ASTRA_ADMIN_DB=`、`OKX_LIVE_API_KEY=`）不应写入
+        # os.environ：否则会把空字符串当"已配置"污染环境，导致下游 `os.environ.get` /
+        # `setdefault` 因 key 已存在（值为空）而失效——实测正是它让测试沙箱的
+        # `ASTRA_ADMIN_DB` 覆盖失效、`Path('') == '.'` 连不上 sqlite。空值 = 未配置。
+        if value == "":
+            continue
+        os.environ[key.strip()] = value
 
 
 load_dotenv(ROOT / ".env")

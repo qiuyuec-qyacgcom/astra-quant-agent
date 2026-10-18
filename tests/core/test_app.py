@@ -667,11 +667,15 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(set(methods), {"GET", "POST", "PUT"})
 
     def test_the_eight_routers_are_mounted(self):
-        """⚠️ 本版 FastAPI 的 `include_router` 是**惰性**的：`app.routes` 里躺着 8 个
-        `_IncludedRouter` 包装（`path=None`），真正的路由路径要经 `app.openapi()` 才摊开。
-        所以这里两件事都验：包装数=8，且每个 router 的代表性路径确实生效。"""
-        included = [r for r in A.app.routes if type(r).__name__ == "_IncludedRouter"]
-        self.assertEqual(len(included), 8, "8 个 APIRouter 必须都挂上")
+        """验证 8 个 APIRouter 的代表性路径都已挂上并生效。
+
+        注意：旧版 FastAPI 的 `include_router` 是**惰性**的——`app.routes` 里躺着 8 个
+        `_IncludedRouter` 包装（`path=None`），真正的路由要经 `app.openapi()` 才摊开。
+        但 FastAPI 0.128+ 已移除 `_IncludedRouter`，`include_router` 改为**立即摊平**成
+        `APIRoute`（`path` 已是具体路径）。故不再断言内部类型，改为直接验证这些代表性
+        路径既在 `app.routes` 里、也在 OpenAPI paths 里，对两个版本都成立。
+        """
+        mounted_paths = {getattr(r, "path", None) for r in A.app.routes}
         paths = _openapi_paths()
         for path in ("/api/v1/health",            # system_router
                      "/api/v1/status",            # system_router
@@ -681,7 +685,8 @@ class AppWiringTests(unittest.TestCase):
                      "/api/v1/admin/llm/models",  # llm_router
                      "/api/all",                  # dashboard_router
                      "/api/overview"):            # dashboard_router
-            self.assertIn(path, paths, f"{path} 未挂上")
+            self.assertIn(path, paths, f"{path} 未在 OpenAPI 中挂上")
+            self.assertIn(path, mounted_paths, f"{path} 未在 app.routes 中挂上")
 
     def test_the_openapi_schema_is_generated(self):
         schema = _openapi()

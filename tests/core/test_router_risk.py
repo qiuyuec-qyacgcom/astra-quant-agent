@@ -165,6 +165,41 @@ class RiskReadTests(_Base):
         self.assertEqual(out["file_vs_process"], {})
         self.assertEqual(self.audits, [], "读操作不写审计")
 
+    def test_risk_get_falls_back_to_live_equity_when_not_provided(self):
+        # 权益未传（equity=None）时，后端应回退到实时缓存的最新权益兜底，
+        # 而不是传 None 让派生值退化成纯绝对封顶。
+        patcher = mock.patch.object(A, "_latest_account_equity", return_value=5678.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        A.admin_risk_get(equity=None, x_astra_session="t")
+        self.risk_config.effective_engine_values.assert_called_once_with(5678.0)
+
+    def test_risk_get_does_not_fallback_when_equity_is_positive(self):
+        # equity 传了正值时，直接透传，不触发缓存兜底。
+        patcher = mock.patch.object(A, "_latest_account_equity", return_value=999.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        A.admin_risk_get(equity=1234.0, x_astra_session="t")
+        self.risk_config.effective_engine_values.assert_called_once_with(1234.0)
+
+    def test_latest_account_equity_reads_cache(self):
+        # 实时权益兜底：有 account.avail_eq 时返回该值。
+        import astra_backend.dashboard_cache as dash
+        patcher = mock.patch.object(dash, "CACHE_DATA",
+                                    {"account": {"avail_eq": 4321.5}}, create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertEqual(A._latest_account_equity(), 4321.5)
+
+    def test_latest_account_equity_returns_none_on_missing_or_zero(self):
+        # 缓存缺失 / 无 account / 权益为 0 时一律 None（缺失≠0，绝不 0 代填）。
+        import astra_backend.dashboard_cache as dash
+        for cache in (None, {}, {"account": {}}, {"account": {"avail_eq": 0}}):
+            patcher = mock.patch.object(dash, "CACHE_DATA", cache, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            self.assertIsNone(A._latest_account_equity())
+
 
 class RiskUpdateTests(_Base):
     def test_empty_payload_is_rejected_before_anything_else(self):
