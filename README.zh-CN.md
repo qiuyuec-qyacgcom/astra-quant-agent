@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 
-AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘口微结构）与 Python 确定性物理风控相结合，并通过 OKX 原生 API 实现限价入场与双腿云端止损止盈。
+AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘口微结构）与 Python 确定性物理风控相结合，并通过 **OKX** 与 **币安 USDⓈ-M 永续** 原生 API 实现限价入场与双腿云端止损止盈。
 
-[界面预览](#界面预览) · [快速开始](#快速开始) · [开户返佣](#交易所开户与手续费返现) · [系统架构](#系统架构) · [量化因子](#行情与微观结构因子) · [风控模型](#资金管理与风控参数) · [部署指南](#部署指南) · [代码地图](#代码结构入口)
+[界面预览](#界面预览) · [快速开始](#快速开始) · [核心优势](#核心优势) · [开户返佣](#交易所开户与手续费返现) · [系统架构](#系统架构) · [量化因子](#行情与微观结构因子) · [风控模型](#资金管理与风控参数) · [部署指南](#部署指南) · [代码地图](#代码结构入口)
 
 </div>
 
@@ -59,12 +59,12 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 ## 交易所开户与手续费返现
 
-> **交易接口兼容性声明**：AstraQuant 量化执行引擎**目前仅支持直连 OKX 原生 API**。币安 (Binance) 与芝麻开门 (Gate.io) 仅作为社区合作推荐开户通道提供最高手续费返现优惠，本系统暂不支持非 OKX 平台的 API 直连下单。
+> **交易接口兼容性声明**：AstraQuant 量化执行引擎原生支持 **OKX** 与 **币安 USDⓈ-M 永续合约**（币安执行经 `ASTRA_BINANCE_EXECUTION` 双轴 fail-closed 判定）。芝麻开门 (Gate.io) 仅作为社区合作推荐开户通道提供手续费返现优惠，本系统暂不支持 Gate.io 的 API 直连下单。
 
 | 交易所 | 平台角色与兼容性 | 专属开户通道 | 邀请码 | 特别说明 |
 |---|---|---|---|---|
 | **OKX 欧易** | **系统实盘直连** (核心执行支持) | [前往 OKX 注册开户](https://www.mitxcqvwnhj.com/join/48039151) | `48039151` | 支持新用户及 **180 天未登录老用户重新绑定** 享受费率返还 |
-| **Binance 币安** | 仅生态合作推广 (不支持 API 交易) | [前往币安注册开户](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | 专属手续费减免链接；量化系统暂不支持直连下单 |
+| **Binance 币安** | **系统实盘直连** (USDⓈ-M 永续，fail-closed 开闸) | [前往币安注册开户](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | 专属手续费减免链接；执行开闸由 `ASTRA_BINANCE_EXECUTION` 控制 |
 | **Gate.io 芝麻开门** | 仅生态合作推广 (不支持 API 交易) | [前往 Gate 注册开户](https://www.gatesites.net/share/MCHDBKYF) | `MCHDBKYF` | 专属手续费减免链接；量化系统暂不支持直连下单 |
 
 ---
@@ -77,6 +77,23 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 ---
 
+## 核心优势
+
+AstraQuant 从社区 fork 家族中**精选合并**了高价值改进，同时主动舍弃低价值或反模式改动。完整取舍分析见 [`fork对比报告.md`](fork对比报告.md)。
+
+| 优势 | 说明 | 来源 |
+|---|---|---|
+| **币安 USDⓈ-M 交易** | `BinanceTradingAdapter`（`supports_orders=True`）已接入下单主路径，含币本位换算（`margin×lev/price`）与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 | cnlimiter |
+| **交易复盘分析** | 完整闭环复盘套件——8 个后端模块（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`）+ 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁；默认开启，`ASTRA_TESTING=1`（无 DB）时退化为 no-op。 | LanQin996 |
+| **LLM 流式看门狗 + Qwen3 直恢复** | 响应头看门狗（45s）与仅思考看门狗（60s）在卡死时切换备用模型；Qwen3 直恢复（60s）对结构化 JSON 请求失败用关闭思考的直答重试。均经 `.env` 调参（设 0 关闭）。 | LanQin996 |
+| **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎（`scripts/calculus_engine.py` + 离线 `calculus_replay.py` CLI）。作为**独立数理库**引入，未接入任何决策/下单链路；缺数据返回 `valid=False`（绝不伪造结论）。 | cnlimiter |
+| **行情防伪造** | `market_data_service.py` 限速 0.12s + 3 次指数退避重试；`candle_data.py` 提供 `closed_only` 只返回已收盘 K 线——行情不可用时绝不编造。 | LanQin996 |
+| **实盘切换前体检** | `live_preflight.py`（249 行）在切换实盘前做只读余额/持仓/权限探测——只用 GET 核验、绝不下一单。 | Dreamqqq |
+| **SQLite 连接治理** | 每次事务后关闭连接（contextmanager + `finally close`），消除连接泄漏。 | cnlimiter |
+| **健壮配置加载** | `load_dotenv()` 跳过空值键（空值 = 未配置，防 `os.environ` 污染）并用 `setdefault` 让真实进程环境优先于 `.env` 默认值。 | 本项目 |
+
+---
+
 ## 系统架构
 
 系统以 15 分钟为一个完整决策周期，链路清晰解耦：
@@ -85,7 +102,7 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 1. 市场因子采集与清洗    ──> 资金费率、CVD 订单流背离、L2 深度 OBI、期权波动率偏度、VWAP 筹码中枢
 2. 多模型投委会综合分析  ──> 宏观、趋势动量、盘口微结构席位独立分析并输出标准机器契约
 3. Python 物理风控闸门  ──> 几何报价校验、仓位硬顶钳制、期望盈亏比底线、日内熔断审查（一票否决）
-4. OKX 执行与云端双腿防护 ──> 被动 BBO Maker 限价单、分批止盈腿 (TP1/TP2) 与 100% 云端 OCO 止损
+4. 交易所执行与云端双腿防护 ──> 被动 BBO Maker 限价单 (OKX / 币安 USDⓈ-M)、分批止盈腿 (TP1/TP2) 与 100% 云端 OCO 止损
 ```
 
 ---
@@ -193,7 +210,7 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 |---|---|---|
 | **架构全景** | [`docs/STRUCTURE_OVERVIEW.md`](docs/STRUCTURE_OVERVIEW.md) | 分层架构与各子目录核心职责划分 |
 | **后端分层** | [`astra_backend/README.md`](astra_backend/README.md) | 后端分层 (L0 门面 / L1 装配 / L2 路由 / L3 领域 / L4 子包架构与新模块约定) |
-| **哪个是入口/守护** | [`scripts/README.md`](scripts/README.md) | 哪个是入口/守护 (38 个根层脚本用途、调度入口、守护进程与双拼写 import 铁律) |
+| **哪个是入口/守护** | [`scripts/README.md`](scripts/README.md) | 哪个是入口/守护 (45 个根层脚本用途、调度入口、守护进程与双拼写 import 铁律) |
 | **提示词工程** | [`docs/PROMPT_GUIDE.md`](docs/PROMPT_GUIDE.md) | 提示词正文 JSON 库、8 大语义插槽与席位模板 |
 | **失败语义手册** | [`docs/FAILURE_SEMANTICS.md`](docs/FAILURE_SEMANTICS.md) | 真实事故复盘与防御性不变量清单 |
 | **北京时间契约** | [`docs/BEIJING_TIME_CONTRACT.md`](docs/BEIJING_TIME_CONTRACT.md) | 统一 UTC+8 财务结算与时间戳基线 |

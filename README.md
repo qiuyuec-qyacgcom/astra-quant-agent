@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 
-AstraQuant combines large language models (macro, technical, and microstructure analysis) with deterministic Python risk management and OKX-native conditional order execution.
+AstraQuant combines large language models (macro, technical, and microstructure analysis) with deterministic Python risk management and exchange-native conditional order execution on **OKX** and **Binance USDⓈ-M**.
 
-[Preview](#preview) · [Quick Start](#quick-start) · [Referral](#exchange-referral--fee-rebates) · [Architecture](#system-architecture) · [Market Factors](#market-microstructure-factors) · [Risk Control](#capital-management--risk-control) · [Deploy](#deploy) · [Code Map](#code-map)
+[Preview](#preview) · [Quick Start](#quick-start) · [Key Advantages](#key-advantages) · [Referral](#exchange-referral--fee-rebates) · [Architecture](#system-architecture) · [Market Factors](#market-microstructure-factors) · [Risk Control](#capital-management--risk-control) · [Deploy](#deploy) · [Code Map](#code-map)
 
 </div>
 
@@ -59,12 +59,12 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 ## Exchange Referral & Fee Rebates
 
-> **Trading API Compatibility Notice**: AstraQuant's autonomous execution engine **only supports OKX native API**. Binance and Gate.io are community partner links provided solely for registration discounts and fee rebates; our automated trading system does not support direct API execution on other exchanges.
+> **Trading API Compatibility Notice**: AstraQuant's autonomous execution engine natively supports **OKX** and **Binance USDⓈ-M** (perpetual futures). Binance execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. Gate.io is a community partner link provided solely for registration discounts and fee rebates; the trading engine does not support direct API execution on Gate.io.
 
 | Exchange | Role & Compatibility | Referral Link | Code | Special Note |
 |---|---|---|---|---|
-| **OKX** | **Native Trading Supported** (Official Engine Target) | [Register on OKX](https://www.mitxcqvwnhj.com/join/48039151) | `48039151` | Supports new accounts & **dormant accounts (inactive > 180 days)** |
-| **Binance** | Partner Promotion Only (No API Trading) | [Register on Binance](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | Exclusive fee rebate link; not supported by trading engine |
+| **OKX** | **Native Trading Supported** (Primary Engine Target) | [Register on OKX](https://www.mitxcqvwnhj.com/join/48039151) | `48039151` | Supports new accounts & **dormant accounts (inactive > 180 days)** |
+| **Binance** | **Native Trading Supported** (USDⓈ-M Perpetuals, fail-closed) | [Register on Binance](https://www.bsmkweb.cc/activity/referral-entry/CPA?ref=CPA_00N8UVQ2OG) | `CPA_00N8UVQ2OG` | Exclusive fee rebate link; execution gated by `ASTRA_BINANCE_EXECUTION` |
 | **Gate.io** | Partner Promotion Only (No API Trading) | [Register on Gate](https://www.gatesites.net/share/MCHDBKYF) | `MCHDBKYF` | Exclusive fee rebate link; not supported by trading engine |
 
 ---
@@ -77,6 +77,23 @@ git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-ag
 
 ---
 
+## Key Advantages
+
+AstraQuant consolidates the best improvements from a family of community forks while deliberately dropping low-value or anti-pattern changes. See [`fork对比报告.md`](fork对比报告.md) for the full triage.
+
+| Advantage | What it does | Source lineage |
+|---|---|---|
+| **Binance USDⓈ-M Trading** | `BinanceTradingAdapter` (`supports_orders=True`) wired into the order-submit path with coin-margin sizing (`margin×lev/price`) and protected OCO brackets; execution gate is fail-closed on `ASTRA_BINANCE_EXECUTION`. | cnlimiter |
+| **Trade Review & Analytics** | Full closed-loop review suite — 8 backend modules (`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`), 40 instrumentation points across 11 trading scripts, an `AnalysisPage.vue` frontend, and cross-platform file locks. Enabled by default; degrades to a no-op under `ASTRA_TESTING=1` without a DB. | LanQin996 |
+| **LLM Streaming Watchdogs + Qwen3 Recovery** | Response-start watchdog (45s) and reasoning-only watchdog (60s) switch to fallback models on stalls; Qwen3 direct-recovery (60s) retries failed structured-JSON requests with reasoning disabled. All tunable via `.env` (set `0` to disable). | LanQin996 |
+| **Causal Calculus Engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine (`scripts/calculus_engine.py` + offline `calculus_replay.py` CLI). Imported as a standalone math library — **not** wired into any decision or order path; returns `valid=False` on insufficient data (never fabricates conclusions). | cnlimiter |
+| **Market-Data Anti-Forgery** | `market_data_service.py` rate-limits (0.12s) with 3× exponential-backoff retry; `candle_data.py` exposes `closed_only` to return only confirmed closed candles — never synthesizes K-lines when the feed is unavailable. | LanQin996 |
+| **Live Preflight Check** | `live_preflight.py` (249 lines) performs a read-only balance/position/permission probe before switching to live trading — GET-only verification, never places an order. | Dreamqqq |
+| **SQLite Connection Governance** | Every transaction closes its connection (contextmanager + `finally close`), eliminating connection leaks. | cnlimiter |
+| **Robust Config Loading** | `load_dotenv()` skips empty keys (empty = unset, prevents `os.environ` pollution) and uses `setdefault` so real process environment always wins over `.env` defaults. | This project |
+
+---
+
 ## System Architecture
 
 AstraQuant executes on a 15-minute trading cycle across four decoupled boundaries:
@@ -85,7 +102,7 @@ AstraQuant executes on a 15-minute trading cycle across four decoupled boundarie
 1. Market Ingestion & Factors    ──> CVD, Orderbook Imbalance (OBI), Funding Rate, Options IV Skew, VWAP
 2. Multi-Model Council (LLMs)   ──> Macro, Trend, and Microstructure seats analyze & synthesize order intent
 3. Python Physical Risk Gates   ──> Sizing clamps, R:R floor verification, same-direction cap, circuit breaker
-4. OKX Execution & Cloud OCO    ──> Passive BBO Maker limits, scale-out TP legs, and 100% cloud stop-loss
+4. Exchange Execution & Cloud OCO ──> Passive BBO Maker limits (OKX / Binance USDⓈ-M), scale-out TP legs, 100% cloud stop-loss
 ```
 
 ---
@@ -193,7 +210,7 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 |---|---|---|
 | **Architecture Overview** | [`docs/STRUCTURE_OVERVIEW.md`](docs/STRUCTURE_OVERVIEW.md) | Layered architecture and subsystem directory layout |
 | **Backend Layering** | [`astra_backend/README.md`](astra_backend/README.md) | Backend layering (L0 Facade / L1 Wiring / L2 Routes / L3 Domain / L4 Subpackages) |
-| **Runtime Scripts & Daemons**| [`scripts/README.md`](scripts/README.md) | Runtime scripts & daemons (38 root-level scripts, daemons, and scheduling mechanics) |
+| **Runtime Scripts & Daemons**| [`scripts/README.md`](scripts/README.md) | Runtime scripts & daemons (45 root-level scripts, daemons, and scheduling mechanics) |
 | **Prompt Engineering** | [`docs/PROMPT_GUIDE.md`](docs/PROMPT_GUIDE.md) | JSON-only prompt library, 8 semantic slots, council doctrines |
 | **Failure Semantics** | [`docs/FAILURE_SEMANTICS.md`](docs/FAILURE_SEMANTICS.md) | Real-world failure post-mortems and defensive invariants |
 | **Beijing Time Contract** | [`docs/BEIJING_TIME_CONTRACT.md`](docs/BEIJING_TIME_CONTRACT.md) | Unified UTC+8 financial accounting and settlement foundation |

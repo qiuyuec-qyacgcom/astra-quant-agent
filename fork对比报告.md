@@ -105,6 +105,17 @@
 
 当前工作区**干净**（无未提交改动）。上一版报告中记录的 176 个未提交文件已通过上述 4 个提交全部归档，`data/` 运行时数据也已清理并补充 `.gitignore` 规则。
 
+### 本项目自身的独立改进（非 fork 合并）
+
+除 fork 优点外，本项目还做了若干**独立于 fork 的健壮性修复**，这些不在任何 fork 的 diff 里：
+
+| 提交 | 改进 | 价值 |
+|---|---|---|
+| `d9bafbc` | **`.env` 空值污染修复**：`config.py` 的 `load_dotenv()` 跳过空值键（`if value == "": continue`），避免 `env.example` 里 `ASTRA_ADMIN_DB=`、`OKX_LIVE_API_KEY=` 这类空占位把空字符串写进 `os.environ`，导致下游 `get`/`setdefault` 因"key 存在但值为空"而失效（实测曾让测试沙箱 `Path('')=='.'` 连不上 sqlite）。空值 = 未配置。 | 高 |
+| `e51bfdc` | **环境变量优先级修复**：`load_dotenv()` 从直接赋值改为 `os.environ.setdefault(...)`，确立"进程环境注入 > .env 文件默认值"的标准优先级，避免 `.env` 里的非空默认值冲掉测试沙箱的隔离配置。 | 高 |
+
+> 说明：`load_dotenv()` 是整个后端的配置加载入口（`import astra_backend` 时即执行 `load_dotenv(ROOT/".env")`），这两处修复**全局影响**所有依赖 `.env` 的改动（风控、币安、LLM、SQLite 路径、会话标志等）。它们与「引擎此刻口径」模块无关，故在 `412db38` 移除该模块时被正确保留。
+
 ---
 
 ## 四、合并决策结论
