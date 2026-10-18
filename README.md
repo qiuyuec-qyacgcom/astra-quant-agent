@@ -13,9 +13,26 @@
 
 AstraQuant combines large language models (macro, technical, and microstructure analysis) with deterministic Python risk management and exchange-native conditional order execution on **OKX** and **Binance USDⓈ-M**.
 
-[Preview](#preview) · [Quick Start](#quick-start) · [Key Advantages](#key-advantages) · [Referral](#exchange-referral--fee-rebates) · [Architecture](#system-architecture) · [Market Factors](#market-microstructure-factors) · [Risk Control](#capital-management--risk-control) · [Deploy](#deploy) · [Code Map](#code-map)
+[Preview](#preview) · [Capabilities](#capability-overview) · [Quick Start](#quick-start) · [Key Advantages](#key-advantages) · [Referral](#exchange-referral--fee-rebates) · [Architecture](#system-architecture) · [Market Factors](#market-microstructure-factors) · [Risk Control](#capital-management--risk-control) · [Deploy](#deploy) · [Code Map](#code-map)
 
 </div>
+
+---
+
+## Capability Overview
+
+**AstraQuant豪华3000型** is an end-to-end autonomous crypto trading system — a complete loop from market-data cleaning, multi-model analysis, and deterministic risk control through to exchange-native execution, backed by backtesting, trade review, self-evolution, and observability. It is forked from [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent), preserving the upstream architecture and risk-control philosophy while merging high-value improvements from a family of community forks (see [About This Fork](#about-this-fork)).
+
+| Layer | Capability | Key implementation |
+|---|---|---|
+| **🧠 Analysis** | Multi-model committee | DeepSeek / Claude / GPT / Qwen seated as macro, trend, microstructure, and contrarian analysts; shared-prefix prompt caching for sub-second time-to-first-token |
+| **📊 Factors** | High-frequency microstructure | CVD order flow, L2 order-book imbalance (OBI), funding rate, option IV skew, VWAP point of control — 6 families of non-lagging factors |
+| **🛡️ Risk** | Deterministic physical gates | Veto-authority position clamps, R:R ≥ 2.0 floor, intraday circuit breaker, dynamic 2–5× leverage, 100% cloud OCO stop coverage |
+| **⚡ Execution** | Exchange-native orders | Passive maker limit orders on OKX and Binance USDⓈ-M perpetuals with two-leg cloud protection; Binance execution is fail-closed |
+| **🔁 Loop** | Review · evolution · backtest | 40+ instrumentation points for closed-loop review, LLM self-evolution hub, multi-asset backtest engine (Sharpe / Sortino / Calmar / drawdown / win rate) |
+| **🧰 Engineering** | Reliability governance | LLM streaming watchdogs, market-data anti-forgery, read-only live preflight, SQLite connection governance, Prometheus/Grafana observability |
+
+**Safety-first**: the system boots in **paper trading (`demo`)** mode by default, with live execution physically blocked until exchange credentials are provided and validated via read-only balance snapshots. Every fill is atomically paired with a native conditional stop order on the exchange side, protecting against network loss and single points of failure.
 
 ---
 
