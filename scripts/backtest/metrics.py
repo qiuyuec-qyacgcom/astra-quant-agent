@@ -39,10 +39,25 @@ import math
 from typing import Any, Dict, List
 
 __all__ = ["build_entry_candidate", "compute_performance_metrics",
-           "aggregate_portfolio"]
+           "aggregate_portfolio", "periods_per_year_for_bar"]
 
-#: 1H K 线年化因子（原实现硬编码，保持原样）
+#: 1H K 线年化因子（原实现硬编码，保持原样作为默认值）
 HOURS_PER_YEAR = 8760
+
+#: 各 bar 对应的年化因子（一年多少根该周期 K 线）。
+#: 15m → 一年 35040 根；1H → 8760；4H → 2190。默认 1H（=HOURS_PER_YEAR）。
+#: ⚠️ 修复 P0：`backtest_engine.py --bar 15m/4H` 会改变收益序列频率，
+#: 年化因子若仍硬编码 8760 会把 Sharpe/Sortino 放大或缩小 2~4 倍。
+_PERIODS_PER_YEAR_BY_BAR = {
+    "15m": 8760 * 4,
+    "1H": 8760,
+    "4H": 8760 // 4,
+}
+
+
+def periods_per_year_for_bar(bar: str) -> float:
+    """按 K 线周期返回年化因子；未知周期保守回退 1H 的 8760。"""
+    return float(_PERIODS_PER_YEAR_BY_BAR.get(str(bar or "").strip(), HOURS_PER_YEAR))
 
 
 def build_entry_candidate(
@@ -105,11 +120,16 @@ def compute_performance_metrics(
     initial_capital: float,
     returns_list: List[float],
     max_drawdown: float,
+    periods_per_year: float = HOURS_PER_YEAR,
 ) -> Dict[str, float]:
     """由成交列表与权益序列算出全部绩效指标（纯函数，不改任何入参）。
 
     返回键：`win_rate` / `profit_factor` / `total_return` / `sharpe` / `sortino` /
     `calmar` / `avg_r` / **`winning_trades` / `losing_trades`**。
+
+    `periods_per_year` 是年化因子（一年多少根该周期 K 线），默认 `8760`（1H）。
+    调用方应按 `bar` 传 `periods_per_year_for_bar(bar)` 以修正 Sharpe/Sortino 年化
+    （15m → 35040、4H → 2190）。不传则保持历史 1H 口径不变。
 
     ⚠️ `winning_trades` / `losing_trades` 是**计数**，由本函数一并返回 ——
     原实现里 `winning` / `losing` 两个**列表**被 `BacktestSummary` 直接引用
@@ -132,17 +152,17 @@ def compute_performance_metrics(
 
     total_return = ((capital - initial_capital) / initial_capital) * 100
 
-    # Sharpe & Sortino (Annualized 1H ~ 8760)
+    # Sharpe & Sortino (Annualized; periods_per_year 默认 1H ~ 8760)
     if len(returns_list) > 1:
         mean_ret = sum(returns_list) / len(returns_list)
         var_ret = sum((r - mean_ret) ** 2 for r in returns_list) / (len(returns_list) - 1)
         std_ret = math.sqrt(var_ret) if var_ret > 0 else 1e-6
-        sharpe = (mean_ret / std_ret) * math.sqrt(HOURS_PER_YEAR)
+        sharpe = (mean_ret / std_ret) * math.sqrt(periods_per_year)
 
         downside = [r for r in returns_list if r < 0]
         if downside:
             var_down = sum(r**2 for r in downside) / len(downside)
-            sortino = (mean_ret / math.sqrt(var_down)) * math.sqrt(HOURS_PER_YEAR)
+            sortino = (mean_ret / math.sqrt(var_down)) * math.sqrt(periods_per_year)
         else:
             sortino = 99.0
     else:

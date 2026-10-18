@@ -20,10 +20,6 @@ from scripts.risk_constants import (
     SCALE_OUT_ENABLED,
     SCALE_OUT_RATIO,
     SCALE_OUT_TRIGGER_ATR,
-    effective_daily_loss_limit,
-    effective_max_positions,
-    effective_single_asset_margin,
-    effective_risk_per_trade,
 )
 
 # 本进程读取单一事实源（= 读一次 .env）的时刻。后台/worker 是长驻进程：改完 .env 后
@@ -373,52 +369,6 @@ def file_vs_process_diff() -> dict[str, Any]:
         if isinstance(want, (int, float)) and isinstance(have, (int, float)) and float(want) != float(have):
             differing[key] = {"file": want, "process": have}
     return {"differing": differing, "count": len(differing)}
-
-
-def effective_engine_values(usdt_available: float | None = None,
-                            pool_size: int | None = None) -> dict[str, Any]:
-    """引擎此刻「真正会用」的派生口径（与提示词同源的 min()/目标值）。
-
-    权益缺失（None）时只给绝对封顶与不依赖权益的量，并把 `usdt_available_used` 显式标为
-    None——绝不用 0 代填（缺失≠0）。池容量缺失时同样如实标注，不臆造持仓上限。
-    """
-    if pool_size is None:
-        try:
-            from scripts.instrument_pool import load_instruments
-
-            pool_size = len(load_instruments())
-        except Exception:
-            pool_size = None
-    total: int | None = None
-    same: int | None = None
-    if isinstance(pool_size, int) and pool_size > 0:
-        total, same = effective_max_positions(pool_size)
-    return {
-        "daily_loss_limit_usdt": effective_daily_loss_limit(usdt_available),
-        "single_asset_margin_usdt": effective_single_asset_margin(usdt_available),
-        "risk_per_trade_usdt": effective_risk_per_trade(0.0, usdt_available),
-        "max_positions": total,
-        "max_same_direction": same,
-        "pool_size_used": pool_size,
-        # 2026-10：目标 R:R 的下限由硬编码 2.2 改为跟随可配的硬底线 ——
-        # 与下方「目标盈亏比 R:R」文案同源，避免"页面显示 1.6、提示词仍说 ≥2.2"。
-        # 审计(2026-10-17)：原 `max(1.6, ...)` 仍残留 1.6 硬地板，与 schema 允许的
-        # 1.0、order_risk 物理底线 1.2 三处不一致，再次造成提示词口径与代码口径分裂。
-        # 此处彻底移除 1.6 地板，完全跟随可配置的 MIN_RISK_REWARD_RATIO。
-        "target_rr": round(float(MIN_RISK_REWARD_RATIO or 1.2), 2),
-        "max_risk_reward": float(MAX_RISK_REWARD_RATIO),
-        "max_take_profit_atr": float(MAX_TAKE_PROFIT_ATR),
-        "stop_loss_atr_mult": float(STOP_LOSS_ATR_MULT),
-        # 2026-10：标定带下沿 = **实际新开仓门禁**本身。原实现留了 78 硬地板，
-        # 于是门禁配 68 时预算文本出现自相矛盾的「标定带 78%~86%（下沿=门禁 68%）」——
-        # 模型会以为 68~77 的信号"必被物理拦截"而主动放弃（实测模型置信度带 75~82）。
-        "confidence_band": [float(MIN_ENTRY_CONFIDENCE or 0.0),
-                            float(MIN_ENTRY_CONFIDENCE or 0.0) + 8.0],
-        "scale_out_enabled": bool(SCALE_OUT_ENABLED),
-        "scale_out_ratio": float(SCALE_OUT_RATIO),
-        "scale_out_trigger_atr": float(SCALE_OUT_TRIGGER_ATR),
-        "usdt_available_used": usdt_available,
-    }
 
 
 def _coerce(param: dict[str, Any], value: Any) -> float | int:

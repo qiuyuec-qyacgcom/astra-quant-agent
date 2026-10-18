@@ -37,6 +37,7 @@ from scripts.backtest.metrics import (
     aggregate_portfolio,
     build_entry_candidate,
     compute_performance_metrics,
+    periods_per_year_for_bar,
 )
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -132,6 +133,7 @@ class BacktestEngine:
         slippage: float = 0.0002,
         min_confidence_gate: float = 0.75,
         min_rr_gate: float = 2.0,
+        bar: str = "1H",
     ):
         self.initial_capital = initial_capital
         self.capital = initial_capital
@@ -141,6 +143,7 @@ class BacktestEngine:
         self.slippage = slippage
         self.min_confidence_gate = min_confidence_gate
         self.min_rr_gate = min_rr_gate
+        self.bar = bar
 
     def run(self, candle_series: List[Dict[str, Any]], signals: Optional[List[Dict[str, Any]]] = None) -> BacktestSummary:
         symbol = candle_series[0].get("symbol", "PORTFOLIO") if candle_series else "UNKNOWN"
@@ -179,7 +182,6 @@ class BacktestEngine:
         else:
             closes = [float(c["close"]) for c in candle_series]
             for idx in range(15, len(candle_series)):
-                ts = candle_series[idx]["timestamp"]
                 c = closes[idx]
                 ma_short = sum(closes[idx - 5 : idx]) / 5
                 ma_long = sum(closes[idx - 15 : idx]) / 15
@@ -188,10 +190,17 @@ class BacktestEngine:
                 conf = 0.82 if abs(ma_short - ma_long) / c > 0.004 else 0.65
                 rr = 2.2 if vol > 0.008 else 1.5
 
+                # ⚠️ 防未来函数（P0 修复）：信号基于第 idx 根 K 线的**收盘价**产生，
+                # 实盘里该收盘价要到第 idx 根收盘那一刻才确定，不可能在同一根以收盘价成交。
+                # 故把信号挂到**下一根 K 线**的时间戳上，由主循环在下一根以开盘价成交。
+                # 最后一根 K 线无法产生「下一根」，直接丢弃（不会产生悬空信号）。
+                next_ts = candle_series[idx + 1]["timestamp"] if idx + 1 < len(candle_series) else None
+                if next_ts is None:
+                    continue
                 if ma_short > ma_long and c > ma_short:
-                    signal_map[ts] = {"action": "BUY", "confidence": conf, "rr": rr, "atr": max(c * 0.012, 0.0001)}
+                    signal_map[next_ts] = {"action": "BUY", "confidence": conf, "rr": rr, "atr": max(c * 0.012, 0.0001)}
                 elif ma_short < ma_long and c < ma_short:
-                    signal_map[ts] = {"action": "SELL", "confidence": conf, "rr": rr, "atr": max(c * 0.012, 0.0001)}
+                    signal_map[next_ts] = {"action": "SELL", "confidence": conf, "rr": rr, "atr": max(c * 0.012, 0.0001)}
 
         peak_equity = self.initial_capital
         max_drawdown = 0.0
@@ -257,15 +266,19 @@ class BacktestEngine:
                     continue
 
                 if active_position is None:
+                    # ⚠️ 防未来函数（P0 修复）：以**本根 K 线开盘价**成交，而非收盘价。
+                    # 信号在前一根收盘产生，实盘只能在本根开盘附近成交，收盘价成交会
+                    # 系统性高估可成交性。
                     active_position = build_entry_candidate(
-                        sig=sig, close=c, timestamp=ts, capital=self.capital,
+                        sig=sig, close=o, timestamp=ts, capital=self.capital,
                         risk_per_trade_pct=self.risk_per_trade_pct,
                         slippage=self.slippage, rr=rr)
 
         _metrics = compute_performance_metrics(
             trades=trades, capital=self.capital,
             initial_capital=self.initial_capital,
-            returns_list=returns_list, max_drawdown=max_drawdown)
+            returns_list=returns_list, max_drawdown=max_drawdown,
+            periods_per_year=periods_per_year_for_bar(self.bar))
         win_rate = _metrics["win_rate"]
         profit_factor = _metrics["profit_factor"]
         total_return = _metrics["total_return"]
@@ -311,11 +324,16 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
     total_initial = capital_per_asset * len(symbols)
     total_final = 0.0
     total_gatekeeper_filtered = 0
+    # ⚠️ P0 修复：合成兜底数据源标记。OKX 取数失败时回测建立在合成正弦波上，
+    # 此前静默参与正式归因且报告标题仍称「OKX 官方」，误导性极强。现在显式记录
+    # 哪些标的用了合成数据，供报告标注、防止把合成结果当真。
+    synthetic_symbols: List[str] = []
 
     for sym in symbols:
         candles = fetch_okx_candles(sym, bar=bar, limit=limit)
         if not candles:
-            # Fallback synthetic series
+            # Fallback synthetic series (explicitly flagged, NOT real market data)
+            synthetic_symbols.append(sym)
             base_p = 100.0 if "SOL" in sym else (2500.0 if "ETH" in sym else (80000.0 if "BTC" in sym else 1.0))
             candles = []
             for i in range(100):
@@ -332,7 +350,7 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
                     "volume": 1000.0,
                 })
 
-        engine = BacktestEngine(initial_capital=capital_per_asset)
+        engine = BacktestEngine(initial_capital=capital_per_asset, bar=bar)
         summary = engine.run(candles)
         asset_results[sym] = asdict(summary)
         total_final += summary.final_equity
@@ -353,6 +371,7 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
         "portfolio": portfolio_summary,
         "by_symbol": asset_results,
         "active_symbols": symbols,
+        "synthetic_symbols": synthetic_symbols,
     }
     return full_payload
 
@@ -380,6 +399,8 @@ def main():
     print("==========================================================================")
     print(f" Portfolio Mode       : 6大主力标的对齐组合 (BTC, ETH, SOL, DOGE, SUI, ASTER)")
     print(f" Backtest Range       : OKX 官方实时最新 {args.limit} 根 {args.bar} K线序列")
+    if report.get("synthetic_symbols"):
+        print(f" ⚠️ 合成数据标的        : {', '.join(report['synthetic_symbols'])}（取数失败，回测用合成正弦波，非真实行情，勿据此决策）")
     print(f" Total Return         : {p['total_return_pct']}% (总净值: ${p['final_equity']:,.2f})")
     print(f" Win Rate             : {p['win_rate_pct']}% ({p['winning_trades']}胜 / {p['losing_trades']}负, 共{p['total_trades']}单)")
     print(f" Sharpe / Sortino     : {p['sharpe_ratio']} / {p['sortino_ratio']}")

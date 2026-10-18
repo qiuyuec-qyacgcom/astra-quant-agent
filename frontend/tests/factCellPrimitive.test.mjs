@@ -39,9 +39,7 @@ const COMPONENTS_CSS = path.join(SRC, 'styles', 'components.css');
 const PRIMITIVE = ['fact', 'fact-label', 'fact-value', 'fact-foot', 'fact-sub'];
 
 /** 允许自带 fact 规则的页面（值=理由）。 */
-export const FACT_EXEMPT = {
-  'views/admin/RiskPage.vue': '.rk-fact / .rk-fact-v 是另一种组件（常驻左框 + 单行省略，无断点网格）',
-};
+export const FACT_EXEMPT = {};
 
 /** `.fact` 必须有的结构属性。 */
 const FACT_STRUCT = [

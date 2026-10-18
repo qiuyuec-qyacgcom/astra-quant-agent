@@ -80,8 +80,12 @@ class TestCapabilityTable(unittest.TestCase):
 class TestRegistry(unittest.TestCase):
     def test_registry_venues(self):
         self.assertEqual(registry.registered_venues(), ["binance", "okx"])
-        # 币安公开行情面：可读、恒关执行闸（supports_orders=False）
-        self.assertFalse(registry.get_adapter("binance").capabilities.supports_orders)
+        # 币安已桥接私有交易面：supports_orders=True，但执行闸默认关（fail-closed，
+        # 由 registry.execution_open 按 ASTRA_BINANCE_EXECUTION 双轴旗标裁决）。
+        self.assertTrue(registry.get_adapter("binance").capabilities.supports_orders)
+        self.assertEqual(
+            registry.get_adapter("binance").capabilities.adapter_execution_flag,
+            "ASTRA_BINANCE_EXECUTION")
         with self.assertRaises(ExchangeCapabilityError):
             registry.get_adapter("hyperliquid")
         with self.assertRaises(ExchangeCapabilityError):

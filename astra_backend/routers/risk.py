@@ -1,7 +1,7 @@
 """Risk constants, instrument pool, baseline capital, and position close routes."""
 from __future__ import annotations
 from typing import Any
-from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi import APIRouter, Body, Header, HTTPException
 
 from astra_backend.config import settings, refresh_settings
 from astra_backend.settings_store import update_env, remove_env
@@ -88,39 +88,10 @@ def _holdings_report(inst_id: str, trackers: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _latest_account_equity() -> float | None:
-    """读取后台 worker 每 2s 刷新的实时账户权益（可用余额），零网络、带容错。
-
-    用于「日亏熔断线 / 单标的累计封顶」等派生口径的权益兜底：当页面没传 equity（权益
-    未知/为 0）时，后端自己从 dashboard 缓存取最新值，避免派生值退化成纯绝对封顶、
-    从而与线上余额脱节。缓存缺失/无可用余额时返回 None（调用方按"缺失"处理，绝不 0 代填）。
-    """
-    try:
-        import astra_backend.dashboard_cache as dashboard_app
-        cache = getattr(dashboard_app, "CACHE_DATA", None)
-    except Exception:
-        return None
-    if not isinstance(cache, dict):
-        return None
-    account = cache.get("account")
-    if not isinstance(account, dict):
-        return None
-    try:
-        val = float(account.get("avail_eq") or 0.0)
-    except (TypeError, ValueError):
-        return None
-    return val if val > 0 else None
-
-
 @router.get("/api/v1/admin/risk")
-def admin_risk_get(equity: float | None = Query(default=None, description="可用权益（USDT），用于派生引擎当前口径"),
-                   x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
+def admin_risk_get(x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     refresh_settings()
     require_admin_header(x_astra_session=x_astra_session)
-    # 权益兜底：前端传了就用前端的，否则回退到后台实时缓存的最新余额。
-    # 这样「日亏熔断线 / 单标的累计封顶」等权益派生值不再冻结在页面加载时的旧快照，
-    # 也不因前端未传 equity 而退化成纯绝对封顶，随 OKX 线上余额同步。
-    resolved_equity = equity if (equity is not None and equity > 0) else _latest_account_equity()
     return {
         "schema": risk_config.schema(),
         "suites": risk_config.SUITES,
@@ -130,7 +101,6 @@ def admin_risk_get(equity: float | None = Query(default=None, description="可�
         "process_values": risk_config.process_values(),
         "process_freshness": risk_config.process_freshness(),
         "file_vs_process": risk_config.file_vs_process_diff(),
-        "engine_values": risk_config.effective_engine_values(resolved_equity),
         "effect": "交易引擎每 15 分钟一个巡检周期；子进程启动时重新读取 .env，保存后下一周期自动生效，无需重启后台。",
     }
 

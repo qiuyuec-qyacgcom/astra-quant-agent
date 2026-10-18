@@ -144,6 +144,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     current_environment,
     fetch_ticker,
     okx_rest,
+    binance_rest=None,
     quantize_size,
     venue_registry) -> Tuple[bool, str]:
     """Submit a protected limit order; acceptance is not treated as a fill.
@@ -176,9 +177,8 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         if not _routing["ok"]:
             return False, str(_routing.get("error") or "路由拒绝")
         _reservation = _routing.get("reservation")
-        # 单所（OKX）系统：路由只可能选中 OKX（`VENUE_SUBMITTERS` 亦只有 OKX），
-        # 落单场所恒为 OKX。
-        target_venue = "okx"
+        # 目标场所由选所路由决定（OKX 直签或币安桥接），不再硬编码 OKX。
+        target_venue = str(_routing.get("venue") or "okx").strip().lower()
         venue_ctx.setdefault("target_venue", target_venue)
         venue_ctx.setdefault("venue", target_venue)
     else:
@@ -217,7 +217,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     except Exception as _ae:
         print(f"[价格锚定] warn 现价获取失败，本单跳过锚定/rescale: {_ae}")
 
-    if env.simulated and target_venue == "okx":
+    if env.simulated and target_venue in ("okx", "binance"):
         try:
             demo_last = _anchor_last
             if demo_last:
@@ -395,8 +395,11 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         # 张数/保证金折算脱节。OKX 杠杆为整数档，改用 round() 四舍五入取最接近档位。
         _lever_bucket = int(round(_want_lever))
         try:
-            okx_rest.set_leverage(inst_id, _lever_bucket, mgn_mode="cross",
-                                  pos_side=(pos_side or None))
+            if target_venue == "binance":
+                binance_rest.set_leverage(inst_id, _lever_bucket, pos_side=pos_side)
+            else:
+                okx_rest.set_leverage(inst_id, _lever_bucket, mgn_mode="cross",
+                                      pos_side=(pos_side or None))
         except Exception as lev_exc:
             print(f"[杠杆落地] warn {inst_id} 设档至 {_lever_bucket}x 失败，"
                   f"按账户现档发单（不影响 TP/SL 覆盖）: {lev_exc}")
@@ -405,7 +408,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     ord_type = "market" if order_mode == "market" else "limit"
     entry_px = None if ord_type == "market" else effective_px
 
-    # ── OKX 发单量：从**保证金**换算 ──────────────────────────────────────────
+    # ── 发单量：从**保证金**换算（OKX 张数 / 币安币本位）─────────────────────
     # 2026-09-28（用户拍板「交易全改成保证金和杠杆」）。
     #
     # 此前 OKX 用的是调用方按【保证金闸门夹取**之前**】算出的张数，而闸门结果
@@ -421,42 +424,69 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     # 的目的（见 `tests/trading/test_okx_margin_derived_size.py` 的网格对拍）。
     #
     # `venue_ctx` 缺失（非 AI 通用通路）时保留调用方给的张数：那条路径本就没有保证金。
-    _okx_size_from_margin = None
+    _size_from_margin = None
     if isinstance(venue_ctx, dict):
         # 垃圾数值一律视同"没给"（与上方路由段同规则）：不抛，退回调用方给的张数。
-        def _okx_num(_key):
+        def _num(_key):
             try:
                 return float(venue_ctx.get(_key) or 0.0)
             except (TypeError, ValueError):
                 return 0.0
 
-        _okx_m = _okx_num("margin_usdt")
-        _okx_ct = _okx_num("ct_val")
-        _okx_min = _okx_num("min_sz")
-        _okx_lev = _okx_num("leverage")
-        if _okx_m > 0 and _okx_ct > 0 and _okx_lev > 0 and effective_px > 0:
-            _okx_want = (_okx_m * _okx_lev) / (_okx_ct * effective_px)
-            _okx_size_from_margin = quantize_size(_okx_want, _okx_min or 1.0)
-            if _okx_size_from_margin <= 0:
-                _min_notional = (_okx_min or 1.0) * _okx_ct * effective_px
-                release_signal_reservation(_reservation, "保证金换算张数低于最小下单量")
-                return False, (f"{inst_id} 按保证金 {_okx_m:.2f}U × {_okx_lev:g}x 换算出的张数"
-                               f"低于交易所最小下单量（最小下单名义 {_min_notional:.2f}U）"
-                               f"—— 请提高单笔保证金或改用其他标的")
-            size = _okx_size_from_margin
+        _m = _num("margin_usdt")
+        _ct = _num("ct_val")
+        _min = _num("min_sz")
+        _lev = _num("leverage")
+        if target_venue == "binance":
+            # 币安币本位：qty = margin × leverage / price（ct_val 恒为 1，min_sz 为币数）。
+            # 币数对齐 step / minNotional 由 BinanceExchange._align_qty 内部处理。
+            if _m > 0 and _lev > 0 and effective_px > 0:
+                _bin_qty = (_m * _lev) / effective_px
+                _size_from_margin = _bin_qty
+                size = _bin_qty
+        else:
+            if _m > 0 and _ct > 0 and _lev > 0 and effective_px > 0:
+                _want = (_m * _lev) / (_ct * effective_px)
+                _size_from_margin = quantize_size(_want, _min or 1.0)
+                if _size_from_margin <= 0:
+                    _min_notional = (_min or 1.0) * _ct * effective_px
+                    release_signal_reservation(_reservation, "保证金换算张数低于最小下单量")
+                    return False, (f"{inst_id} 按保证金 {_m:.2f}U × {_lev:g}x 换算出的张数"
+                                   f"低于交易所最小下单量（最小下单名义 {_min_notional:.2f}U）"
+                                   f"—— 请提高单笔保证金或改用其他标的")
+                size = _size_from_margin
 
     try:
-        rows = okx_rest.place_order(
-            inst_id, side, f"{size:g}",
-            pos_side=pos_side, td_mode="cross", ord_type=ord_type,
-            px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
-        )
+        if target_venue == "binance":
+            # 币安：入场前 fail-closed 执行闸（registry 双轴旗标）。未开闸显式拒绝。
+            try:
+                venue_registry.require_execution("binance", environment=env.mode)
+            except Exception as _rej:
+                release_signal_reservation(_reservation, "币安执行闸未开")
+                return False, f"币安执行闸拒绝: {_rej}"
+            if binance_rest is None:
+                release_signal_reservation(_reservation, "币安适配器不可用")
+                return False, "币安适配器不可用（未配置或未开闸）"
+            _bin_size = f"{size:g}" if isinstance(size, (int, float)) else str(size)
+            if ord_type == "market":
+                placed = binance_rest.place_protected_market_order(
+                    inst_id, side, pos_side, _bin_size, effective_tp, effective_sl)
+            else:
+                placed = binance_rest.place_protected_limit_order(
+                    inst_id, side, pos_side, _bin_size, effective_px, effective_tp, effective_sl)
+            rows = [placed]
+        else:
+            rows = okx_rest.place_order(
+                inst_id, side, f"{size:g}",
+                pos_side=pos_side, td_mode="cross", ord_type=ord_type,
+                px=entry_px, attach_tp=effective_tp, attach_sl=effective_sl,
+            )
     except Exception as exc:
         release_signal_reservation(_reservation, "下单异常")
         return False, str(exc)
     order_id = None
     for row in rows:
-        order_id = row.get("ordId") or row.get("orderId")
+        order_id = row.get("ordId") or row.get("orderId") or row.get("order_id")
         if order_id:
             break
     if not order_id:

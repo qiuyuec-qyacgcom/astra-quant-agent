@@ -37,7 +37,11 @@ def _held() -> Dict[str, int]:
 
 
 def _lock_path(target_file: str | os.PathLike[str]) -> Tuple[Path, str]:
-    p = Path(str(target_file))
+    # 规范化到绝对路径：不同进程用相对路径 / 绝对路径 / 含 ``..`` 的别名
+    # 引用同一文件时，若不 resolve，会生成**不同的锁文件**，各自持锁互不互斥，
+    # lost update 依然发生。resolve(strict=False) 不要求文件已存在（锁文件本身
+    # 往往在首次加锁时才创建），只做词法+符号链接规范化。
+    p = Path(str(target_file)).resolve(strict=False)
     lock_path = p.with_name("." + p.name + ".lock")
     return lock_path, str(lock_path)
 

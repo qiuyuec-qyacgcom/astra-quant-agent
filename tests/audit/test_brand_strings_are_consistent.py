@@ -170,6 +170,20 @@ LEGACY_ALLOWED: "dict[str, str]" = {
         "登录状态初始化平滑迁移 localStorage 中旧的 `r20.admin.session.*` 历史存储键，防止升级被踢出登录。",
     "frontend/tests/authStore.test.mjs":
         "测试用例断言包含 `r20.admin.session.*` 的平滑迁移逻辑与升级兼容性。",
+    # —— 币安 clientOrderId 命名空间（交易所订单 ID，非项目命名空间）——
+    "astra_backend/exchanges/binance.py":
+        "币安 clientOrderId 沿用上游 cnlimiter fork 的 `R20G{hex}{EN|SL|TP|SX|CL}` 前缀："
+        "这是**交易所订单 ID 命名空间**（全局唯一标识），与项目内部命名无关，保留以维持"
+        "与上游的幂等对账语义逐字一致、便于后续同步上游修复。",
+    "astra_backend/exchanges/binance_pending.py":
+        "同上：币安 durable pending 状态存储解析 `R20G` 分组 ID，属交易所订单 ID 命名空间，"
+        "非项目命名空间。",
+    "scripts/binance_order_maintenance.py":
+        "同上：币安 pending 对账入口引用 BinanceExchange 的 `R20G` 订单 ID 命名空间。",
+    "tests/venues/test_binance_exchange.py":
+        "测试夹具用 `R20G` 前缀构造币安订单/算法单 ID，以覆盖幂等对账语义（订单 ID 命名空间）。",
+    "tests/venues/test_binance_pending_entries.py":
+        "同上：pending 状态存储测试需按 `R20G` 命名空间构造分组 ID 与 clientId。",
 }
 
 #: 判据一的允许表：**路径 → 为什么这里必须写出被禁串**。

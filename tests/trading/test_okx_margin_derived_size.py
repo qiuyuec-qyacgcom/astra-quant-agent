@@ -216,7 +216,9 @@ class SourceContractTest(unittest.TestCase):
         self.assertIn('"margin_usdt"', src)
         self.assertIn("quantize_size(", src,
                       "OKX 边界不见了「钱 → 张」换算 ⇒ 闸门又对 OKX 失效")
-        self.assertIn("_okx_size_from_margin", src)
+        # 变量已泛化为 `_size_from_margin`（同时承载 OKX 张数 / 币安币本位两分支），
+        # 不再用 `_okx_` 前缀（币安接线后该换算不再是 OKX 专属）。
+        self.assertIn("_size_from_margin", src)
 
     def test_it_fails_closed_when_the_derived_size_is_below_the_minimum(self):
         src = self._src()

@@ -144,6 +144,11 @@ def route_and_reserve_signal(inst_id: str, side: str, price: float,
     margin_est = estimate_margin_usdt(notional, margin_usdt)
 
     venue = "okx"
+    # 多所平权（币安接线）：手选场所若已登记下单实现（VENUE_SUBMITTERS），则选中它；
+    # 否则维持默认 OKX。执行闸（registry.execution_open）的 fail-closed 裁决由下游
+    # order_submit 下单前用 require_execution 兜底，此处只做「已接单」层面的选所。
+    if preferred != "auto" and preferred in VENUE_SUBMITTERS:
+        venue = preferred
     payload: Dict[str, Any] = {
         "preferred_venue": preferred,
         "venue": venue,

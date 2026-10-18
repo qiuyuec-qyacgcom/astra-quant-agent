@@ -621,7 +621,8 @@ def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, ve
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
     return _venue_query_close_confirmed(
         inst_id, pos_side, before_size, venue,
-        okx_rest=okx_rest, current_environment=current_environment,
+        okx_rest=okx_rest, binance_rest=_binance_adapter(),
+        current_environment=current_environment,
         query_positions=query_positions,
         fetch_other_venue_positions=fetch_other_venue_positions)
 
@@ -661,9 +662,11 @@ PORTFOLIO_RISK_BUDGET_ENV = "ASTRA_PORTFOLIO_RISK_BUDGET_USDT"
 #: 场所取数健康度可容忍年龄（brain 15min 周期写盘，给 2 个周期 + 余量）
 VENUE_HEALTH_MAX_AGE_S = 1900.0
 
-#: 已接入真实下单实现的场所 → 提交函数。OKX 专用化后只剩 OKX 一个场所。
+#: 已接入真实下单实现的场所 → 提交函数。币安经 BinanceTradingAdapter 桥接私有面，
+#: 执行开闸由 registry.execution_open（ASTRA_BINANCE_EXECUTION 双轴）裁决，默认关。
 VENUE_SUBMITTERS: Dict[str, str] = {
     "okx": "okx_rest.place_order",
+    "binance": "binance_rest.place_protected_limit_order",
 }
 
 
@@ -813,6 +816,19 @@ def reconcile_reservation_ledger(real_pos_dict: Dict[str, Any],
 
 
 @analysis_capture.observed("order.submit")
+def _binance_adapter():
+    """惰性获取币安交易适配器（未配置/未开闸时不实例化，避免无谓出网）。
+
+    币安执行走 BinanceTradingAdapter（桥接 BinanceExchange 私有面），与 OKX 直签
+    （okx_rest）并行。凭证/环境由 make_binance_env 读 ASTRA_BINANCE_ENV 单源。
+    """
+    try:
+        return venue_registry.get_adapter("binance")
+    except Exception as exc:
+        print(f"[币安适配器] warn 不可用: {exc}")
+        return None
+
+
 def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: float, price: float, tp_px: float, sl_px: float, venue_ctx: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
     """壳（第八十八刀搬至 `scripts/trader/order_submit.py`，调用期同名注入）。"""
     return _order_submit_protected(
@@ -827,6 +843,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         current_environment=current_environment,
         fetch_ticker=fetch_ticker,
         okx_rest=okx_rest,
+        binance_rest=_binance_adapter(),
         quantize_size=quantize_size,
         venue_registry=venue_registry)
 

@@ -366,6 +366,36 @@ class BinanceExchangeTests(unittest.TestCase):
         self.assertEqual(order["clOrdId"], ENTRY_ID)
         self.assertEqual(_calls(self.session, "POST", "/fapi/v1/algoOrder"), [])
 
+    def test_market_order_sends_market_type_without_price(self):
+        """市价单入场：type=MARKET，不带 price/timeInForce，数量仍对齐 step。"""
+        install_defaults(self.session, hedge=True)
+        self.session.on("POST", "/fapi/v1/order", {
+            "orderId": 21, "clientOrderId": ENTRY_ID, "symbol": "BTCUSDT", "side": "BUY",
+            "positionSide": "LONG", "origQty": "0.001", "executedQty": "0",
+            "avgPrice": "0", "status": "NEW", "reduceOnly": False, "time": 1, "updateTime": 1,
+        })
+        self.session.on("POST", "/fapi/v1/algoOrder", {
+            "algoId": 1, "clientAlgoId": SL_ID, "algoStatus": "NEW", "closePosition": True,
+        })
+        order = self._exchange().place_protected_market_order(
+            INST, "buy", "long", "0.001", "52000", "49000")
+        entry = _calls(self.session, "POST", "/fapi/v1/order")[0]["query"]
+        self.assertEqual(entry["type"], "MARKET")
+        self.assertNotIn("price", entry)
+        self.assertNotIn("timeInForce", entry)
+        self.assertEqual(Decimal(entry["quantity"]), Decimal("0.001"))
+        self.assertEqual(order["protection_mechanism"], "paired_conditional")
+        self.assertEqual(order["ordId"], "21")
+
+    def test_market_order_rejects_inverted_brackets(self):
+        """市价单无 entry price，仅做方向一致性 sanity：多单 SL 必须低于 TP。"""
+        install_defaults(self.session, hedge=True)
+        ex = self._exchange()
+        with self.assertRaises(ValueError):
+            # 多单 SL(50000) >= TP(49000) ⇒ 拒绝
+            ex.place_protected_market_order(INST, "buy", "long", "0.001", "49000", "50000")
+
+
     def test_filters_reject_illegal_inputs_before_submit(self):
         install_defaults(self.session, hedge=True)
         posted = {"order": 0}

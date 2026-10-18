@@ -21,13 +21,14 @@ from .base import BaseExchangeAdapter, ExchangeCapabilityError, canonical_base
 from .identity import (AccountKey, credential_fingerprint,
                        is_sandbox_environment)
 from .okx import OKXAdapter, OKXPublicAdapter
-from .binance import BinancePublicAdapter
+from .binance import BinancePublicAdapter, BinanceTradingAdapter
 from astra_backend.sandbox.adapter import SandboxExchangeAdapter
 
 _ADAPTERS: Dict[str, type] = {
     "okx": OKXAdapter,
-    # 币安仅公开行情面（私有交易面未移植），`supports_orders=False` ⇒ 恒关执行闸。
-    "binance": BinancePublicAdapter,
+    # 币安：交易面经 BinanceTradingAdapter（supports_orders=True），执行开闸由
+    # capabilities.adapter_execution_flag（ASTRA_BINANCE_EXECUTION）按 env 双轴判定。
+    "binance": BinanceTradingAdapter,
 }
 
 # 经「适配器」下单的场所开闸——单一事实 = 各所能力表 ``adapter_execution_flag`` 声明

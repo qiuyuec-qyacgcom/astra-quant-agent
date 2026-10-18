@@ -71,7 +71,9 @@ def _held() -> Dict[str, int]:
 
 
 def _lock_path(target_file) -> str:
-    p = Path(str(target_file))
+    # 规范化到绝对路径（与 astra_backend.file_locks._lock_path 对齐）：
+    # 不同路径别名指向同一文件时，若不 resolve 会生成不同锁文件、互不互斥。
+    p = Path(str(target_file)).resolve(strict=False)
     return str(p.with_name("." + p.name + ".lock"))
 
 

@@ -101,13 +101,14 @@ class StrategyIsSingleSourcedTest(unittest.TestCase):
         venues = list(registered_venues())
         self.assertIn("okx", venues,
                       "OKX 必须仍是登记场所（交易主循环唯一执行路径）")
-        # 币安已重新完整移植，但其私有交易面由自包含的 BinanceExchange 提供、
-        # 注册表里的 BinancePublicAdapter 仅公开行情面（supports_orders=False）。
-        # 因此「多所执行面」仍未回来 —— 交易主循环仍是 OKX 单所直签，本门语义不变。
+        # 币安已恢复交易能力：经 BinanceTradingAdapter 桥接 BinanceExchange 私有面，
+        # supports_orders=True 但执行闸默认关（registry.execution_open fail-closed）。
+        # 「多所执行面」仍是已移除状态 —— 币安走的是桥接适配器 + 主循环 venue 分派，
+        # 不是复活 execution_router/venue_router。
         if "binance" in venues:
             from astra_backend.exchanges.registry import _ADAPTERS
-            self.assertFalse(_ADAPTERS["binance"].capabilities.supports_orders,
-                             "币安公开面不得声明下单能力，否则多所执行面会悄然回归")
+            self.assertTrue(_ADAPTERS["binance"].capabilities.supports_orders,
+                            "币安应已声明下单能力（经 BinanceTradingAdapter 桥接）")
 
 
 class GateBehaviourTest(unittest.TestCase):

@@ -1778,13 +1778,58 @@ class BinanceExchange:
         tp_px: Any,
         sl_px: Any,
     ) -> dict[str, Any]:
+        return self._place_protected_order(
+            inst_id, side, pos_side, size, price, tp_px, sl_px, ord_type="LIMIT")
+
+    def place_protected_market_order(
+        self,
+        inst_id: str,
+        side: str,
+        pos_side: str,
+        size: Any,
+        tp_px: Any,
+        sl_px: Any,
+    ) -> dict[str, Any]:
+        """市价单入场（复用同一套 durable pending 状态机）。
+
+        与限价单唯一区别：entry 单发 ``type="MARKET"``，不带 ``price``/``timeInForce``，
+        数量对齐 step（``_align_qty(..., price=None)`` 跳过硬 notional 校验）。
+        TP/SL 仍走独立算法单保护腿，由同一状态机原子下发。
+        """
+        return self._place_protected_order(
+            inst_id, side, pos_side, size, None, tp_px, sl_px, ord_type="MARKET")
+
+    def _place_protected_order(
+        self,
+        inst_id: str,
+        side: str,
+        pos_side: str,
+        size: Any,
+        price: Any,
+        tp_px: Any,
+        sl_px: Any,
+        *,
+        ord_type: str,
+    ) -> dict[str, Any]:
+        is_market = str(ord_type).upper() == "MARKET"
         self._entry_side(side, pos_side)
         self._reject_mixed_exposure(inst_id, pos_side)
-        px = self._align_price(inst_id, price)
+        px = None if is_market else self._align_price(inst_id, price)
         tp = self._align_price(inst_id, tp_px)
         sl = self._align_price(inst_id, sl_px)
-        qty = self._align_qty(inst_id, size, px)
-        self._validate_geometry(str(pos_side).lower(), _decimal(px), _decimal(tp), _decimal(sl))
+        qty = self._align_qty(inst_id, size, None if is_market else px)
+        if is_market:
+            # 市价单无 entry price：TP/SL 相对现价的几何关系已由上游 order_submit
+            # 用现价重锚后验证过，此处仅做方向一致性 sanity 校验（多单 SL<TP、空单 SL>TP）。
+            _tp, _sl = _decimal(tp), _decimal(sl)
+            if _tp <= 0 or _sl <= 0:
+                raise ValueError("Market order requires positive TP and SL")
+            if str(pos_side).lower() == "long" and not (_sl < _tp):
+                raise ValueError("Long market order requires SL below TP")
+            if str(pos_side).lower() == "short" and not (_sl > _tp):
+                raise ValueError("Short market order requires SL above TP")
+        else:
+            self._validate_geometry(str(pos_side).lower(), _decimal(px), _decimal(tp), _decimal(sl))
         baseline = self._live_position_qty(inst_id, str(pos_side).lower())
         group = self._new_group()
         ids = self._group_ids(group)
@@ -1794,7 +1839,7 @@ class BinanceExchange:
             side=str(side).lower(),
             pos_side=str(pos_side).lower(),
             qty=qty,
-            price=px,
+            price=px or "0",
             tp=tp,
             sl=sl,
             baseline_qty=_text(baseline),
@@ -1815,14 +1860,15 @@ class BinanceExchange:
         entry = {
             "symbol": symbol,
             "side": str(side).upper(),
-            "type": "LIMIT",
-            "timeInForce": "GTC",
+            "type": "MARKET" if is_market else "LIMIT",
             "quantity": qty,
-            "price": px,
             "positionSide": self._position_side(pos_side),
             "newClientOrderId": ids["EN"],
             "newOrderRespType": "RESULT",
         }
+        if not is_market:
+            entry["timeInForce"] = "GTC"
+            entry["price"] = px
         entry.pop("reduceOnly", None)
         try:
             placed = self._place_order(entry, ids["EN"])
@@ -2001,7 +2047,7 @@ class BinanceExchange:
 # ---------------------------------------------------------------------------
 # 环境构建辅助：从 astra_gateway.secrets + ASTRA_ 环境变量构建币安 env
 # ---------------------------------------------------------------------------
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True)
@@ -2215,5 +2261,138 @@ class BinancePublicAdapter(BaseExchangeAdapter):
         return None
 
 
-__all__ = ["BinanceExchange", "BinancePublicAdapter", "BinanceEnvironment",
-           "make_binance_env", "LIVE_HOST", "DEMO_HOST"]
+class BinanceTradingAdapter(BinancePublicAdapter):
+    """币安 USDⓈ-M USDT 永续的**交易**适配器（桥接 ``BinanceExchange`` 私有面）。
+
+    与 ``BinancePublicAdapter``（只读行情）互补：本类在继承其命名转译/行情/规格的
+    基础上，组合一个 ``BinanceExchange`` 实例，把币安的私有交易面（下单/平仓/持仓/
+    账户/保护单）桥接进 ``BaseExchangeAdapter`` 抽象，供 registry 统一入口与主交易
+    循环使用。
+
+    设计要点：
+    - 数量语义 = 币本位（base_asset），与 OKX 的张数（contracts）不同；下单走
+      ``BinanceExchange.place_protected_limit_order``（内部已做 step 对齐与 minNotional
+      拒单），**不绕** ``BaseExchangeAdapter.place_order`` 通用签名，避免币本位/张数
+      语义在通用层失真。
+    - ``positions()`` 归一化为 OKX 同构形态（补 ``side/size_signed/entry_price/
+      mark_price/unrealized_pnl``），供 ``fetch_other_venue_positions`` 与跨所敞口
+      核算消费。
+    - 执行开闸由 ``capabilities.adapter_execution_flag`` 声明，registry 据此按 env
+      双轴判定（``ASTRA_BINANCE_EXECUTION`` / ``ASTRA_BINANCE_DEMO_EXECUTION``），
+      默认关（fail-closed）。
+    """
+
+    capabilities = replace(
+        BinancePublicAdapter.capabilities,
+        supports_account=True,
+        supports_orders=True,
+        adapter_execution_flag="ASTRA_BINANCE_EXECUTION",
+        position_modes=("net", "long_short"),
+        # 仅双向持仓（hedge）在真实账户核验过；one-way(net) 载荷未经验证，首版禁开
+        entry_ready_position_modes=("long_short",),
+    )
+
+    def __init__(self, session=None, environment=None, **kw):
+        super().__init__(session=session, environment=environment)
+        env = make_binance_env()
+        self._ex = BinanceExchange(env, session=session)
+
+    @property
+    def exchange(self) -> BinanceExchange:
+        return self._ex
+
+    # ------------------------------------------------------------------
+    # 私有面桥接
+    # ------------------------------------------------------------------
+    def detect_position_mode(self) -> str:
+        """只读探测币安持仓模式（GET /fapi/v1/positionSide/dual）。
+
+        hedge=True → long_short（双向）；hedge=False → net（one-way 净持仓）。
+        失败返回 "unknown"（满足 venue_gate「声明了且有探测才体检」契约）。
+        """
+        try:
+            return "long_short" if self._ex._hedge_mode() else "net"
+        except Exception:
+            return "unknown"
+
+    def positions(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        """币安持仓 → OKX 同构归一形态（补 side/size_signed/entry_price/mark_price）。"""
+        out: list[dict[str, Any]] = []
+        for p in self._ex.positions(inst_id):
+            raw_side = str(p.get("posSide") or "").strip().lower()
+            pos = p.get("pos")
+            try:
+                pos_val = float(pos or 0.0)
+            except (TypeError, ValueError):
+                pos_val = 0.0
+            if raw_side in ("long", "short"):
+                side = raw_side
+            else:
+                # net(one-way) 持仓：pos 是有符号数，按符号派生 side
+                side = "long" if pos_val > 0 else "short"
+            inst = str(p.get("instId") or "")
+            base = canonical_base(inst)
+            try:
+                entry = float(p.get("avgPx") or 0.0)
+                mark = float(p.get("markPx") or 0.0)
+                upl = float(p.get("upl") or 0.0)
+                lev = float(p.get("lever") or 1.0)
+            except (TypeError, ValueError):
+                entry = mark = upl = 0.0
+                lev = 1.0
+            amount = abs(pos_val)
+            out.append({
+                "venue": "binance",
+                "exchange": "binance",
+                "symbol": inst,
+                "instId": inst,
+                "base": base,
+                "side": side,
+                "posSide": side,
+                "amount": amount,
+                "size_signed": pos_val if side == "long" else -amount,
+                "entry_price": entry,
+                "mark_price": mark,
+                "unrealized_pnl": upl,
+                "upl": upl,
+                "leverage": lev,
+                "margin_mode": p.get("mgnMode", "cross"),
+                "raw": p,
+            })
+        return out
+
+    def account_snapshot(self) -> dict[str, Any]:
+        rows = self._ex.balance()
+        if not rows or not isinstance(rows, list):
+            raise RuntimeError("Binance account snapshot is unavailable")
+        return rows[0]
+
+    def place_protected_limit_order(
+        self, inst_id: str, side: str, pos_side: str,
+        size: Any, price: Any, tp_px: Any, sl_px: Any,
+    ) -> dict[str, Any]:
+        return self._ex.place_protected_limit_order(
+            inst_id, side, pos_side, size, price, tp_px, sl_px)
+
+    def place_protected_market_order(
+        self, inst_id: str, side: str, pos_side: str,
+        size: Any, tp_px: Any, sl_px: Any,
+    ) -> dict[str, Any]:
+        return self._ex.place_protected_market_order(
+            inst_id, side, pos_side, size, tp_px, sl_px)
+
+    def close_position(self, inst_id: str, pos_side: str, **kw) -> dict[str, Any]:
+        return self._ex.close_position(inst_id, pos_side, **kw)
+
+    def cancel_order(self, inst_id: str, order_id: str) -> dict[str, Any]:
+        return self._ex.cancel_order(inst_id, order_id)
+
+    def set_leverage(self, inst_id: str, leverage: Any, pos_side: str = "long") -> dict[str, Any]:
+        return self._ex.set_leverage(inst_id, leverage, pos_side=pos_side)
+
+    def reconcile_pending_entries(self) -> dict[str, Any]:
+        return self._ex.reconcile_pending_entries()
+
+
+__all__ = ["BinanceExchange", "BinancePublicAdapter", "BinanceTradingAdapter",
+           "BinanceEnvironment", "make_binance_env", "LIVE_HOST", "DEMO_HOST"]

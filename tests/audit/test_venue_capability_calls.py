@@ -52,7 +52,13 @@ IMPL_WORDS = set(IMPL_NAMES)
 #: 形如 `v` / `venue` / `_v` 的"场所名变量"（用于结构化识别按所分流）
 VENUEISH_NAMES = {"v", "venue", "_v", "_gv", "target_venue", "venue_key", "name", "self_venue"}
 #: 显式放行（附理由）。当前为空 —— 守卫都能结构化识别。
-ALLOWLIST: dict[tuple[str, str, int], str] = {}
+ALLOWLIST: dict[tuple[str, str, int], str] = {
+    # BinanceTradingAdapter 组合的 self._ex 是自包含 BinanceExchange（非多态适配器），
+    # 其方法集在 __init__ 里已固定，无「另一实现会 AttributeError」的能力差异风险。
+    # set_leverage 在此处是「组合对象上的确定调用」，不是对多态 adapter 的能力探测。
+    ("astra_backend/exchanges/binance.py", "set_leverage", 2391):
+        "self._ex 类型固定为 BinanceExchange（自包含类），set_leverage 确定存在，非多态能力差异调用",
+}
 
 
 def adapter_classes() -> dict:

@@ -90,7 +90,7 @@ class PortfolioRunnerTests(unittest.TestCase):
         payload = self._run()
         self.assertEqual(sorted(payload),
                          ["active_symbols", "bar", "by_symbol", "limit", "portfolio",
-                          "updated_at"])
+                          "synthetic_symbols", "updated_at"])
 
     def test_every_symbol_in_the_universe_is_fetched_and_backtested(self):
         self._run(symbols=("BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"))

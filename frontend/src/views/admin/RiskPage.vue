@@ -45,10 +45,9 @@ const store = useDashboardStore();
 const busy = ref<'save' | 'reset' | ''>('');
 
 const schema = ref<{ groups: any[]; params: any[]; high_risk_phrase?: string } | null>(null);
-/** 引擎此刻的口径（审计未完成清单#3）：文件值 = 下一周期生效；进程内值 = 长驻进程正在用的 */
+/** 进程内风控快照（审计未完成清单#3）：文件值 = 下一周期生效；进程内值 = 长驻进程正在用的 */
 const processValues = ref<Record<string, number>>({});
 const processFresh = ref<{ stale: boolean; note: string; env_file_mtime: number | null; loaded_at: number | null } | null>(null);
-const engineValues = ref<Record<string, any> | null>(null);
 const driftCount = computed(() => {
   const keys = Object.keys(processValues.value || {})
   return keys.filter((k) => {
@@ -129,7 +128,6 @@ const { run: loadData, busy: loading, error: loadError } = useAsyncAction(async 
   effectText.value = res.effect || ''
   processValues.value = res.process_values || {}
   processFresh.value = res.process_freshness || null
-  engineValues.value = res.engine_values || null
   syncFromServer(res.values)
 }, { onError: (e) => toast.err(t('admin.risk.loadFailed', undefined, { msg: e.message })), initialBusy: true });
 
@@ -232,34 +230,7 @@ function setLeverageCorridor(minLev: number, maxLev: number) {
   }
 }
 
-/** 引擎口径 6 项（数据驱动的单一模板，取代 6 段复制粘贴） */
-const engineFacts = computed(() => {
-  const e = engineValues.value
-  if (!e) return []
-  const U = ' U'
-  return [
-    { label: t('admin.risk.engineDailyLoss'), value: e.daily_loss_limit_usdt == null ? '--' : `${e.daily_loss_limit_usdt}${U}` },
-    { label: t('admin.risk.engineSingleAsset'), value: e.single_asset_margin_usdt == null ? '--' : `${e.single_asset_margin_usdt}${U}` },
-    { label: t('admin.risk.engineMaxPositions'), value: e.max_positions == null ? '--' : `${e.max_positions} / ${e.max_same_direction}` },
-    { label: t('admin.risk.engineTargetRR'), value: e.max_risk_reward ? `${e.target_rr} ~ ${e.max_risk_reward}` : `≥ ${e.target_rr}` },
-    {
-      label: '止盈止损宽度',
-      value: `止盈 ≤ ${e.max_take_profit_atr || 3.5}x ATR · 止损 ${e.stop_loss_atr_mult || 2.0}x ATR`,
-    },
-    { label: t('admin.risk.engineConfBand'), value: `${(e.confidence_band || []).join('% ~ ')}%` },
-    {
-      label: '分批止盈口径',
-      value: e.scale_out_enabled
-        ? `${Math.round((e.scale_out_ratio || 0.5) * 100)}% · ${e.scale_out_trigger_atr || 1.2}x ATR`
-        : '已禁用',
-    },
-    { label: t('admin.risk.engineEquityUsed'), value: e.usdt_available_used == null ? t('admin.risk.engineEquityUnknown') : `${e.usdt_available_used}${U}` },
-  ]
-})
-
-const driftLabels = computed(() =>
-  driftCount.value.map((k) => schema.value?.params.find((x: any) => x.key === k)?.label || k),
-)
+/** 引擎口径 6 项（数据驱动的单一模板，取代 6 段复制粘贴）—— 已随「引擎此刻的口径」模块移除 */
 
 async function saveChanges() {
   if (!dirtyKeys.value.length) return
@@ -407,28 +378,6 @@ onUnmounted(() => {
         </p>
       </div>
     </div>
-
-    <!-- 引擎此刻的口径 -->
-    <section v-if="engineValues" class="card">
-      <header class="card-head">
-        <div>
-          <h2 class="card-title"><Target :size="14" />{{ t('admin.risk.engineNow') }}</h2>
-          <p class="card-sub">{{ t('admin.risk.engineNowHint') }}</p>
-        </div>
-      </header>
-
-      <div class="rk-band">
-        <div v-for="f in engineFacts" :key="f.label" class="rk-fact">
-          <span class="label-caps">{{ f.label }}</span>
-          <span class="rk-fact-v num">{{ f.value }}</span>
-        </div>
-      </div>
-
-      <p v-if="driftCount.length" class="rk-drift">
-        <AlertTriangle :size="12" class="shrink-0" />
-        <span>{{ t('admin.risk.engineDrift') }}{{ t('common.punct.colon') }}{{ driftLabels.join(t('admin.risk.itemSep')) }}</span>
-      </p>
-    </section>
 
     <!-- 首屏加载 -->
     <div v-if="loading" class="rk-skel">
@@ -734,59 +683,6 @@ onUnmounted(() => {
 .rk-note-warn {
   margin-top: 2px;
   color: var(--warn);
-}
-
-/* 引擎口径状态带 */
-.rk-band {
-  display: grid;
-  grid-template-columns: 1fr;
-}
-@media (min-width: 640px) {
-  .rk-band {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@media (min-width: 1024px) {
-  .rk-band {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-@media (min-width: 1600px) {
-  .rk-band {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-}
-.rk-fact {
-  display: flex;
-  flex-direction: column;
-  gap:4px;
-  min-width: 0;
-  padding: var(--ds-space-3) var(--ds-space-4);
-  border-top: 1px solid var(--ds-color-border-default);
-  border-left: 1px solid var(--ds-color-border-default);
-}
-.rk-fact-v {
-  font-size: var(--text-md);
-  font-weight: 500;
-  color: var(--ds-color-text-primary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.rk-drift {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  /* 批 36：实测图标被压成 7.02×12（父级 flex + 长文案把它挤扁）。 */
-  > svg {
-    flex-shrink: 0;
-  }
-  padding: var(--ds-space-3) var(--ds-space-4);
-  border-top: 1px solid var(--ds-color-border-default);
-  background-color: var(--warn-bg);
-  color: var(--warn);
-  font-size: var(--text-3xs);
 }
 
 .rk-skel {

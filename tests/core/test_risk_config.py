@@ -8,7 +8,7 @@
 | ★ **未知键拒收** | `normalize` 只认 `_INDEX` 里的键，多一个未知键就整批拒绝（不静默丢弃）|
 | ★ **越界拒收** | `_coerce` 按 `type` 取整/取 6 位小数后按 `[min,max]` 校验，报错文案给**展示单位**（乘 `display_scale`）|
 | ★ **跨字段矛盾拒收** | 同向 ≤ 总仓、杠杆下限 ≤ 上限、R:R 底线 ≤ 上限；三条错误**合并**成一条 `；` 消息（不是只报第一条）|
-| ★ **缺失 ≠ 0** | `effective_engine_values` 在权益缺失时 `usdt_available_used=None`、池容量读不到时 `max_positions=None`，**绝不用 0 代填** |
+| ★ **缺失 ≠ 0** | 派生口径在权益缺失、池容量读不到时返回 `None`，**绝不用 0 代填** |
 | 套件 | `suite_values` 未知 id ⇒ `ValueError`，且返回**副本**（改动不污染全局 `SUITES`）|
 | 极端值 | `high_risk_changes` 只对**跨线且在 schema 内**的键出报告；非数值静默跳过（不是崩）|
 | 进程 vs 文件 | `process_freshness` 比对 `_LOADED_AT` 与 `.env` mtime，`stale` 与解释文案一起给；`file_vs_process_diff` 只数列**两边都是数字且不等**的键 |
@@ -159,57 +159,6 @@ class ProcessViewTests(unittest.TestCase):
         self.assertEqual(out["count"], 1)
         self.assertEqual(out["differing"]["ASTRA_MAX_LEVERAGE"],
                          {"file": 1.0, "process": 9.0})
-
-
-class EffectiveEngineValuesTests(unittest.TestCase):
-    def test_pool_capacity_is_read_and_positions_are_derived(self):
-        with mock.patch("scripts.instrument_pool.load_instruments",
-                        return_value=[{"instId": "BTC-USDT-SWAP"},
-                                      {"instId": "ETH-USDT-SWAP"}]):
-            out = RC.effective_engine_values(usdt_available=None)
-        self.assertEqual(out["pool_size_used"], 2)
-        self.assertIsNotNone(out["max_positions"])
-        self.assertLessEqual(out["max_same_direction"], out["max_positions"])
-        self.assertIsNone(out["usdt_available_used"], "权益缺失绝不用 0 代填")
-
-    def test_empty_pool_leaves_position_caps_unknown(self):
-        with mock.patch("scripts.instrument_pool.load_instruments", return_value=[]):
-            out = RC.effective_engine_values(usdt_available=1000.0)
-        self.assertEqual(out["pool_size_used"], 0)
-        self.assertIsNone(out["max_positions"], "池容量为 0 ⇒ 不臆造持仓上限")
-        self.assertIsNone(out["max_same_direction"])
-        self.assertEqual(out["usdt_available_used"], 1000.0)
-
-    def test_unreadable_pool_is_not_faked(self):
-        with mock.patch("scripts.instrument_pool.load_instruments",
-                        side_effect=RuntimeError("池文件坏了")):
-            out = RC.effective_engine_values()
-        self.assertIsNone(out["pool_size_used"])
-        self.assertIsNone(out["max_positions"])
-
-    def test_explicit_pool_size_skips_the_file_read(self):
-        reader = mock.Mock()
-        with mock.patch("scripts.instrument_pool.load_instruments", reader):
-            out = RC.effective_engine_values(usdt_available=500.0, pool_size=3)
-        reader.assert_not_called()
-        self.assertEqual(out["pool_size_used"], 3)
-
-    def test_confidence_band_lower_bound_is_the_real_entry_gate(self):
-        """2026-10：标定带下沿 = **实际新开仓门禁本身**，不再有 78 硬地板。
-
-        旧行为（下沿恒为 `max(门禁, 78)`）会让预算文本自相矛盾：
-        门禁配 68 时却显示「标定带 78%~86%（下沿=门禁 68%）」——
-        模型据此以为 68~77 的信号必被物理拦截，主动放弃本可提交的信号。
-        """
-        with mock.patch.object(RC, "MIN_ENTRY_CONFIDENCE", 60.0):
-            out = RC.effective_engine_values(pool_size=1)
-        self.assertEqual(out["confidence_band"], [60.0, 68.0],
-                         "下沿必须跟随门禁配置（宽度固定 8），不得再被抬回 78")
-        default_band = RC.effective_engine_values(pool_size=1)["confidence_band"]
-        self.assertEqual(default_band[0], RC.MIN_ENTRY_CONFIDENCE)
-        self.assertEqual(default_band[1] - default_band[0], 8.0)
-        # 目标 R:R 的下限跟随可配硬底线（2026-10 由 2.2 改为 1.6），不得高于它
-        self.assertGreaterEqual(out["target_rr"], RC.MIN_RISK_REWARD_RATIO)
 
 
 class NormalizeTests(unittest.TestCase):

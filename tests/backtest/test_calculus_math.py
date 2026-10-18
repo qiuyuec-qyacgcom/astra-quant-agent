@@ -1,6 +1,6 @@
 """因果演算引擎数学正确性测试（`scripts/calculus_engine.py`）。
 
-从 cnlimiter/r20-quantum-trader 的 `test_quant_system_calculus.py` 移植，
+从 cnlimiter 量子交易 fork 的 `test_quant_system_calculus.py` 移植，
 仅保留纯演算相关用例（演算数学 / 定积分 / 概率论 / 多周期聚合），
 **剔除** FactorLibraryIntegrationTest / AiFactorTraderMathProbTest /
 AiFactorTraderPositionProtectionTest —— 那三类依赖本项目已重构的

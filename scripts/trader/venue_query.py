@@ -154,17 +154,47 @@ def _venue_health_stamp(
 def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, venue: str = "okx",
                               *,
                               okx_rest,
+                              binance_rest=None,
                               current_environment,
                               query_positions,
                               fetch_other_venue_positions) -> Tuple[bool, str]:
     """Close a position and verify at the exchange before changing local state."""
     target_venue = str(venue or "okx").lower()
-    if target_venue != "okx":
-        # 已移除场所（历史追踪器/台账里的外所行）：本系统不再持有其执行链路。
+    if target_venue not in ("okx", "binance"):
+        # 未登记/已移除场所（历史追踪器/台账里的外所行）：本系统不再持有其执行链路。
         # 只读容错——显式拒绝并留痕，绝不拿 OKX 的接口去平一个外所的仓
         # （同一 instId 在 OKX 上也存在，误平就是"平了别人的仓"）。
         return False, (f"{target_venue.upper()} 场所已移除，跳过平仓确认"
-                       f"（只读容错：本系统为 OKX 专用）")
+                       f"（只读容错：本系统仅支持 OKX / Binance）")
+
+    if target_venue == "binance":
+        # 币安：BinanceExchange.close_position 内部先撤保护单再平仓（cancel_protection=True）。
+        if binance_rest is None:
+            return False, "币安适配器不可用（未配置或未开闸）"
+        try:
+            binance_rest.close_position(inst_id, pos_side)
+        except Exception as exc:
+            return False, f"binance close command failed: {exc}"
+        # 平仓后确认：读币安持仓，确认该腿已平。
+        saw_successful_query = False
+        for _ in range(6):
+            time.sleep(0.6)
+            try:
+                positions = binance_rest.positions(inst_id) or []
+            except Exception:
+                continue
+            saw_successful_query = True
+            remaining = 0.0
+            for position in positions:
+                if (position.get("instId") == inst_id
+                        and str(position.get("posSide", "net")).lower() in {pos_side, "net"}):
+                    remaining = abs(float(position.get("size_signed") or position.get("pos", 0) or 0))
+                    break
+            if remaining < max(1e-12, abs(before_size) * 0.001):
+                return True, "exchange position closed"
+        if not saw_successful_query:
+            return False, "position verification failed: no successful exchange response"
+        return False, f"exchange still reports an open position after close request (before={before_size})"
 
     # Pre-cancel any conflicting pending/reduce-only orders for this instrument to release available size
     try:

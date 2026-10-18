@@ -47,9 +47,7 @@ const SRC = path.resolve(import.meta.dirname, '..', 'src');
 const COMPONENTS_CSS = path.join(SRC, 'styles', 'components.css');
 
 /** 允许自带 band 规则的页面（另一种刻度或另一种组件）。 */
-export const BAND_EXEMPT = {
-  'views/admin/RiskPage.vue': '.rk-band 是 1→2→3→6 列（6 个统计格），与默认 1→2→4 不同刻度',
-};
+export const BAND_EXEMPT = {};
 
 /** 允许保留的 field 规则（页面 delta / 复合选择器），值=理由。 */
 export const FIELD_ALLOWED = {

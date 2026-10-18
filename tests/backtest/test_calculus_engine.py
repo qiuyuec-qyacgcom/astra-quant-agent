@@ -1,6 +1,6 @@
 """因果演算引擎基础测试（`scripts/calculus_engine.py`）。
 
-从 cnlimiter/r20-quantum-trader 移植的原始 pytest 用例改写为本项目 unittest 风格。
+从 cnlimiter 的量子交易 fork 移植的原始 pytest 用例改写为本项目 unittest 风格。
 只测演算引擎本身的因果性与有界性，不涉及 factor_library / ai_factor_trader 集成。
 """
 from __future__ import annotations

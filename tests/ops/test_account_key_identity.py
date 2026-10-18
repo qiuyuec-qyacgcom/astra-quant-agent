@@ -213,9 +213,10 @@ class AccountKeyCacheTest(_IsolatedRegistryMixin):
                     reg.get_adapter(gone)
                 with self.assertRaises(reg.ExchangeCapabilityError):
                     reg.venue_credentials(gone)
-        # 币安已重新登记为**公开行情面**（私有交易面未走注册表执行路由）。
+        # 币安已重新登记为**交易场所**（经 BinanceTradingAdapter 桥接私有面，
+        # 执行闸默认关由 registry.execution_open 双轴旗标裁决）。
         self.assertTrue(reg.is_registered("binance"))
-        self.assertFalse(reg.get_adapter("binance").capabilities.supports_orders)
+        self.assertTrue(reg.get_adapter("binance").capabilities.supports_orders)
         self.assertEqual(reg.registered_venues(), ["binance", "okx"])
         # ……但**只读**符号翻译（历史台账行消费面）不得崩：币安公开面现可翻译原生符号。
         self.assertEqual(reg.native_symbol_pure("BTC-USDT-SWAP", "binance"), "BTCUSDT")
@@ -305,10 +306,14 @@ class ExecutionGateMatrixTest(unittest.TestCase):
 
     def test_removed_venues_are_closed_and_rejected(self):
         with self._flag("1", "1"):
-            # 币安：已登记但仅公开行情面（supports_orders=False），执行恒关。
+            # 币安：已登记为交易场所（supports_orders=True），声明了执行旗标但本用例
+            # 未设 ASTRA_BINANCE_EXECUTION ⇒ 默认关（fail-closed）。
             self.assertFalse(reg.execution_open("binance"))
             self.assertFalse(reg.execution_open("binance", "demo"))
-            self.assertFalse(reg.get_adapter("binance").capabilities.supports_orders)
+            self.assertTrue(reg.get_adapter("binance").capabilities.supports_orders)
+            self.assertEqual(
+                reg.get_adapter("binance").capabilities.adapter_execution_flag,
+                "ASTRA_BINANCE_EXECUTION")
             # gate：仍未登记，执行/取适配器均显式拒绝。
             for gone in ("gate",):
                 with self.subTest(venue=gone):
@@ -316,7 +321,7 @@ class ExecutionGateMatrixTest(unittest.TestCase):
                     self.assertFalse(reg.execution_open(gone, "demo"))
                     with self.assertRaises(reg.ExchangeCapabilityError):
                         reg.get_adapter(gone)
-        # 合成场所只在本人用例内登记，真实注册表仍是 OKX + 币安公开面（见 AccountKeyCacheTest）。
+        # 合成场所只在本人用例内登记，真实注册表仍是 OKX + 币安交易面（见 AccountKeyCacheTest）。
 
     def test_require_execution_okx_message_points_at_read_only_reality(self):
         with patch.object(reg, "venue_credentials", return_value=("", "")):
