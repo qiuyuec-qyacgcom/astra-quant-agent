@@ -151,18 +151,32 @@ Rather than relying purely on lagging indicators, AstraQuant continuously calcul
 
 ## Capital Management & Risk Control
 
-Risk rules are enforced strictly by Python code (`scripts/risk_constants.py`). Baseline parameters:
+Risk rules are enforced strictly by Python code (`scripts/risk_constants.py`) — a **single source of truth shared by the execution engine, the core risk gate (R:R physical interception), and the admin panel**. Every threshold is configurable via `.env` or the admin "Risk Management" page (saved to `.env` and hot-applied on the next cycle without restart). Baseline parameters:
 
 | Parameter | Baseline Value | Description |
 |---|---|---|
-| **Max Concurrent Positions** | `6` positions | Upper limit of active open positions across all instruments |
+| **Max Concurrent Positions** | `Auto-follow pool` (6 default) | `ASTRA_MAX_CONCURRENT_POSITIONS` defaults to 0 = follow instrument-pool size |
 | **Max Same-Direction Positions** | `4` positions | Prevents directional over-exposure during market-wide correlated moves |
-| **Max Single-Asset Margin** | `Equity × 30%` | Prevents concentration risk in a single coin |
-| **Intraday Drawdown Breaker** | `min(150 USDT, Equity × 5%)` | Halts new entries for 24h if daily drawdown threshold is breached |
+| **Max Per-Order Margin** | `Equity × 20%` | Caps the margin allocated to a single entry |
+| **Max Single-Asset Margin** | `min(600 USDT, Equity × 30%)` | Caps cumulative (incl. pyramiding) concentration in one coin |
+| **Risk per Trade (1R)** | `min(pool config, Equity × 2%)` | Baseline stop-loss risk per trade; tightens proportionally for small accounts |
+| **Intraday Drawdown Breaker** | `min(150 USDT, Equity × 5%)` | Halts new entries for 24h if the daily drawdown threshold is breached |
 | **Dynamic Leverage Clamp** | `2.0x – 5.0x` | Clamped to instrument ATR and liquidity limits |
-| **Minimum Reward:Risk (R:R)** | `R:R ≥ 2.0` | Prohibits low-expectancy trades; requires favorable risk-reward |
+| **Reward:Risk (R:R) Range** | `R:R ≥ 2.0` (cap 3.5) | Blocks low-expectancy trades and prevents unrealistic far-out take-profits |
+| **Entry Confidence Gate** | `≥ 68%` | Downgrades to WAIT when AI confidence falls short |
+| **Stop-Loss ATR Width** | `2.0× 1H ATR` | Baseline stop distance, adaptive to volatility |
 | **Time Invalidation Stop** | `4.0 hours` | Closes stagnant positions that fail to expand within the expected window |
 | **Cloud Stop-Loss Coverage** | `100%` | Every position is covered by exchange-side cloud conditional orders |
+
+### Minimum Order Size & Account-Size Adaptation
+
+AstraQuant runs on **small accounts out of the box** — risk and position sizing are derived **proportionally from available equity** with no hard-coded absolute thresholds, so a 20 USDT account can still open positions. Core mechanisms:
+
+- **Contract size quantized to exchange `minSz`**: order size strictly follows each contract's `minSz` step (most OKX perpetuals are 0.01 contracts), **never forced to "at least 1 contract"**. The old implementation inflated BTC's 0.01-contract (≈7.92 USDT notional) to 1 contract (≈792 USDT notional), rejecting small accounts and silently oversizing medium ones.
+- **Skip on funds-mismatch, never inflate**: when a symbol's risk-derived size falls below the exchange minimum notional (cannot simultaneously satisfy min order size, stop-loss breathing room, and `R:R ≥ 2.0`), that symbol is **skipped** with a log noting "position below exchange minimum notional" — never inflated to 1 contract.
+- **Proportional + absolute-cap `min()`**: single-asset margin, daily drawdown breaker, and per-trade risk all use `min(absolute cap, equity × ratio)` — small accounts tighten automatically, large accounts stay bounded.
+
+> ⚠️ **Honest caveat**: 20 USDT technically runs, but taker fees plus funding rate are proportionally large relative to the 1.8~2.2×ATR stop distance, so statistical significance is limited. Validate on paper trading first, or use ≥300 USDT for live testing.
 
 ---
 
