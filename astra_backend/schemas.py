@@ -198,6 +198,15 @@ class InstrumentDeleteRequest(BaseModel):
     confirmation: str = ""
 
 
+class VenueSelectionUpdate(BaseModel):
+    """页头一键切换交易所（双所标的池）。
+
+    只接受已登记标的池的场所名；合法值校验在路由内做（与 POOL_VENUES 单一事实源对齐），
+    此处不加死枚举，避免新增场所时两边各改一遍。
+    """
+    venue: str = Field(min_length=2, max_length=20)
+
+
 class ManualCloseRequest(BaseModel):
     close_token: str = Field(min_length=20, max_length=200)
     admin_password: str = Field(min_length=1, max_length=128)

@@ -30,6 +30,14 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 所以它一直是安全的；其余四个是内联拼法，一直漏。本刀把它们统一提上来。
 DATA_DIR = ROOT / "data"
 POOL_FILE = DATA_DIR / "instrument_pool.json"
+#: 币安独立标的池（2026-10 双所标的池）。
+#:
+#: 为什么不共用 `instrument_pool.json`：两所**数量语义根本不同**——
+#:   · OKX 走 contracts（整数张），每张名义 = price × ctVal（BTC ctVal=0.01）；
+#:   · 币安走 base_asset（币数），ctVal 恒 1（见 `exchanges/binance.py::instruments`）。
+#: 同一份 `ctVal` 喂给两边必然让币安下单量放大 100 倍（BTC）——这是资金级事故，
+#: 故币安池必须是**独立文件、独立规格**，绝不复用 OKX 的池条目。
+BINANCE_POOL_FILE = DATA_DIR / "instrument_pool_binance.json"
 TRADING_STATE_FILE = DATA_DIR / "trading_state.json"
 FACTOR_LIBRARY_FILE = DATA_DIR / "factor_library_snapshot.json"
 NEWS_SENTIMENT_FILE = DATA_DIR / "news_sentiment.json"
@@ -204,13 +212,94 @@ def from_okx_instrument(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def from_binance_instrument(raw: dict[str, Any]) -> dict[str, Any]:
+    """币安 USDⓈ-M 永续 exchangeInfo 行 → 池条目。
+
+    与 OKX 版的**关键差异**：`ctVal` 恒 1（币安按 base_asset 币数下单，无张数概念），
+    `precision` 取 lotSz/stepSize 小数位。若此处误用 OKX 的张数语义，下单量会按
+    1/ctVal 放大（BTC 即 100 倍）——故两所转换函数**故意不合并**。
+    """
+    inst_id = str(raw.get("instId", "")).upper()
+    base = str(raw.get("baseCcy") or inst_id.split("-", 1)[0]).upper()
+    tick_size = str(raw.get("tickSz") or "0.0001")
+    # 币安同时给 lotSz（数量步长）与 minSz；精度以数量步长为准（OKX 版以价格步长为准，
+    # 因为 OKX 下的是整数张，价格精度即 tickSz 的位数）。
+    step = str(raw.get("lotSz") or raw.get("stepSize") or raw.get("minSz") or "1")
+    tier = evaluate_instrument_tier(inst_id, base)
+    profile = TIER_PROFILES[tier]
+    return {
+        "instId": inst_id,
+        "name": base,
+        "type": "crypto",
+        "ccy": base,
+        "tier": tier,
+        "max_leverage": derive_instrument_leverage_cap(tier),
+        "sl_atr_mult": profile["sl_atr_mult"],
+        "base_sz": 1,
+        "precision": _precision(step),
+        "ctVal": 1.0,
+        "tickSz": tick_size,
+        "minSz": str(raw.get("minSz") or step),
+        "risk_per_trade_usd": 0.0,
+    }
+
+
+def from_instrument(venue: Any, raw: dict[str, Any]) -> dict[str, Any]:
+    """按场所分派到对应的规格转换（唯一入口，避免调用方各写一份 if venue）。"""
+    return from_binance_instrument(raw) if normalize_venue(venue) == "binance" else from_okx_instrument(raw)
+
+
 REQUIRED_POOL_FIELDS = ("instId", "name", "ctVal")
+
+#: 币安出厂默认池——**必须与 OKX 默认池币种一致**：双所是同一策略的两套执行腿，
+#: 池子币种不同会让"切换交易所"直接改变策略覆盖面（属于策略变更而非切所）。
+#: 规格（precision/tickSz/minSz）取自币安 USDⓈ-M 永续，**ctVal 恒 1、按币数下单**，
+#: precision 为该所最小下单量 stepSize 的小数位（币安 BTC 永续为 0.001 ⇒ 3）。
+BINANCE_DEFAULT_INSTRUMENTS = [
+    {"instId": "ARB-USDT-SWAP", "name": "ARB", "type": "crypto", "ccy": "ARB", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 0, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "1", "risk_per_trade_usd": 0.0},
+    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.1", "minSz": "0.001", "risk_per_trade_usd": 0.0},
+    {"instId": "DOGE-USDT-SWAP", "name": "DOGE", "type": "crypto", "ccy": "DOGE", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 0, "ctVal": 1.0, "tickSz": "0.00001", "minSz": "1", "risk_per_trade_usd": 0.0},
+    {"instId": "ETH-USDT-SWAP", "name": "ETH", "type": "crypto", "ccy": "ETH", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.001", "risk_per_trade_usd": 0.0},
+    {"instId": "SOL-USDT-SWAP", "name": "SOL", "type": "crypto", "ccy": "SOL", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "XRP-USDT-SWAP", "name": "XRP", "type": "crypto", "ccy": "XRP", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 1, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "0.1", "risk_per_trade_usd": 0.0},
+    {"instId": "SUI-USDT-SWAP", "name": "SUI", "type": "crypto", "ccy": "SUI", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 0, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "1", "risk_per_trade_usd": 0.0},
+    {"instId": "AVAX-USDT-SWAP", "name": "AVAX", "type": "crypto", "ccy": "AVAX", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 0, "ctVal": 1.0, "tickSz": "0.001", "minSz": "1", "risk_per_trade_usd": 0.0},
+    {"instId": "LINK-USDT-SWAP", "name": "LINK", "type": "crypto", "ccy": "LINK", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 2, "ctVal": 1.0, "tickSz": "0.001", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "OP-USDT-SWAP", "name": "OP", "type": "crypto", "ccy": "OP", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 0, "ctVal": 1.0, "tickSz": "0.0001", "minSz": "1", "risk_per_trade_usd": 0.0},
+    {"instId": "BNB-USDT-SWAP", "name": "BNB", "type": "crypto", "ccy": "BNB", "tier": "tier_2_momentum", "max_leverage": 6, "sl_atr_mult": 2.2, "base_sz": 1, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+]
+
+
+def default_instruments_for(venue: Any = None) -> list[dict[str, Any]]:
+    """该场所的出厂默认池（缺失/损坏时的兜底，仅供展示，交易侧不开新仓）。"""
+    return BINANCE_DEFAULT_INSTRUMENTS if normalize_venue(venue) == "binance" else DEFAULT_INSTRUMENTS
 
 # 审计 P2-11(2026-09-13)：池文件坏掉时旧实现静默返回 10 币 DEFAULT_INSTRUMENTS ——
 # 于是管理员删掉的标的会因为"文件坏了"重新出现在交易池里（缺失≠0 的反面：坏掉≠默认）。
 # 现在把状态记在这里，交易侧据此 fail-closed（只做风控接管、不开新仓），而
 # dashboard/后端仍能读到一份可展示的数据，不至于整个 API 起不来。
 _POOL_STATE: Dict[str, Any] = {"status": "unknown", "detail": "", "dropped": []}
+
+#: 支持独立标的池的场所（顺序即前端展示顺序）。
+#: 新增场所需同时提供 `*_DEFAULT_INSTRUMENTS` 与规格换算，否则不得登记。
+POOL_VENUES = ("okx", "binance")
+DEFAULT_VENUE = "okx"
+
+
+def normalize_venue(venue: Any) -> str:
+    """非法/空/`auto` → 默认 OKX。
+
+    `auto` 必须归一：`routing_policy` 在"未手选"时返回的是字符串 `"auto"`
+    （评分路由语义），它不是交易所名。若放行，"auto" 会被当成一个池子去读
+    `instrument_pool.json` 之外的路径，交易侧就会拿到一份空池。
+    """
+    key = str(venue or "").strip().lower()
+    return key if key in POOL_VENUES else DEFAULT_VENUE
+
+
+def pool_file_for(venue: Any = None) -> Path:
+    """目标场所的池文件。OKX 沿用原文件，币安用独立文件（见 BINANCE_POOL_FILE 注释）。"""
+    return BINANCE_POOL_FILE if normalize_venue(venue) == "binance" else POOL_FILE
 
 
 def pool_state() -> Dict[str, Any]:
@@ -244,32 +333,66 @@ def _validate_pool_items(instruments: list[Any]) -> tuple[list[dict[str, Any]], 
     return kept, dropped
 
 
-def load_instruments() -> list[dict[str, Any]]:
-    if not POOL_FILE.exists():
-        # 首次启动没有池文件：用出厂默认并把状态标成 missing（交易侧不据此开新仓）
-        _POOL_STATE.update({"status": "missing", "detail": f"{POOL_FILE} 不存在，已按出厂默认池返回", "dropped": []})
-        print(f"[instrument_pool] warn 未找到 {POOL_FILE}，返回出厂默认 {len(DEFAULT_INSTRUMENTS)} 币；"
-              f"交易侧本轮不开新仓（请先在后台保存一次标的池）")
-        return [dict(item) for item in DEFAULT_INSTRUMENTS]
+def active_pool_venue() -> str:
+    """当前**生效**的标的池所属交易所（`data/venue_routing.json` 的 preferred_venue）。
+
+    这是双所标的池的单一判定源：页头切换器写入它，交易进程、后台路由、面板全部
+    据此取池——因此"切换后自动使用切换后的标的池"是**读时生效**的，
+    不存在"某个进程还抱着旧池"的缝隙。读取失败一律回退 okx（fail-safe，与
+    routing_policy 的缺省语义一致）。
+    """
     try:
-        payload = json.loads(POOL_FILE.read_text(encoding="utf-8"))
+        from astra_backend.exchanges.routing_policy import load_preferred_venue
+        return normalize_venue(load_preferred_venue())
+    except Exception:
+        pass
+    # 后端不在 sys.path 的纯脚本场景：从 routing_policy 取**同一个**文件常量
+    # （单一事实源），而不是在 scripts/ 里另拼一份路径字面量。
+    try:
+        from astra_backend.exchanges import routing_policy as _rp
+        raw = json.loads(Path(_rp.ROUTING_FILE).read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return normalize_venue(raw.get("preferred_venue"))
+    except Exception:
+        pass
+    return DEFAULT_VENUE
+
+
+def load_instruments(venue: Any = None) -> list[dict[str, Any]]:
+    """读取指定场所的标的池。
+
+    `venue` 缺省 = **当前生效交易所**（不是固定 OKX）。这一改动是"切所即换池"的关键：
+    交易进程启动/每个周期调 `load_instruments()` 不传参，就会自然跟随页头切换结果。
+    需要固定某所时显式传 `venue="okx"` / `venue="binance"`。
+    """
+    _venue = normalize_venue(venue or active_pool_venue())
+    _pool_file = pool_file_for(_venue)
+    _defaults = default_instruments_for(_venue)
+    if not _pool_file.exists():
+        # 首次启动没有池文件：用出厂默认并把状态标成 missing（交易侧不据此开新仓）
+        _POOL_STATE.update({"status": "missing", "detail": f"{_pool_file} 不存在，已按出厂默认池返回", "dropped": []})
+        print(f"[instrument_pool] warn 未找到 {_pool_file}，返回 {_venue} 出厂默认 {len(_defaults)} 币；"
+              f"交易侧本轮不开新仓（请先在后台保存一次标的池）")
+        return [dict(item) for item in _defaults]
+    try:
+        payload = json.loads(_pool_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        _POOL_STATE.update({"status": "corrupt", "detail": f"{POOL_FILE} 解析失败: {exc}", "dropped": []})
+        _POOL_STATE.update({"status": "corrupt", "detail": f"{_pool_file} 解析失败: {exc}", "dropped": []})
         print(f"[instrument_pool] error 标的池文件损坏（{exc}）→ 已退回出厂默认清单仅供展示，"
               f"交易侧本轮不开新仓。请修复或重新保存标的池。")
-        return [dict(item) for item in DEFAULT_INSTRUMENTS]
+        return [dict(item) for item in _defaults]
     instruments = payload.get("instruments", payload) if isinstance(payload, dict) else payload
     if not isinstance(instruments, list) or not instruments:
-        _POOL_STATE.update({"status": "empty", "detail": f"{POOL_FILE} 里没有 instruments", "dropped": []})
-        print(f"[instrument_pool] error 标的池为空（{POOL_FILE}）→ 交易侧本轮不开新仓")
-        return [dict(item) for item in DEFAULT_INSTRUMENTS]
+        _POOL_STATE.update({"status": "empty", "detail": f"{_pool_file} 里没有 instruments", "dropped": []})
+        print(f"[instrument_pool] error 标的池为空（{_pool_file}）→ 交易侧本轮不开新仓")
+        return [dict(item) for item in _defaults]
     kept, dropped = _validate_pool_items(instruments)
     if dropped:
         print(f"[instrument_pool] error 标的池有 {len(dropped)} 项非法，已丢弃: {', '.join(dropped)}")
     if not kept:
-        _POOL_STATE.update({"status": "invalid", "detail": f"{POOL_FILE} 全部条目非法", "dropped": dropped})
+        _POOL_STATE.update({"status": "invalid", "detail": f"{_pool_file} 全部条目非法", "dropped": dropped})
         print(f"[instrument_pool] error 标的池无一条合法 → 交易侧本轮不开新仓")
-        return [dict(item) for item in DEFAULT_INSTRUMENTS]
+        return [dict(item) for item in _defaults]
     try:
         from scripts.risk_constants import MIN_LEVERAGE as _RC_MIN, MAX_LEVERAGE as _RC_MAX
     except Exception:
@@ -296,7 +419,7 @@ def load_instruments() -> list[dict[str, Any]]:
     return kept
 
 
-def _pool_lock():
+def _pool_lock(venue: Any = None):
     """跨进程互斥（审计 P2-6）：池文件是多进程 RMW 目标（后台路由写、采集脚本写）。
     优先用 astra_backend.file_locks（可重入、锁文件同目录），后端不在路径时退化为
     本地 flock —— 绝不在"锁不可用"时静默放行。
@@ -304,49 +427,57 @@ def _pool_lock():
     兜底实现已移到 `scripts/local_lock.py`（结构优化阶段 4·B3 第四十八刀）——
     原手写兜底**不可重入**，而 `mutate_instruments` 会在锁内调
     `save_instruments`（嵌套取锁），走兜底分支会同线程自锁挂死。
+
+    双所改造：锁按**目标池文件**取（file_lock/cwd 均以文件为键），
+    因而 OKX 与币安两份池可并行写入，互不阻塞。
     """
+    _pool_file = pool_file_for(venue or active_pool_venue())
     try:
         from astra_backend.file_locks import file_lock
-        return file_lock(POOL_FILE)
+        return file_lock(_pool_file)
     except Exception:
-        return local_file_lock(POOL_FILE)
+        return local_file_lock(_pool_file)
 
 
-def mutate_instruments(mutator):
+def mutate_instruments(mutator, venue: Any = None):
     """在锁内完成 load → mutate → save 的整段 RMW（审计 P2-6）。
 
     旧实现里路由各自 `current = load_instruments(); save_instruments([...])`——
     两个并发保存（两次点击、页面重试、采集脚本同时跑）基于同一份旧池回写，后写者
     静默吞掉先写者（丢标的/丢参数）。mutator 接收当前池列表，返回要落盘的新列表。"""
-    with _pool_lock():
-        current = load_instruments()
+    _venue = normalize_venue(venue or active_pool_venue())
+    with _pool_lock(_venue):
+        current = load_instruments(_venue)
         updated = mutator([dict(item) for item in current])
         if updated is None:
             return current
-        save_instruments(list(updated))
+        save_instruments(list(updated), venue=_venue)
         return updated
 
 
-def save_instruments(instruments: list[dict[str, Any]]) -> None:
-    with _pool_lock():
-        _write_pool_file(instruments)
+def save_instruments(instruments: list[dict[str, Any]], venue: Any = None) -> None:
+    _venue = normalize_venue(venue or active_pool_venue())
+    with _pool_lock(_venue):
+        _write_pool_file(instruments, venue=_venue)
 
 
-def _write_pool_file(instruments: list[dict[str, Any]]) -> None:
-    POOL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=".instrument-pool-", suffix=".tmp", dir=POOL_FILE.parent)
+def _write_pool_file(instruments: list[dict[str, Any]], venue: Any = None) -> None:
+    _venue = normalize_venue(venue or active_pool_venue())
+    _pool_file = pool_file_for(_venue)
+    _pool_file.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".instrument-pool-", suffix=".tmp", dir=_pool_file.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"version": 1, "instruments": instruments}, handle, ensure_ascii=False, indent=2)
+            json.dump({"version": 1, "venue": _venue, "instruments": instruments}, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, POOL_FILE)
+        os.replace(temp_path, _pool_file)
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
     try:
-        sync_instruments_state()
+        sync_instruments_state(_venue)
     except Exception:
         pass
 
@@ -378,10 +509,25 @@ def _run_captured(script, label=None, timeout=45, env=None):
     return run_script(script, timeout=timeout, label=label, env=env)
 
 
-def sync_instruments_state() -> None:
+def sync_instruments_state(venue: Any = None) -> None:
     """Synchronize trading_state.json, factor_library_snapshot.json, news_sentiment.json,
-    and dashboard cache when the trading instrument pool changes."""
-    active_pool = load_instruments()
+    and dashboard cache when the trading instrument pool changes.
+
+    双所改造（2026-10）：只有**当前生效交易所**的池变更才允许扇出到下游。
+    下游文件（trading_state / factor / news / dashboard cache）是全局单份，
+    若币安池保存也去扇出，就会把正在跑的 OKX 池顶掉——即用户明确要求的
+    「切换后不走切换前的标的池」的反面。判断依据是 `venue_routing.json`
+    的 `preferred_venue`（当前执行所）。
+    """
+    active_venue = active_pool_venue()
+    # 空 venue = "保存的就是生效池"（老调用方不带场所）；非空则必须等于生效所才扇出
+    changed_venue = normalize_venue(venue) if venue else active_venue
+    if changed_venue != active_venue:
+        print(f"[instrument_pool] skip 同步下游：本次变更场所={changed_venue}，"
+              f"当前生效场所={active_venue}（非生效场所的池只落盘，不扇出）")
+        return
+
+    active_pool = load_instruments(active_venue)
     active_ids = {item["instId"] for item in active_pool}
     active_names = {item["name"] for item in active_pool}
 
