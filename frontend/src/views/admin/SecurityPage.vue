@@ -526,7 +526,10 @@ async function probeVenue(venue: 'okx' | 'binance') {
       venueLatencies.value[venue] = res.latency_ms
     }
 
-    if (res?.ok) {
+    // 仅「网络探测成功 且 已用私有凭证完成认证」才算真正接入成功（绿色对号）。
+    // 零凭证回退（public_fallback）时后端 ok=true 但 authenticated=false ——
+    // 那只是「公共网络连通」，私有凭证未配，必须走红色叉，不能误导成已接入。
+    if (res?.ok && res?.authenticated !== false) {
       toast.ok(res.message || t('admin.security.toastProbeOk', undefined, { venue: venue.toUpperCase() }))
     } else {
       toast.err(res?.message || t('admin.security.toastProbeFail', undefined, { venue: venue.toUpperCase() }))
