@@ -2,10 +2,13 @@
 """AstraQuant 开箱部署引导向导（Setup Wizard）。
 
 解决部署后手工配置 300+ 行 .env 繁重易错的痛点，提供 2 分钟极速交互式引导：
-1. 交易所运行模式与 API Key（OKX 模拟盘/实盘）
+1. 交易所运行模式（OKX 模拟盘/实盘）
 2. AI 大脑服务商与模型（DeepSeek / OpenRouter / OpenAI / 硅基流动 / 自定义）
 3. 风险偏好基线预设（稳健防守 / 均衡波段 / 进取猎手）
 4. 超级管理员初始口令
+
+交易所 API 凭证**不在本向导中收集**，统一由部署后登录控制台
+「账户与标的」页（/admin/security）填写并加密落盘。
 """
 from __future__ import annotations
 
@@ -98,8 +101,11 @@ def print_help() -> None:
   --non-interactive    使用安全默认配置直接初始化 .env（无需人工交互，适合容器/脚本部署）
 
 说明:
-  本向导引导配置 OKX 交易所模式 (模拟盘/实盘)、AI 大模型连接、
+  本向导引导选择 OKX 运行模式 (模拟盘/实盘)、配置 AI 大模型连接、
   风控基线与超级管理员初始口令，并写入安全的 .env 配置文件 (chmod 600)。
+
+  交易所 API 凭证不在安装阶段收集 —— 部署完成后在控制台
+  「账户与标的」页 (/admin/security) 填写。
 """)
 
 
@@ -130,9 +136,14 @@ def run_wizard(non_interactive: bool = False) -> None:
         return
 
     # -------------------------------------------------------------
-    # 步骤 1: 交易所环境与凭证 (OKX)
+    # 步骤 1: 交易所运行模式
     # -------------------------------------------------------------
-    print(f"{BOLD}[1/4] 交易所配置 (OKX){RESET}")
+    # 刻意不在此处收集 API 凭证：安装向导运行在裸机/容器首次部署阶段，
+    # 凭证一旦经 stdin 进入安装日志或 shell 历史就会泄露；且此时网络、IP 白名单、
+    # 时钟同步往往尚未就绪，在线校验失败会把「凭证填错」和「网络不通」混为一谈。
+    # 统一改由部署后登录控制台 /admin/security 填写（那里有加密存储与掩码回显）。
+    print(f"{BOLD}[1/4] 交易所运行模式{RESET}")
+    print(f"{DIM}API 凭证不在安装阶段收集，部署完成后在控制台「账户与标的」页填写。{RESET}")
     print("选择交易运行模式:")
     print(f"  {CYAN}1. 模拟盘 (Demo / Paper Trading){RESET} {YELLOW}★ 官方推荐 (零真金风险){RESET}")
     print(f"  {CYAN}2. 实盘 (Live Trading){RESET}")
@@ -140,35 +151,8 @@ def run_wizard(non_interactive: bool = False) -> None:
     is_live = mode_choice == "2"
     env_name = "live" if is_live else "demo"
     updates["ASTRA_OKX_ENV"] = env_name
-    print(f"-> 已选定运行环境: {GREEN}{'实盘 (Live)' if is_live else '模拟盘 (Demo)'}{RESET}\n")
-
-    prefix = "OKX_LIVE_" if is_live else "OKX_DEMO_"
-    print(f"{DIM}请输入 OKX V5 API 密钥（可回车跳过，稍后在 Web 界面配置）：{RESET}")
-    api_key = input("API Key: ").strip()
-    secret_key = getpass.getpass("Secret Key: ").strip() if api_key else ""
-    passphrase = getpass.getpass("Passphrase: ").strip() if api_key else ""
-
-    if api_key and secret_key and passphrase:
-        updates[f"{prefix}API_KEY"] = api_key
-        updates[f"{prefix}SECRET_KEY"] = secret_key
-        updates[f"{prefix}PASSPHRASE"] = passphrase
-        print(f"{GREEN}✓ 已暂存 OKX 凭证{RESET}")
-        test_okx = input(f"{DIM}是否立即验证 OKX 接口连通性？[y/N]: {RESET}").strip().lower()
-        if test_okx in ("y", "yes"):
-            print(f"{CYAN}正在验证 OKX V5 接口...{RESET}")
-            try:
-                import scripts.okx_rest as okx_probe
-                from scripts.okx_runtime import OKXEnvironment
-                probe_env = OKXEnvironment(mode=env_name, api_key=api_key, secret_key=secret_key, passphrase=passphrase, base_url="https://www.okx.com")
-                rows = okx_probe.positions(env=probe_env)
-                print(f"{GREEN}✓ OKX 鉴权成功！当前持仓数: {len(rows)}{RESET}\n")
-            except Exception as exc:
-                print(f"{YELLOW}⚠ 探测提示: {exc}{RESET}")
-                print(f"{DIM}  (凭证已保存，您仍可在启动后于控制台进一步配置 IP 白名单或排查网络){RESET}\n")
-        else:
-            print("")
-    else:
-        print(f"{YELLOW}⚠ 暂未填写完整 OKX 凭证，部署后可在控制台 /admin/security 填入{RESET}\n")
+    print(f"-> 已选定运行环境: {GREEN}{'实盘 (Live)' if is_live else '模拟盘 (Demo)'}{RESET}")
+    print(f"{DIM}   (API 凭证稍后在控制台 /admin/security 填写){RESET}\n")
 
     # -------------------------------------------------------------
     # 步骤 2: AI 推理大脑 (LLM)
