@@ -97,6 +97,7 @@
 | `setup_wizard.py` | 170 | **开箱部署向导**：极速交互式引导配置 OKX 交易所、AI 模型与风控基线，生成 .env 并即时校验连通性 |
 | `calculus_engine.py` | 477 | **独立数理库**（因果演算 + 定积分 + 概率论）。纯标准库、零项目依赖；缺数据返回 `valid=False`（绝不伪造结论）。**未接入任何决策/下单链路**——历史下游包装层 `calculus/regime.py` 已随 2026-10 退役，本模块仅作为可复用的离线数理工具保留 |
 | `calculus_replay.py` | 43 | 演算引擎的**离线回放 CLI**：读 `data/snapshots.json` 的 K 线映射 → `calculate_multi_timeframe` → 落盘 `data/calculus_snapshot.json` |
+| `push_via_api.py` | 70 | **GitHub 推送兜底脚本**：网络只允许短连接时，经 GitHub Contents API 逐文件 PUT 提交工作区改动（SSH 通道不可用时的降级通道）。配合 `git_push_retry.sh` 使用 |
 
 ## ⚠️ 双拼写（改动 import 前必读）
 
