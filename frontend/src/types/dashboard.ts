@@ -91,6 +91,8 @@ export interface PendingOrderItem {
 export interface InstrumentFactor {
   instId: string
   name: string
+  /** 数据来源交易所：`okx` / `binance`（两所合并去重，OKX 优先）。缺失按旧缓存处理。 */
+  venue?: string
   type: string
   price: number
   chg24h: number

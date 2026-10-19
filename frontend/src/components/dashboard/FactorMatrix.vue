@@ -113,6 +113,11 @@ function openDetail(f: any) {
   detail.value = f;
 }
 
+/** 该标的行情是否来自币安（OKX 缺失自动回退）。仅 `binance` 时打徽标，`okx`/缺失不显示。 */
+function isBinance(f: any): boolean {
+  return String(f.venue || '').toLowerCase() === 'binance';
+}
+
 function onQuickChart(e: MouseEvent, instId: string) {
   e.stopPropagation();
   emit('pick-symbol', instId);
@@ -342,6 +347,14 @@ const processedRows = computed(() => {
                 <div class="flex items-center gap-2">
                   <CryptoLogo :symbol="f.name" :size="18" />
                   <span class="num font-mono font-semibold text-xs text-[var(--ink-strong)]">{{ f.name }}</span>
+                  <span
+                    v-if="isBinance(f)"
+                    class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold leading-none"
+                    style="background-color: var(--surface-2); border: 1px solid var(--line-2); color: var(--warn)"
+                    :title="t('dash.matrix.matrix.venueBinance')"
+                  >
+                    {{ t('dash.matrix.matrix.venueBinance') }}
+                  </span>
                   <span v-if="regimeOf(f)" class="text-3xs font-mono text-[var(--ink-3)] hidden 2xl:inline">
                     {{ regimeOf(f) }}
                   </span>
@@ -404,6 +417,14 @@ const processedRows = computed(() => {
           <div class="flex items-center justify-between gap-2">
             <span class="flex items-center gap-2 text-xs font-bold text-[var(--ink-strong)]">
               <CryptoLogo :symbol="f.name" :size="16" />{{ f.name }}
+              <span
+                v-if="isBinance(f)"
+                class="rounded-full px-1.5 py-0.5 text-3xs font-mono font-semibold leading-none"
+                style="background-color: var(--surface-2); border: 1px solid var(--line-2); color: var(--warn)"
+                :title="t('dash.matrix.matrix.venueBinance')"
+              >
+                {{ t('dash.matrix.matrix.venueBinance') }}
+              </span>
             </span>
             <div class="flex items-center gap-1">
               <span

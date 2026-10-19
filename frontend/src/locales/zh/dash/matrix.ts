@@ -218,6 +218,8 @@ export const zhMatrix = {
     sourceGateBlocked: '风控拦单',
     sourceOmitted: '模型未作答 · 兜底观望',
     updated: '快照 {t}',
+    /** 该标的行情来自币安（OKX 缺失时自动回退），徽标提示数据源 */
+    venueBinance: '币安',
       },
 
   // ── 批 29：大盘页此前有 6 处中文写死在模板里（多空过滤标签、工位操作表头、

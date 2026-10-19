@@ -209,6 +209,8 @@ export const enMatrix = {
     sourceGateBlocked: 'Blocked by risk gate',
     sourceOmitted: 'No verdict from model · fail-closed wait',
     updated: 'Snapshot {t}',
+    /** Market data sourced from Binance (OKX auto-fallback when missing) */
+    venueBinance: 'Binance',
       },
 
   filterAll: 'All',
