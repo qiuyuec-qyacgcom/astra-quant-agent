@@ -25,6 +25,7 @@ from astra_backend.schemas import (
 from astra_backend.okx_trade_service import fast_close_confirmed
 from scripts.okx_rest import OKXNotConfigured
 from scripts.instrument_pool import (
+    default_instruments_for,
     from_instrument,
     from_okx_instrument,
     load_instruments,
@@ -416,6 +417,13 @@ def admin_set_venue_selection(
     # 校验 2：目标池可信
     load_instruments(target)          # 触发一次读取，刷新 pool_state()
     state = pool_state()
+    # 「缺失」是首次切所的常见态（币安池文件从未落盘过），而非损坏：
+    # 用该所出厂默认池自动落盘，让「点按钮即切换」无需先手动保存一次。
+    # 「损坏/空/非法」仍是 fail-closed，不放行——那份默认池仅供展示，不该被拿来交易。
+    if state.get("status") == "missing":
+        save_instruments([dict(item) for item in default_instruments_for(target)], venue=target)
+        load_instruments(target)      # 重新读取，刷新 pool_state() 为 ok
+        state = pool_state()
     if state.get("status") != "ok":
         raise HTTPException(
             status_code=409,
