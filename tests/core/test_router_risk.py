@@ -300,7 +300,8 @@ class AccountBaselineTests(_Base):
         out = A.admin_update_account_baseline(
             InitialCapitalUpdate(initial_capital=10000.0, confirmation="UPDATE CAPITAL"),
             x_astra_session="t")
-        self.fn_update.assert_called_once_with(10000.0)
+        # 双所改造：本金按所独立，写入时必须带上目标交易所（缺省 = 生效所 okx）
+        self.fn_update.assert_called_once_with(10000.0, venue="okx")
         payload = self._rec()[2]
         self.assertEqual(payload["previous_initial_capital"], 5000.0)
         self.assertEqual(payload["initial_capital"], 10000.0)
@@ -529,7 +530,8 @@ class DeleteInstrumentTests(_Base):
                 InstrumentDeleteRequest(confirmation="REMOVE ETH-USDT-SWAP"),
                 x_astra_admin_token="tok")
         self.assertEqual(out["removed"], "ETH-USDT-SWAP")
-        self.report.assert_called_once_with("ETH-USDT-SWAP", {})
+        # 双所改造：持仓判定必须带场所，删除保护才能按所隔离
+        self.report.assert_called_once_with("ETH-USDT-SWAP", {}, "okx")
 
 
 class ManualCloseTests(_Base):

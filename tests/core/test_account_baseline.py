@@ -101,9 +101,28 @@ class NumberTests(unittest.TestCase):
 class LoadBaselineTests(_Base):
     def test_missing_file_yields_the_documented_defaults(self):
         loaded = AB.load_account_baseline()
+        # 双所改造（2026-10）：多出 capital_by_venue（本金按所独立）。
+        # 顶层 initial_capital 仍是"当前生效所"的值，两种口径此时都等于默认本金。
         self.assertEqual(loaded, {"initial_capital": 10_000.0,
                                   "reset_time": "1970-01-01 00:00:00",
-                                  "evolution_start_time": "2026-09-01 00:00:00"})
+                                  "evolution_start_time": "2026-09-01 00:00:00",
+                                  "capital_by_venue": {"okx": 10_000.0, "binance": 10_000.0}})
+
+    def test_capital_is_isolated_per_venue(self):
+        """本金按所独立：写币安不得改动 OKX 的值（反之亦然）。"""
+        AB.update_initial_capital(2000, venue="okx")
+        AB.update_initial_capital(300, venue="binance")
+        self.assertEqual(AB.load_account_baseline(venue="okx")["initial_capital"], 2000.0)
+        self.assertEqual(AB.load_account_baseline(venue="binance")["initial_capital"], 300.0)
+        self.assertEqual(AB.load_account_baseline()["capital_by_venue"],
+                         {"okx": 2000.0, "binance": 300.0})
+
+    def test_non_active_venue_write_does_not_move_top_level_capital(self):
+        """写非生效所时，顶层 initial_capital（老读者看的那一格）不得被改动。"""
+        AB.update_initial_capital(2000, venue="okx")
+        AB.update_initial_capital(300, venue="binance")
+        # 生效所 = okx（routing 缺省 auto → 归一为 okx）
+        self.assertEqual(AB.load_account_baseline()["initial_capital"], 2000.0)
 
     def test_file_values_win_and_capital_is_rounded(self):
         self._write({"initial_capital": 1234.567, "reset_time": "2026-05-05 08:00:00",

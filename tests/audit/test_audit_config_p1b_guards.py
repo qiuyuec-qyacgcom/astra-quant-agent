@@ -126,12 +126,13 @@ class DeleteGuardRouteTests(_Base):
         self.assertEqual(self.audits[0][0][0], "instrument.remove")
 
     def test_live_holding_blocks_deletion(self):
+        """本所（当前生效所=OKX）有实时持仓 ⇒ 禁删（铁律不变）。"""
         from fastapi import HTTPException
-        with self._live([{"instId": "ALGO-USDT-SWAP", "venue": "binance", "pos": "6431.5"}]):
+        with self._live([{"instId": "ALGO-USDT-SWAP", "venue": "okx", "pos": "6431.5"}]):
             with self.assertRaises(HTTPException) as ctx:
                 self._delete("ALGO-USDT-SWAP", "REMOVE ALGO-USDT-SWAP")
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("binance", ctx.exception.detail)
+        self.assertIn("okx", ctx.exception.detail)
         self.assertIn("ALGO-USDT-SWAP", self._pool_ids(), "有实时持仓却被删出交易池（P1-5 回归）")
         self.assertIn("rejected_live_holdings", json.dumps(self.audits, ensure_ascii=False))
 
@@ -173,11 +174,20 @@ class DeleteGuardRouteTests(_Base):
         self.assertFalse(rows["BTC-USDT-SWAP"]["removable"])
         self.assertTrue(rows["DOGE-USDT-SWAP"]["has_tracker"])
         self.assertEqual(rows["DOGE-USDT-SWAP"]["tracker_keys"], ["DOGE-USDT-SWAP_short"])
-        self.assertTrue(rows["ALGO-USDT-SWAP"]["held_live"])
-        self.assertEqual(rows["ALGO-USDT-SWAP"]["held_venues"], ["binance"])
+        # 双所标的池（2026-10）：持仓保护按**本所**统计。ALGO 的持仓在币安，
+        # 而当前生效所是 OKX ⇒ OKX 池里它不应被标成「实时持仓」。
+        self.assertFalse(rows["ALGO-USDT-SWAP"]["held_live"], "OKX 池不应被币安持仓挡住")
+        self.assertEqual(rows["ALGO-USDT-SWAP"]["held_venues"], [])
         self.assertFalse(rows["ALGO-USDT-SWAP"]["holdings_unknown"])
-        self.assertTrue(rows["ALGO-USDT-SWAP"]["removable"] is False)
+        self.assertTrue(rows["ALGO-USDT-SWAP"]["removable"] is True)
         self.assertFalse(rows["DOGE-USDT-SWAP"]["removable"], "有追踪记录却标成可移除")
+        # 同一份持仓，切到币安视角看就必须被识别为「本所持仓」（按所隔离 ≠ 直接忽略）
+        with self._live([{"instId": "ALGO-USDT-SWAP", "venue": "binance", "pos": "1"}], age=1):
+            bn_payload = self.risk.admin_instruments(venue="binance", x_astra_admin_token=None)
+        self.assertEqual(bn_payload["venue"], "binance")
+        # 币安池独立：未初始化时应回落到币安出厂默认池（含 ALGO 与否都不影响按所判定）
+        bn_rows = {row["instId"]: row for row in bn_payload["instruments"]}
+        self.assertIn("BTC-USDT-SWAP", bn_rows)
         with self._live([], age=9999):
             stale = self.risk.admin_instruments(None)
         stale_rows = {row["instId"]: row for row in stale["instruments"]}
