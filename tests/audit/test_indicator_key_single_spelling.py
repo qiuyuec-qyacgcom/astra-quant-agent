@@ -77,7 +77,7 @@ class IndicatorKeySingleSpellingTest(unittest.TestCase):
         m = self.m
         local_calls = []
         m._public_post = lambda *a, **k: None                     # MCP 不可用
-        m.fetch_single_indicator = lambda inst, ind, bar=None, timeout=None: {"value": 1}
+        m.fetch_single_indicator = lambda inst, ind, bar=None, timeout=None, venue=None: {"value": 1}
         m._local_math_indicators = lambda inst, missing, bar: local_calls.append(list(missing)) or {}
         out = m.fetch_indicators_batch("BTC-USDT-SWAP", ["EMA-20"], bar="1H")
         self.assertEqual(list(out), ["EMA20"], "REST 兜底仍按原拼法存键 ⇒ 消费方可能取不到")

@@ -21,7 +21,7 @@ from .plaza import router as plaza_router
 router = APIRouter(tags=["dashboard"])
 router.include_router(plaza_router)
 
-_CANDLES_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CANDLES_CACHE: dict[str, tuple[float, list[dict[str, Any]], str]] = {}
 
 
 @router.get("/api/all")
@@ -180,10 +180,19 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
     now_ts = time.time()
     cached = _CANDLES_CACHE.get(cache_key)
     if cached and (now_ts - cached[0] < 1.0):
-        return {"instId": inst_id, "bar": bar, "candles": cached[1], "source": "cache"}
+        _c_ts, _c_candles, _c_venue = cached
+        return {"instId": inst_id, "bar": bar, "candles": _c_candles,
+                "source": "cache", "venue": _c_venue}
     try:
         from scripts.market_data_service import fetch_candles as _fetch_candles
+        # 双源回退：先试 OKX，空则回退币安（币种归属判定 = 实时探测 OKX）。
         raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0)
+        venue = "okx"
+        source = "OKX REST"
+        if not raw:
+            raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0, venue="binance")
+            venue = "binance"
+            source = "Binance REST"
         candles = []
         for item in reversed(raw or []):
             try:
@@ -198,16 +207,19 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
             except (ValueError, IndexError):
                 continue
         if candles:
-            _CANDLES_CACHE[cache_key] = (now_ts, candles)
-            return {"instId": inst_id, "bar": bar, "candles": candles, "source": "OKX REST"}
+            _CANDLES_CACHE[cache_key] = (now_ts, candles, venue)
+            return {"instId": inst_id, "bar": bar, "candles": candles,
+                    "source": source, "venue": venue}
         raise RuntimeError("upstream returned no candles (all fallback levels exhausted)")
     except Exception as exc:
         # 审计 C5（数据诚实）：删除旧「factor_fallback 合成 OHLC 爬升曲线」分支——
         # 行情全链失败时渲染形状与真 K 线不可分辨，是「错误数据伪装错误提示」。
         # 兜底改为：有界陈旧缓存（≤5 分钟，显式 stale_cache+warn）否则空数据+error。
         if cached and (now_ts - cached[0] <= 300.0):
-            return {"instId": inst_id, "bar": bar, "candles": cached[1], "source": "stale_cache",
-                    "cache_age_seconds": round(now_ts - cached[0], 1), "warn": str(exc)}
+            _c_ts, _c_candles, _c_venue = cached
+            return {"instId": inst_id, "bar": bar, "candles": _c_candles,
+                    "source": "stale_cache", "venue": _c_venue,
+                    "cache_age_seconds": round(now_ts - _c_ts, 1), "warn": str(exc)}
         return {"instId": inst_id, "bar": bar, "candles": [], "source": "error", "detail": str(exc)}
 
 

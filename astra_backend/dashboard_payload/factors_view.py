@@ -7,11 +7,24 @@ from __future__ import annotations
 import json
 import os
 
+from pathlib import Path
+
 from astra_backend.dashboard_payload.readers import read_json
 from astra_backend.time_utils import beijing_text
-from scripts.instrument_pool import load_instruments
+from scripts.instrument_pool import load_merged_instruments
 
 __all__ = ["build_factors_list"]
+
+
+def _binance_factor_file(factor_file):
+    """由 OKX 快照路径推导币安分所快照路径（镜像 factor_library._snapshot_file 规则）。
+
+    与 scripts/factor_library._snapshot_file 保持一致：OKX 原名，binance 加 `_binance`
+    后缀。factor_file 是 OKX 快照路径（可能被测试重定向到临时目录），推导出的币安
+    路径落在同一目录，不存在则跳过（币安无数据时优雅缺失）。
+    """
+    p = Path(factor_file)
+    return p.with_name(p.stem + "_binance" + p.suffix)
 
 
 def build_factors_list(decisions_file, state_file, factor_file, positions, timestamp_full):
@@ -25,7 +38,7 @@ def build_factors_list(decisions_file, state_file, factor_file, positions, times
 
     factors_list = []
     pos_map = {p.get("instId"): p for p in positions} if isinstance(positions, list) else {}
-    active_pool = load_instruments()
+    active_pool = load_merged_instruments()
     inst_state_map = {}
     state_data = read_json(state_file, {})
     try:
@@ -35,14 +48,20 @@ def build_factors_list(decisions_file, state_file, factor_file, positions, times
     except Exception:
         pass
 
+    # 因子库快照按 instId 合并（OKX 优先）：先读 OKX 再读币安，重复 instId 不覆盖。
     factor_lib_map = {}
-    lib_data = read_json(factor_file, {})
-    try:
-        for item in lib_data.get("instruments", []):
-            if isinstance(item, dict) and item.get("instId"):
-                factor_lib_map[item["instId"]] = item
-    except Exception:
-        pass
+
+    def _ingest_factor_snapshot(path):
+        lib = read_json(path, {})
+        try:
+            for item in lib.get("instruments", []):
+                if isinstance(item, dict) and item.get("instId"):
+                    factor_lib_map.setdefault(item["instId"], item)
+        except Exception:
+            pass
+
+    _ingest_factor_snapshot(factor_file)
+    _ingest_factor_snapshot(_binance_factor_file(factor_file))
 
     for target in active_pool:
         inst_id = target.get("instId")
@@ -91,6 +110,7 @@ def build_factors_list(decisions_file, state_file, factor_file, positions, times
         factors_list.append({
             "name": target.get("name") or ins.get("name"),
             "instId": inst_id,
+            "venue": target.get("venue"),
             "position": pos_map.get(inst_id),
             "type": target.get("type", "crypto"),
             "price": price_val,

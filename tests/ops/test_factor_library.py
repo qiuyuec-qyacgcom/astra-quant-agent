@@ -38,6 +38,7 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 from scripts import factor_library as FL
+from scripts.factors import okx_quant_factors as qf
 from scripts.factors.defaults import build_default_factors
 
 _ITEM = {"instId": "BTC-USDT-SWAP", "name": "BTC", "ccy": "BTC"}
@@ -99,18 +100,34 @@ class _Base(unittest.TestCase):
         # （这里就是那个普通函数），不是 MagicMock —— 所以 `self.urls.side_effect = ...`
         # 只是在给一个函数对象挂属性，**完全无效**，urlopen 仍走原来的空表。
         # 正确做法是让替身读一张**可变的**路由表。
+        # ★ 2026-10 分所重构：ticker 改走 `FL.fetch_ticker`（内部 requests.Session），
+        #   Rubik 5 接口改走 `qf.urllib.request.urlopen`（okx_quant_factors 自带的 urllib）。
+        #   故打桩目标从「FL.urllib.request.urlopen 一把抓」拆成两处。
         self.routes = {}
-        mock.patch.object(FL.urllib.request, "urlopen",
+        mock.patch.object(qf.urllib.request, "urlopen",
                           lambda req, timeout=None: _dispatch(self.routes, req)).start()
+        # ticker 打桩：默认返回 `fetch_ticker` 期望的 data[0] 结构（见 `_ticker`）。
+        # ★ 需同时打两处：`FL.fetch_ticker`（门面模块顶部的 `from ... import` 绑定）
+        #   与 `market_data_service.fetch_ticker`（模块级）——后者是 `CliEntryTests`
+        #   用 exec 重新执行源码时、`from market_data_service import fetch_ticker`
+        #   重新绑定的真实来源；只打一处会漏掉另一半。
+        import market_data_service as _mds
+        self.ticker = mock.patch.object(
+            FL, "fetch_ticker", return_value=self._ticker()).start()
+        mock.patch.object(_mds, "fetch_ticker", return_value=self._ticker()).start()
         self.depth = mock.patch.object(
             FL, "fetch_orderbook_depth",
             return_value={"bids": [], "asks": []}).start()
+        mock.patch.object(_mds, "fetch_orderbook_depth",
+                          return_value={"bids": [], "asks": []}).start()
         self.candles = mock.patch.object(FL, "fetch_candles",
                                          return_value=_candles()).start()
+        mock.patch.object(_mds, "fetch_candles", return_value=_candles()).start()
         self.indicators = mock.patch.object(
             FL, "compute_15m_indicators", return_value=([], [], [], [])).start()
         self.inds = mock.patch.object(FL, "fetch_indicators_batch",
                                       return_value={}).start()
+        mock.patch.object(_mds, "fetch_indicators_batch", return_value={}).start()
         self.score = mock.patch.object(FL, "score_composite_alpha").start()
         self.depth_impl = self.depth
         # ⚠️ 因子引擎的取数带 TTL 缓存（taker 30s / 期权 300s / 基差 1h）：
@@ -125,8 +142,9 @@ class _Base(unittest.TestCase):
         self.routes.update(mapping)
 
     def _ticker(self, price=100.0, open24h=95.0):
-        return {"code": "0", "data": [{"last": str(price), "bidPx": "99",
-                                       "askPx": "101", "open24h": str(open24h)}]}
+        """`fetch_ticker` 打桩的返回结构（data[0] 那个 dict，OKX 风格字段）。"""
+        return {"last": str(price), "bidPx": "99",
+                "askPx": "101", "open24h": str(open24h)}
 
     def _compute(self, item=None, pool=None):
         return FL.compute_instrument_factors(item or dict(_ITEM), pool or {})
@@ -190,7 +208,7 @@ class CalculusResolverIsGoneTests(_Base):
             self.assertIn(call, source, f"门面未接上 {call}")
 
     def test_the_snapshot_carries_the_new_tiers(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         factors = self._compute()
         for pillar in ("volume_profile", "options_structure", "smart_money_derivatives",
                        "volume_money_flow", "microstructure", "trend_momentum"):
@@ -202,8 +220,8 @@ class CalculusResolverIsGoneTests(_Base):
 
 class SourceIsolationTests(_Base):
     def test_a_ticker_failure_is_swallowed(self):
-        self._route({"market/ticker": OSError("ticker 挂了"),
-                     "funding-rate": {"code": "0", "data": [{"fundingRate": "0.0001"}]},
+        self.ticker.side_effect = OSError("ticker 挂了")
+        self._route({"funding-rate": {"code": "0", "data": [{"fundingRate": "0.0001"}]},
                      "open-interest": {"code": "0", "data": [{"oiUsd": "100000000"}]},
                      "long-short-account-ratio": {"code": "0", "data": [["t", "1.2"]]},
                      "taker-volume": {"code": "0", "data": [["t", "30000", "10000"]]}})
@@ -213,43 +231,39 @@ class SourceIsolationTests(_Base):
                          "别的数据源必须照常工作")
 
     def test_a_depth_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         self.depth.side_effect = RuntimeError("深度接口挂了")
         factors = self._compute()
         self.assertIsNone(factors["microstructure"]["bid_ask_depth_ratio"],
                          "取数失败必须是显式缺失（None），不许用 1.0 冒充\"深度均衡\"")
 
     def test_an_indicator_batch_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         self.inds.side_effect = RuntimeError("指标批挂了")
         # 指标批失败 ⇒ 显式缺失（0.0 会被读成"无趋势"这个结论）
         self.assertIsNone(self._compute()["trend_momentum"]["adx_1h"])
 
     def test_a_funding_rate_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker(),
-                     "funding-rate": OSError("资金费率挂了")})
+        self._route({"funding-rate": OSError("资金费率挂了")})
         got = self._compute()["smart_money_derivatives"]
         self.assertIsNone(got["funding_rate_pct"], "取数失败必须显式缺失")
         self.assertEqual(got["funding_crowding"], "INSUFFICIENT_DATA",
                          "不许用 NEUTRAL 冒充'费率不拥挤'这个结论")
 
     def test_an_open_interest_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker(),
-                     "open-interest": OSError("持仓量挂了")})
+        self._route({"open-interest": OSError("持仓量挂了")})
         got = self._compute()["smart_money_derivatives"]
         self.assertEqual(got["oi_usd"], "--")
         self.assertIsNone(got["oi_chg_1h_pct"])
         self.assertEqual(got["oi_price_quadrant"], "INSUFFICIENT_DATA")
 
     def test_a_long_short_ratio_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker(),
-                     "long-short-account-ratio": OSError("长空比挂了")})
+        self._route({"long-short-account-ratio": OSError("长空比挂了")})
         self.assertEqual(
             self._compute()["smart_money_derivatives"]["long_short_ratio"], "--")
 
     def test_a_taker_volume_failure_is_swallowed(self):
-        self._route({"market/ticker": self._ticker(),
-                     "taker-volume": OSError("主动成交挂了")})
+        self._route({"taker-volume": OSError("主动成交挂了")})
         # ★ 取数失败 ⇒ 缺失标记；"0 U" 会被读成"主被动零净流"这个结论
         got = self._compute()["volume_money_flow"]
         self.assertEqual(got["taker_net_usd"], "--")
@@ -257,18 +271,18 @@ class SourceIsolationTests(_Base):
         self.assertEqual(got["cvd_divergence"], "INSUFFICIENT_DATA")
 
     def test_a_15m_failure_is_swallowed_without_losing_the_15m_basics(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         self.candles.return_value = []
         factors = self._compute()
         self.assertEqual(factors["price"], 100.0, "K线挂了不该清掉 ticker 的成果")
 
     def test_a_15m_compute_exception_is_swallowed(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         self.indicators.side_effect = RuntimeError("15m 炸了")
         self.assertEqual(self._compute()["price"], 100.0)
 
     def test_a_1h_failure_keeps_the_15m_result(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         self.candles.side_effect = [[_candles()], []]
         factors = self._compute()
         self.assertEqual(factors["price"], 100.0)
@@ -335,8 +349,7 @@ class RubikTests(_Base):
     def _routes(self, **over):
         # ⚠️ 分发是按子串匹配的：**更具体的键必须排在前面**，
         #    否则 `long-short-account-ratio` 会先把 top-trader 那条吃掉。
-        mapping = {"market/ticker": self._ticker(),
-                   "long-short-account-ratio-contract-top-trader":
+        mapping = {"long-short-account-ratio-contract-top-trader":
                        {"code": "0", "data": [["t", "1.40"]]},
                    "long-short-position-ratio-contract-top-trader":
                        {"code": "0", "data": [["t", "0.85"]]},
@@ -384,7 +397,7 @@ class RubikTests(_Base):
                                2000.0, places=1)
 
     def test_the_rubik_calls_are_skipped_without_a_currency(self):
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
         item = {"instId": "X", "name": "X"}
         factors = self._compute(item)
         self.assertEqual(factors["smart_money_derivatives"]["long_short_ratio"], "--")
@@ -395,7 +408,7 @@ class RubikTests(_Base):
         self._routes()
         self._compute()
         source = Path(FL.__file__).read_text(encoding="utf-8")
-        self.assertIn("qf.fetch_taker_volume(ccy, \"5m\")", source)
+        self.assertIn("qf.fetch_taker_volume(ccy, \"5m\", venue=venue)", source)
         qf_src = (ROOT / "scripts" / "factors" / "okx_quant_factors.py").read_text(encoding="utf-8")
         self.assertIn('"/api/v5/rubik/stat/taker-volume"', qf_src)
         self.assertIn('"ccy": base', qf_src)
@@ -451,8 +464,7 @@ class SmartMoneyOverlayTests(_Base):
         self.assertEqual(row["smart_money_flow_usd"], "-5.0万 U")
 
     def test_the_long_short_ratio_overrides_the_rubik_value(self):
-        self._route({"market/ticker": self._ticker(),
-                     "long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
+        self._route({"long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
         row = self._compute(pool=self._pool())["smart_money_derivatives"]
         self.assertEqual(row["long_short_ratio"], "2.5")
 
@@ -463,8 +475,7 @@ class SmartMoneyOverlayTests(_Base):
         会把 `longShortRatio` 键并进原来的 `{"longShortRatio": 2.5}`，覆盖照旧发生。
         要测"缺失"必须整块替换。
         """
-        self._route({"market/ticker": self._ticker(),
-                     "long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
+        self._route({"long-short-account-ratio": {"code": "0", "data": [["t", "1.0"]]}})
         pool = {"BTC": {"longShortRatio": {"weightedLongRatio": 0.7},
                         "notional": {}, "winRate": {}}}
         row = self._compute(pool=pool)["smart_money_derivatives"]
@@ -554,12 +565,13 @@ class OneHourAtrTests(_Base):
         self.assertGreater(factors["volatility_channel"]["atr_1h"], 0)
 
     def test_the_1h_atr_percentage_needs_a_price(self):
-        self._route({"market/ticker": self._ticker(price=100.0)})
+        self._route({})
         factors = self._compute()
         self.assertGreater(factors["volatility_channel"]["atr_1h_pct"], 0,
                            "有价格时必须算出 ATR%")
 
     def test_a_price_of_zero_leaves_the_percentage_absent(self):
+        self.ticker.return_value = None   # ticker 失败 ⇒ price=0
         self.candles.return_value = _candles()
         factors = self._compute()
         self.assertEqual(factors["volatility_channel"]["atr_1h_pct"], 0.0)
@@ -578,10 +590,12 @@ class UpdateFactorLibraryTests(_Base):
         super().setUp()
         self.pool = mock.patch("scripts.factors.smart_money.fetch_smart_money_pool",
                                return_value={}).start()
-        self.instruments = mock.patch.object(
-            FL, "TARGET_INSTRUMENTS",
-            [{"instId": "BTC-USDT-SWAP", "name": "BTC", "ccy": "BTC"},
-             {"instId": "ETH-USDT-SWAP", "name": "ETH", "ccy": "ETH"}]).start()
+        self.instruments = [{"instId": "BTC-USDT-SWAP", "name": "BTC", "ccy": "BTC"},
+                            {"instId": "ETH-USDT-SWAP", "name": "ETH", "ccy": "ETH"}]
+        # ★ 2026-10 分所重构：`update_factor_library` 改从 `load_instruments(venue=...)`
+        #   取标的池（不再用模块级 `TARGET_INSTRUMENTS`），故打桩 `load_instruments`。
+        self.load_instruments = mock.patch.object(
+            FL, "load_instruments", return_value=self.instruments).start()
 
     def test_the_snapshot_shape(self):
         snap = FL.update_factor_library()
@@ -667,7 +681,7 @@ class CliEntryTests(_Base):
             return_value=[{"instId": "BTC-USDT-SWAP", "name": "BTC", "ccy": "BTC"}]).start()
         mock.patch("scripts.factors.smart_money.fetch_smart_money_pool",
                    return_value={}).start()
-        self._route({"market/ticker": self._ticker()})
+        self._route({})
 
     def _run_as_main(self):
         import io
@@ -695,9 +709,11 @@ class CliEntryTests(_Base):
 
     def test_the_live_module_is_not_affected_by_the_exec(self):
         """那次 exec 只活在隔离命名空间里：活模块的常量与函数都不该被动过。"""
-        before = FL.TARGET_INSTRUMENTS
+        before_load = FL.load_instruments
+        before_update = FL.update_factor_library
         self._run_as_main()
-        self.assertIs(FL.TARGET_INSTRUMENTS, before)
+        self.assertIs(FL.load_instruments, before_load)
+        self.assertIs(FL.update_factor_library, before_update)
         self.assertIs(build_default_factors("BTC-USDT-SWAP", "BTC")["instId"],
                       "BTC-USDT-SWAP")
 

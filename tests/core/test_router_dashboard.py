@@ -149,6 +149,27 @@ class CandlesRouteTests(_Base):
         self.assertEqual(out["candles"][1]["ts"], 1)
         self.assertIsInstance(out["candles"][0]["close"], float)
 
+    def test_okx_empty_falls_back_to_binance(self):
+        """OKX 返回空 ⇒ 回退币安，source/venue 标记为币安。"""
+        okx_rows = [[1, "1", "2", "0.5", "1.5", "9"]]
+        binance_rows = [[2, "3", "4", "2.5", "3.5", "8"]]
+        # 第一次调用（OKX）空，第二次（币安）有数据
+        self.fetch.side_effect = [[], binance_rows]
+        out = A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)
+        self.assertEqual(out["source"], "Binance REST")
+        self.assertEqual(out["venue"], "binance")
+        self.assertEqual(out["candles"][0]["ts"], 2)
+        # 确认第二次调用带了 venue="binance"
+        self.assertEqual(self.fetch.call_args_list[1].kwargs.get("venue"), "binance")
+
+    def test_both_venues_empty_is_an_honest_error(self):
+        """OKX 与币安都空 ⇒ 报错（不合成假 K 线）。"""
+        self.fetch.return_value = []
+        out = A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)
+        self.assertEqual(out["source"], "error")
+        self.assertEqual(out["candles"], [])
+        self.assertEqual(self.fetch.call_count, 2, "两所各试一次")
+
     def test_illegal_bar_falls_back_to_one_hour_and_limit_is_clamped(self):
         A.market_candles("BTC-USDT-SWAP", bar="7m", limit=1)
         self.assertEqual(self.fetch.call_args.kwargs["bar"], "1H")
@@ -172,7 +193,7 @@ class CandlesRouteTests(_Base):
     def test_all_bad_rows_use_a_bounded_stale_cache_with_an_explicit_warn(self):
         A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)   # 先灌一条缓存
         key = "BTC-USDT-SWAP:1H:50"
-        A._CANDLES_CACHE[key] = (time.time() - 120.0, A._CANDLES_CACHE[key][1])
+        A._CANDLES_CACHE[key] = (time.time() - 120.0, A._CANDLES_CACHE[key][1], "okx")
         self.fetch.return_value = []
         out = A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)
         self.assertEqual(out["source"], "stale_cache")
@@ -189,7 +210,7 @@ class CandlesRouteTests(_Base):
     def test_expired_cache_is_not_used_as_a_silent_fallback(self):
         A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)
         key = "BTC-USDT-SWAP:1H:50"
-        A._CANDLES_CACHE[key] = (time.time() - 400.0, A._CANDLES_CACHE[key][1])
+        A._CANDLES_CACHE[key] = (time.time() - 400.0, A._CANDLES_CACHE[key][1], "okx")
         self.fetch.side_effect = RuntimeError("down")
         out = A.market_candles("BTC-USDT-SWAP", bar="1H", limit=50)
         self.assertEqual(out["source"], "error", "超过 300s 的陈旧缓存不得冒充兜底")

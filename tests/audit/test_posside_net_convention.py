@@ -44,6 +44,9 @@ ALLOWLIST = {
         "intent 的 posSide 取自同一份持仓快照（net↔net）",
     ("astra_backend/okx_trade_service.py", "fast_close_confirmed"):
         "那是**判断侧向是否显式**（`in {long, short}`）的分支，不是与交易所 posSide 的兼容比较",
+    ("astra_backend/okx_trade_service.py", "binance_fast_close_confirmed"):
+        "同 `fast_close_confirmed`：判断 `intent` 侧向是否显式（`in {long, short}`）以决定平仓方向，"
+        "不是与交易所 posSide 的兼容比较（币安 USDⓈ-M 应急平仓，fail-closed 语义）",
     ("scripts/factors/okx_quant_factors.py", "summarize_liquidations"):
         "★★ 2026-10 新增，理由与上面三类**不同**：这里比的是 OKX `liquidation-orders` "
         "**成交明细行**自带的 `posSide` —— 那是「这笔强平爆的是多头还是空头仓」的历史"

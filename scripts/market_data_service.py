@@ -29,6 +29,34 @@ OKX_PUBLIC_HOSTS = [
     "https://aws.okx.com",
 ]
 
+# 币安行情接入（因子引擎按 venue 分流）。BinanceExchange 的公开方法无需凭证，
+# 且返回结构已与 OKX 口径对齐（K线 9 列 newest-first、ticker OKX 风格字段、funding ×100）。
+# 惰性实例化：只在真正走币安时才 import/构造，避免 OKX 路径引入币安依赖开销。
+_BINANCE_EXCHANGE = None
+_BINANCE_EXCHANGE_LOCK = threading.Lock()
+
+
+def _normalize_venue(venue: Optional[str]) -> Optional[str]:
+    """把 venue 归一成小写；None/auto/okx → None（默认 OKX 路径，行为不变）。"""
+    if venue is None:
+        return None
+    v = str(venue).strip().lower()
+    if v in ("", "auto", "okx"):
+        return None
+    return v
+
+
+def _binance_exchange():
+    """返回惰性单例 BinanceExchange（公开行情面，无需私有凭证）。"""
+    global _BINANCE_EXCHANGE
+    if _BINANCE_EXCHANGE is None:
+        with _BINANCE_EXCHANGE_LOCK:
+            if _BINANCE_EXCHANGE is None:
+                from astra_backend.exchanges.binance import BinanceExchange, make_binance_env
+
+                _BINANCE_EXCHANGE = BinanceExchange(make_binance_env())
+    return _BINANCE_EXCHANGE
+
 # 行情取数可观测性（第 137 刀）：失败计数 + 耗时/成功率。
 # ⚠️ 双拼写铁律：本模块既以顶层名 `market_data_service`（SCRIPTS_DIR 在 sys.path 上，
 # 生产/门面即如此）被导入，也以 `scripts.market_data_service`（仓库根在 sys.path 上，
@@ -228,16 +256,34 @@ def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Op
 # 1. Ticker & Bulk Tickers
 # ---------------------------------------------------------------------------
 
-def fetch_ticker(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Fetch one instrument ticker: www→aws 双域 REST 直连，失败返回 None。"""
+def fetch_ticker(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch one instrument ticker: www→aws 双域 REST 直连，失败返回 None。
+
+    venue="binance" 时走币安公开行情（返回结构已与 OKX 对齐），其余走 OKX。
+    """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            row = _binance_exchange().ticker(inst_id)
+            return row if isinstance(row, dict) else None
+        except Exception as exc:
+            logger.debug("Binance ticker failed for %s: %s", inst_id, exc)
+            return None
     data = _public_get("/api/v5/market/ticker", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]
     return None
 
 
-def fetch_tickers_bulk(inst_type: str = "SWAP", timeout: float = 4.0) -> Dict[str, Dict[str, Any]]:
+def fetch_tickers_bulk(inst_type: str = "SWAP", timeout: float = 4.0, venue: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """Fetch all instrument tickers in ONE single network request."""
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            return _binance_exchange().tickers()
+        except Exception as exc:
+            logger.debug("Binance tickers failed: %s", exc)
+            return {}
     data = _public_get("/api/v5/market/tickers", params={"instType": inst_type}, timeout=timeout)
     if data and data.get("data"):
         return {item["instId"]: item for item in data["data"] if "instId" in item}
@@ -248,10 +294,25 @@ def fetch_tickers_bulk(inst_type: str = "SWAP", timeout: float = 4.0) -> Dict[st
 # 2. Orderbook Depth
 # ---------------------------------------------------------------------------
 
-def fetch_orderbook_depth(inst_id: str, sz: int = 5, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
+def fetch_orderbook_depth(inst_id: str, sz: int = 5, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Fetch orderbook depth directly via REST. Returns {'bids': [...], 'asks': [...]} —
     双域直连零进程，无备源（深度语义场所间不可比）。
+
+    venue="binance" 时走币安盘口，并经 `market_normalizer.normalize_depth` 补 numOrders，
+    使下游 `compute_depth_factors` 的稳健口径仍可工作。
     """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            raw = _binance_exchange().orderbook(inst_id, sz=sz)
+        except Exception as exc:
+            logger.debug("Binance orderbook failed for %s: %s", inst_id, exc)
+            return None
+        try:
+            from market_normalizer import normalize_depth
+        except ImportError:  # pragma: no cover - 包导入路径
+            from scripts.market_normalizer import normalize_depth
+        return normalize_depth(raw, venue=v)
     data = _public_get("/api/v5/market/books", params={"instId": inst_id, "sz": sz}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]
@@ -281,11 +342,16 @@ def _local_math_indicators(
     inst_id: str,
     indicators: List[str],
     bar: str = "1H",
+    venue: Optional[str] = None,
 ) -> Dict[str, Dict[str, str]]:
     """末级兜底：当 OKX MCP 指标接口与 REST 均不可用时（部署环境常见），
     用本地蜡烛（自带 www→aws 双域容灾）纯 Python 计算 ADX/KDJ/BBWIDTH/CMF。
-    输出与 OKX 官方口径对齐的字符串数值；样本不足时返回空 dict 让上层维持缺省。"""
-    rows = fetch_candles(inst_id, bar=bar, limit=120)
+    输出与 OKX 官方口径对齐的字符串数值；样本不足时返回空 dict 让上层维持缺省。
+
+    币安无官方指标接口，直接走本兜底；`venue` 透传给 `fetch_candles` 保证
+    币安模式用币安蜡烛算 ADX（严禁跨所用 OKX 蜡烛冒充）。
+    """
+    rows = fetch_candles(inst_id, bar=bar, limit=120, venue=venue)
     if not rows:
         return {}
     try:
@@ -361,12 +427,18 @@ def fetch_indicators_batch(
     indicators: List[str],
     bar: str = "1H",
     timeout: float = 4.0,
+    venue: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch multiple technical indicators in ONE SINGLE HTTP POST request.
     
     Batches 4-6 per-instrument indicator queries into 1 fast call.
     Returns: {"ADX": {"adx": "20.1", ...}, "KDJ": {"k": "...", "d": "...", "j": "..."}, ...}
+
+    币安无官方指标接口 → 直接走本地蜡烛兜底（venue 透传，保证用币安蜡烛）。
     """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        return _local_math_indicators(inst_id, indicators, bar, venue=v)
     bar = normalize_bar(bar)
     ind_configs = {ind.upper(): {} for ind in indicators}
     payload = {
@@ -395,14 +467,14 @@ def fetch_indicators_batch(
     for ind in indicators:
         key = _indicator_key(ind)
         if key not in result:
-            val = fetch_single_indicator(inst_id, ind, bar=bar, timeout=timeout)
+            val = fetch_single_indicator(inst_id, ind, bar=bar, timeout=timeout, venue=v)
             if val:
                 result[key] = val
     
     # 末级兜底：MCP 批量接口与逐指标 REST 全灭 → 本地蜡烛纯 Python 计算
     missing = [ind for ind in indicators if _indicator_key(ind) not in result]
     if missing:
-        for k, v in _local_math_indicators(inst_id, missing, bar).items():
+        for k, v in _local_math_indicators(inst_id, missing, bar, venue=v).items():
             result.setdefault(k, v)
     
     return result
@@ -413,9 +485,13 @@ def fetch_single_indicator(
     indicator: str,
     bar: str = "1H",
     timeout: float = 3.5,
+    venue: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fetch or compute a single indicator: MCP REST，失败落纯 Python 本地数学。"""
+    v = _normalize_venue(venue)
     key = _indicator_key(indicator)
+    if v == "binance":
+        return _local_math_indicators(inst_id, [key], bar, venue=v).get(key, {})
     bar = normalize_bar(bar)
     payload = {
         "instId": inst_id,
@@ -446,12 +522,34 @@ def fetch_candles(
     timeout: float = 4.0,
     *,
     closed_only: bool = True,
+    venue: Optional[str] = None,
 ) -> List[List[str]]:
     """Fetch candles directly from OKX Official Market REST API with Keep-Alive.
 
     默认只返回**已收盘**（confirm=1）的K线，避免把正在形成中的 bar 当确认数据
     用于交易分析；图表可通过 `closed_only=False` 主动取回形成中的最新 bar。
+
+    venue="binance" 时走币安 `candles()`（已返回 9 列 newest-first，confirm 列已按
+    收盘时间算好）。币安不适用 OKX 的 closed_only 二次过滤，直接透传 limit。
     """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 45
+        limit = max(1, min(limit, 1500))
+        try:
+            rows = _binance_exchange().candles(inst_id, bar=bar, limit=limit)
+        except Exception as exc:
+            logger.debug("Binance candles failed for %s: %s", inst_id, exc)
+            return []
+        if not isinstance(rows, list):
+            return []
+        # 币安 candles() 已 newest-first 且 confirm 列已算好；closed_only 时过滤未收盘
+        if closed_only:
+            return closed_okx_candles(rows)[:limit]
+        return rows
     bar = normalize_bar(bar)
     try:
         limit = int(limit)
@@ -476,8 +574,15 @@ def fetch_candles(
 # 5. Funding Rate & Open Interest
 # ---------------------------------------------------------------------------
 
-def fetch_funding_rate(inst_id: str, timeout: float = 3.5) -> Optional[float]:
+def fetch_funding_rate(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[float]:
     """Fetch current perpetual funding rate as percentage."""
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            return _binance_exchange().funding_rate(inst_id)
+        except Exception as exc:
+            logger.debug("Binance funding rate failed for %s: %s", inst_id, exc)
+            return None
     data = _public_get("/api/v5/public/funding-rate", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         try:
@@ -487,8 +592,20 @@ def fetch_funding_rate(inst_id: str, timeout: float = 3.5) -> Optional[float]:
     return None
 
 
-def fetch_open_interest(inst_id: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
+def fetch_open_interest(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Fetch open interest data."""
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            raw = _binance_exchange().open_interest(inst_id)
+        except Exception as exc:
+            logger.debug("Binance open interest failed for %s: %s", inst_id, exc)
+            return None
+        try:
+            from market_normalizer import normalize_oi
+        except ImportError:  # pragma: no cover - 包导入路径
+            from scripts.market_normalizer import normalize_oi
+        return normalize_oi(raw, venue=v)
     data = _public_get("/api/v5/public/open-interest", params={"instId": inst_id}, timeout=timeout)
     if data and data.get("data"):
         return data["data"][0]

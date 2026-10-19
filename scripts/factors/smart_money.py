@@ -103,10 +103,17 @@ def fetch_smart_money_pool(
     *,
     max_workers: int = 6,
     timeout: float = 3.5,
+    venue: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """并发采集标的池内全部币种的聪明钱与大户数据，返回标准 pool 字典。"""
+    """并发采集标的池内全部币种的聪明钱与大户数据，返回标准 pool 字典。
+
+    venue="binance"：币安无对等 Rubik 聪明钱统计端点，返回空池 →
+    上层 `available=False` 优雅降级（绝不伪造中性信号）。
+    """
     pool: Dict[str, Any] = {}
     if not instruments:
+        return pool
+    if str(venue or "").strip().lower() == "binance":
         return pool
 
     def _fetch_one(item: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:

@@ -396,7 +396,7 @@ class WiringTest(unittest.TestCase):
         """**核心**：取数必须留在门面 —— 否则 patch.object 缝断掉。"""
         facade_src = FACADE.read_text(encoding="utf-8")
         mod_src = MODULE.read_text(encoding="utf-8")
-        self.assertIn('fetch_candles(inst_id, bar="15m", limit=24)', facade_src)
+        self.assertIn('fetch_candles(inst_id, bar="15m", limit=24, venue=venue)', facade_src)
         # ⚠️ 用**AST 导入**判定，不用文本：本模块的 docstring **故意**提到
         # `fetch_candles(...)` 作为"这个调用留在门面"的说明。文本匹配会误报
         # （这是本阶段第四次栽在同一处 —— 见 §40.7 的教训）。

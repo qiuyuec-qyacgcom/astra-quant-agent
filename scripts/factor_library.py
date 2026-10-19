@@ -25,8 +25,6 @@ from astra_backend.math_utils import safe_float as _shared_safe_float
 import json
 import time
 from datetime import datetime, timedelta, timezone
-import subprocess
-import urllib.request
 from typing import Dict, Any, List, Optional
 
 from scripts.factors.defaults import build_default_factors
@@ -48,7 +46,17 @@ FACTOR_LIB_CACHE_FILE = os.path.join(DATA_DIR, "factor_library_snapshot.json")
 from instrument_pool import load_instruments
 from market_data_service import fetch_orderbook_depth, fetch_indicators_batch, fetch_ticker, fetch_funding_rate, fetch_candles
 
-TARGET_INSTRUMENTS = load_instruments()
+
+def _snapshot_file(venue: Optional[str] = None) -> str:
+    """按 venue 分所快照路径：`factor_library_snapshot_{venue}.json`。
+
+    venue 为 None（默认 OKX）→ 沿用原 `factor_library_snapshot.json`（向后兼容）。
+    """
+    v = (str(venue or "").strip().lower()) if venue else ""
+    if v in ("", "auto", "okx"):
+        return FACTOR_LIB_CACHE_FILE
+    return os.path.join(DATA_DIR, f"factor_library_snapshot_{v}.json")
+
 
 def safe_float(val: Any, default: float = 0.0) -> float:
     """薄壳：转调单一事实源（`astra_backend.math_utils.safe_float`，第一百五十刀）。
@@ -60,45 +68,41 @@ def safe_float(val: Any, default: float = 0.0) -> float:
     return _shared_safe_float(val, default)
 
 
-def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str, Any]) -> Dict[str, Any]:
+def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str, Any], venue: Optional[str] = None) -> Dict[str, Any]:
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
-    headers = {"User-Agent": "Mozilla/5.0"}
     
     factors = build_default_factors(inst_id, name)
 
     # 1. Ticker & Depth (Orderbook)
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data"):
-                t = d["data"][0]
-                factors["price"] = safe_float(t.get("last"))
-                factors["microstructure"]["bid_px"] = safe_float(t.get("bidPx", factors["price"]))
-                factors["microstructure"]["ask_px"] = safe_float(t.get("askPx", factors["price"]))
-                op = safe_float(t.get("open24h", 0))
-                factors["chg24h"] = round(((factors["price"] - op) / op * 100) if op > 0 else 0.0, 2)
-                
-                # Spread
-                if factors["microstructure"]["ask_px"] > 0 and factors["price"] > 0:
-                    spread = factors["microstructure"]["ask_px"] - factors["microstructure"]["bid_px"]
-                    factors["microstructure"]["spread_pct"] = round(spread / factors["price"] * 100, 4)
+        t = fetch_ticker(inst_id, venue=venue)
+        if t:
+            factors["price"] = safe_float(t.get("last"))
+            factors["microstructure"]["bid_px"] = safe_float(t.get("bidPx", factors["price"]))
+            factors["microstructure"]["ask_px"] = safe_float(t.get("askPx", factors["price"]))
+            op = safe_float(t.get("open24h", 0))
+            factors["chg24h"] = round(((factors["price"] - op) / op * 100) if op > 0 else 0.0, 2)
+            
+            # Spread
+            if factors["microstructure"]["ask_px"] > 0 and factors["price"] > 0:
+                spread = factors["microstructure"]["ask_px"] - factors["microstructure"]["bid_px"]
+                factors["microstructure"]["spread_pct"] = round(spread / factors["price"] * 100, 4)
     except Exception:
         pass
 
     # 2. Orderbook Depth（T1：Top20 一次取回，同时导出 Top5/Top20 深度比与 OBI）
     depth_data = None
     try:
-        depth_data = fetch_orderbook_depth(inst_id, sz=20)
+        depth_data = fetch_orderbook_depth(inst_id, sz=20, venue=venue)
     except Exception:
         depth_data = None
 
     # 3. 15M Candles -> ATR, RSI, VWAP Bias, Vol Ratio, OBV（+ T3 筹码分布）
     closes_15m: List[float] = []
     try:
-        d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
+        d = {"data": fetch_candles(inst_id, bar="15m", limit=24, venue=venue)}
         if d["data"] and len(d["data"]) >= 15:
             raw_candles = d["data"]
             # 15M 派生序列 + 指标（阶段 4·B3 第三十二刀：
@@ -119,7 +123,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     #    只取 24 根会让 MACD 块静默退化成 0/中性（实盘已观测到）。
     closes_1h: List[float] = []
     try:
-        d = {"data": fetch_candles(inst_id, bar="1H", limit=100)}
+        d = {"data": fetch_candles(inst_id, bar="1H", limit=100, venue=venue)}
         if d["data"] and len(d["data"]) >= 15:
             raw_1h = d["data"]
             closes_1h = [safe_float(c[4]) for c in reversed(raw_1h)]
@@ -149,7 +153,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     factors["volatility_channel"]["bb_width_1h"] = None
     factors["volume_money_flow"]["cmf_1h"] = None
     try:
-        inds = fetch_indicators_batch(inst_id, ["adx", "kdj", "bbwidth", "cmf"], bar="1H")
+        inds = fetch_indicators_batch(inst_id, ["adx", "kdj", "bbwidth", "cmf"], bar="1H", venue=venue)
         if "ADX" in inds:
             factors["trend_momentum"]["adx_1h"] = safe_float(inds["ADX"].get("adx"))
         if "KDJ" in inds:
@@ -178,7 +182,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # --- T3 筹码分布（24H 滚动 VWAP ± σ 带 + VPVR POC）---
     try:
-        raw_vp = fetch_candles(inst_id, bar="15m", limit=qf.VWAP_WINDOW_15M)
+        raw_vp = fetch_candles(inst_id, bar="15m", limit=qf.VWAP_WINDOW_15M, venue=venue)
         if raw_vp:
             qf.apply_volume_profile_tier(factors, raw_candles_15m=raw_vp,
                                          price=factors["price"])
@@ -196,8 +200,8 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     # --- T0.5 订单流（5M/1H CVD、Taker 买卖比、量价背离）---
     if ccy:
-        taker_5m = qf.fetch_taker_volume(ccy, "5m")
-        taker_1h = qf.fetch_taker_volume(ccy, "1H")
+        taker_5m = qf.fetch_taker_volume(ccy, "5m", venue=venue)
+        taker_1h = qf.fetch_taker_volume(ccy, "1H", venue=venue)
         qf.apply_orderflow_tier(factors, taker_5m=taker_5m, taker_1h=taker_1h,
                                 closes_1h=closes_1h)
         # 兼容既有消费端（前端/提示词旧的 taker_net_usd 字符串）
@@ -215,12 +219,12 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     # --- T0 衍生品（费率/预测费率/ΔOI/账户多空比/清算脉冲）+ T1.5/T2（BTC/ETH 限定）---
     if ccy:
         ul_y = "-".join(inst_id.split("-")[:2]) if "-" in inst_id else inst_id
-        snapshot = qf.fetch_derivatives_snapshot(ccy, inst_id, ul_y)
+        snapshot = qf.fetch_derivatives_snapshot(ccy, inst_id, ul_y, venue=venue)
         options_block = basis_block = loan_block = None
         if ccy in ("BTC", "ETH"):
-            options_block = qf.fetch_option_snapshot(f"{ccy}-USD", ccy) or None
-            basis_block = qf.fetch_quarterly_basis_inputs(ccy) or None
-            loan_block = qf.fetch_loan_rate_snapshot() or None
+            options_block = qf.fetch_option_snapshot(f"{ccy}-USD", ccy, venue=venue) or None
+            basis_block = qf.fetch_quarterly_basis_inputs(ccy, venue=venue) or None
+            loan_block = qf.fetch_loan_rate_snapshot(venue=venue) or None
         price_chg_1h_pct = 0.0
         if len(closes_1h) >= 2 and closes_1h[-2] > 0:
             price_chg_1h_pct = (closes_1h[-1] - closes_1h[-2]) / closes_1h[-2] * 100.0
@@ -275,23 +279,31 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     return factors
 
-def update_factor_library() -> Dict[str, Any]:
-    """Fetch and calculate multi-pillar factor library snapshot for 6 instruments."""
-    # 1. Smart Money Pool：通过 OKX Rubik 官方公开统计端点采集
+def update_factor_library(venue: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch and calculate multi-pillar factor library snapshot for 6 instruments.
+
+    venue 未指定时跟随 active venue（`load_instruments()` 内部读 preferred_venue）。
+    显式传入 venue 则按该所算因子并写分所快照 `factor_library_snapshot_{venue}.json`。
+    """
+    # 标的池按 venue 加载（venue=None 时跟随 active venue；不再用模块级缓存，避免切换不刷新）
+    target_instruments = load_instruments(venue=venue)
+    v = venue
+
+    # 1. Smart Money Pool：通过 OKX Rubik 官方公开统计端点采集（币安无对等端点→空池）
     #    取数不可用时保持空池 → 优雅缺失化 available=False
     try:
         try:
             from scripts.factors.smart_money import fetch_smart_money_pool
         except ImportError:
             from factors.smart_money import fetch_smart_money_pool
-        smart_money_pool = fetch_smart_money_pool(TARGET_INSTRUMENTS)
+        smart_money_pool = fetch_smart_money_pool(target_instruments, venue=v)
     except Exception as e:
         print(f"[Factor Library] SmartMoney pool fetch fallback: {e}")
         smart_money_pool = {}
 
     # 2. Parallel Factor Computations
     with ThreadPoolExecutor(max_workers=6) as executor:
-        results = list(executor.map(lambda item: compute_instrument_factors(item, smart_money_pool), TARGET_INSTRUMENTS))
+        results = list(executor.map(lambda item: compute_instrument_factors(item, smart_money_pool, venue=v), target_instruments))
 
     snapshot = {
         "timestamp": int(time.time()),
@@ -300,12 +312,13 @@ def update_factor_library() -> Dict[str, Any]:
     }
 
     # Atomic Write
+    out_file = _snapshot_file(v)
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp_file = FACTOR_LIB_CACHE_FILE + ".tmp"
+        tmp_file = out_file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, FACTOR_LIB_CACHE_FILE)
+        os.replace(tmp_file, out_file)
     except Exception as e:
         print(f"[Factor Library] Cache write error: {e}")
 

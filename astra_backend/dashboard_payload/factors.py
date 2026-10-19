@@ -13,10 +13,17 @@ from astra_backend.dashboard_payload.readers import load_json_dict_disclosed
 import os
 
 from astra_backend.dashboard_payload.market import _safe_float
-from scripts.instrument_pool import load_instruments
+from scripts.instrument_pool import load_instruments, load_merged_instruments
 
 __all__ = ["load_position_trackers", "enrich_position_risk_fields",
            "_load_local_factor_library", "_build_factors_from_local_files"]
+
+
+def _binance_factor_file(factor_file):
+    """由 OKX 快照路径推导币安分所快照路径（镜像 factor_library._snapshot_file 规则）。"""
+    from pathlib import Path
+    p = Path(factor_file)
+    return p.with_name(p.stem + "_binance" + p.suffix)
 
 
 def load_position_trackers(tracker_file: str | os.PathLike[str]):
@@ -106,17 +113,19 @@ def _build_factors_from_local_files(factor_file: str | os.PathLike[str], decisio
     state_data = {}
     ai_decisions = {}
     factor_lib_map = {}
-    active_pool = load_instruments()
+    active_pool = load_merged_instruments()
 
-    if os.path.exists(factor_file):
-        try:
-            with open(factor_file, "r", encoding="utf-8") as f_lib:
-                lib_data = json.load(f_lib)
-                for item in lib_data.get("instruments", []):
-                    if isinstance(item, dict) and item.get("instId"):
-                        factor_lib_map[item["instId"]] = item
-        except Exception:
-            pass
+    # 因子库快照按 instId 合并（OKX 优先）：先读 OKX 再读币安，重复 instId 不覆盖。
+    for _factor_path in (factor_file, _binance_factor_file(factor_file)):
+        if os.path.exists(_factor_path):
+            try:
+                with open(_factor_path, "r", encoding="utf-8") as f_lib:
+                    lib_data = json.load(f_lib)
+                    for item in lib_data.get("instruments", []):
+                        if isinstance(item, dict) and item.get("instId"):
+                            factor_lib_map.setdefault(item["instId"], item)
+            except Exception:
+                pass
 
     if os.path.exists(decisions_file):
         try:
@@ -174,6 +183,7 @@ def _build_factors_from_local_files(factor_file: str | os.PathLike[str], decisio
         factors_list.append({
             "name": target.get("name") or ins.get("name"),
             "instId": inst_id,
+            "venue": target.get("venue"),
             "position": pos_map.get(inst_id),
             "type": target.get("type", "crypto"),
             "price": price_val,

@@ -156,7 +156,9 @@ def test_factor_snapshot_mocked():
     executor.return_value.__enter__.return_value.map.return_value = []
     mod = isolated("scripts/factor_library.py", "update_factor_library",
                    subprocess=MagicMock(), ThreadPoolExecutor=executor,
-                   TARGET_INSTRUMENTS=[], os=MagicMock(), DATA_DIR="unused",
+                   load_instruments=lambda venue=None: [],
+                   _snapshot_file=lambda venue=None: "unused.json",
+                   os=MagicMock(), DATA_DIR="unused",
                    FACTOR_LIB_CACHE_FILE="unused.json", open=mock_open())
     snap = mod.update_factor_library()
     assert snap["timestamp"] == EPOCH

@@ -28,7 +28,7 @@ class CorruptLocalFilesTest(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(self._cleanup)
         self.pool = [{"instId": "BTC-USDT-SWAP", "name": "BTC"}]
-        p = patch.object(F, "load_instruments", return_value=self.pool)
+        p = patch.object(F, "load_merged_instruments", return_value=self.pool)
         p.start()
         self.addCleanup(p.stop)
 

@@ -36,6 +36,7 @@
 | `factor_library.py` | 298 | 多因子库：`compute_instrument_factors()` 逐标的装配因子 |
 | `instrument_pool.py` | 409 | 交易宇宙（标的池）的**校验后**单一来源 |
 | `market_data_service.py` | 562 | 零进程直连公共行情服务；`_public_get/_public_post` 带**耗时/成败埋点**（调用期 `note_call`/`note_failure`，取值行为一字不变） |
+| `market_normalizer.py` | 97 | 币安→OKX 行情归一化层：`normalize_venue`/`normalize_depth`（补 numOrders）/`normalize_ticker`/`normalize_oi`，供因子引擎与矩阵展示层按 `venue` 路由两所行情 |
 | `market_data_health.py` | 266 | 行情取数可观测性：失败**计数 + 每类一次性告警**（第 137 刀）+ 调用**耗时/成功率/百分位**与跨进程快照 `data/market_data_health.json`（第 138 刀；worker 每周期写、后端 `/metrics` 读） |
 | `market_stream.py` | 481 | 公共行情 **WebSocket 只读层**（OKX 帧解析归一 / 有界 tick 缓冲 / 健康账本与陈旧度 / `--probe` 探测 CLI）。**不常驻、不接决策与下单路径**；REST 取数一字未动。快照 `data/market_stream_health.json` 经 `/metrics` 暴露（可选源 `required="0"`） |
 | `candle_data.py` | 21 | OKX K 线的**已确认**过滤（`closed_okx_candles`），交易与回测共用 |

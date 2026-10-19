@@ -27,7 +27,7 @@ class FactorAssemblyLocalFilesTest(unittest.TestCase):
         self.addCleanup(self._cleanup)
         self.lib, self.dec, self.st = self._write(LIB), self._write(DEC), self._write(ST)
         self.pool = [{"instId": "BTC-USDT-SWAP", "price": 100.0, "vol24h": 5}]
-        p = patch.object(F, "load_instruments", return_value=self.pool)
+        p = patch.object(F, "load_merged_instruments", return_value=self.pool)
         p.start()
         self.addCleanup(p.stop)
 

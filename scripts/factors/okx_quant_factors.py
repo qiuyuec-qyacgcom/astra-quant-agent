@@ -152,6 +152,11 @@ _CACHE: Dict[str, Tuple[float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
+def _is_binance(venue: Optional[str]) -> bool:
+    """venue 归一判定：binance 才 True（None/auto/okx 一律 False，保持 OKX 默认）。"""
+    return str(venue or "").strip().lower() == "binance"
+
+
 def _cache_get(key: str, ttl: float) -> Any:
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
@@ -1128,10 +1133,14 @@ def summarize_liquidation_clusters(details: Optional[Sequence[Dict[str, Any]]],
 # ---------------------------------------------------------------------------
 
 def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
-                               timeout: float = 4.0) -> Dict[str, Any]:
+                               timeout: float = 4.0,
+                               venue: Optional[str] = None) -> Dict[str, Any]:
     """T0 衍生品取数：费率、OI 总量与官方 1H OI 序列、散户/精英多空比、清算脉冲。
 
     每一项失败都只把对应键留 `None`（调用方据此保持占位符），不影响其他项。
+
+    venue="binance"：币安无对等 Rubik 端点（账户多空比/精英持仓/OI 历史序列），
+    返回全 None 空结构，走下游「缺失即缺失」fail-closed 路径。
     """
     snap: Dict[str, Any] = {
         "funding_rate_pct": None, "next_funding_rate_pct": None,
@@ -1139,6 +1148,8 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
         "elite_account_ratio": None, "elite_position_ratio": None,
         "liquidation_details": None,
     }
+    if _is_binance(venue):
+        return snap
     base = str(ccy or "").upper().strip()
     if not base:
         return snap
@@ -1196,13 +1207,18 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
     return snap
 
 
-def fetch_taker_volume(ccy: str, period: str, *, timeout: float = 4.0
+def fetch_taker_volume(ccy: str, period: str, *, timeout: float = 4.0,
+                       venue: Optional[str] = None
                        ) -> Optional[List[Any]]:
     """T0.5 主动成交量序列（Rubik taker-volume，newest-first，TTL 30s）。
 
     ⚠️ 必须带 TTL：本函数每轮对**每个标的**都要 5m + 1H 两次外呼，
     6 标的池 = 每分钟 12 次；实测不加缓存会偶发 429 并把 CVD 静默打成 0。
+
+    venue="binance"：币安无对等 Rubik taker-volume 端点，返回 None（订单流因子缺失）。
     """
+    if _is_binance(venue):
+        return None
     base = str(ccy or "").upper().strip()
     if not base:
         return None
@@ -1217,8 +1233,14 @@ def fetch_taker_volume(ccy: str, period: str, *, timeout: float = 4.0
     return rows
 
 
-def fetch_quarterly_basis_inputs(ccy: str, *, timeout: float = 4.0) -> Dict[str, Any]:
-    """T2 季度基差输入：最近到期线性季度合约价 + 指数价 + 到期时间（TTL 1h）。"""
+def fetch_quarterly_basis_inputs(ccy: str, *, timeout: float = 4.0,
+                                 venue: Optional[str] = None) -> Dict[str, Any]:
+    """T2 季度基差输入：最近到期线性季度合约价 + 指数价 + 到期时间（TTL 1h）。
+
+    venue="binance"：币安无对等季度交割合约/指数价端点，返回空 dict（基差因子缺失）。
+    """
+    if _is_binance(venue):
+        return {}
     base = str(ccy or "").upper().strip()
     if not base:
         return {}
@@ -1253,8 +1275,14 @@ def fetch_quarterly_basis_inputs(ccy: str, *, timeout: float = 4.0) -> Dict[str,
 
 
 def fetch_option_snapshot(inst_family: str, ccy: str = "", *,
-                          timeout: float = 5.0) -> Dict[str, Any]:
-    """T1.5 期权取数：期权链汇总（IV/Delta/fwdPx）+ 官方 Put/Call OI 比（TTL 300s）。"""
+                          timeout: float = 5.0,
+                          venue: Optional[str] = None) -> Dict[str, Any]:
+    """T1.5 期权取数：期权链汇总（IV/Delta/fwdPx）+ 官方 Put/Call OI 比（TTL 300s）。
+
+    venue="binance"：币安无对等期权链/PC OI 比端点，返回空 dict（期权因子缺失）。
+    """
+    if _is_binance(venue):
+        return {}
     family = str(inst_family or "").upper().strip()
     if not family:
         return {}
@@ -1282,8 +1310,14 @@ def fetch_option_snapshot(inst_family: str, ccy: str = "", *,
     return out
 
 
-def fetch_loan_rate_snapshot(*, timeout: float = 4.0) -> Dict[str, Any]:
-    """T2 杠杆借贷利率（全局池级，TTL 30min）。"""
+def fetch_loan_rate_snapshot(*, timeout: float = 4.0,
+                             venue: Optional[str] = None) -> Dict[str, Any]:
+    """T2 杠杆借贷利率（全局池级，TTL 30min）。
+
+    venue="binance"：币安无对等借贷利率端点，返回空 dict。
+    """
+    if _is_binance(venue):
+        return {}
     cached = _cache_get("loan", 1800.0)
     if cached is not None:
         return cached

@@ -27,7 +27,7 @@ class AssemblySemanticsTest(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(self._cleanup)
         self.pool = [{"instId": "BTC-USDT-SWAP", "price": 100.0, "name": "BTC"}]
-        p = patch.object(F, "load_instruments", return_value=self.pool)
+        p = patch.object(F, "load_merged_instruments", return_value=self.pool)
         p.start()
         self.addCleanup(p.stop)
 
@@ -43,7 +43,7 @@ class AssemblySemanticsTest(unittest.TestCase):
 
     def _run(self, decisions=None, state=None, lib=None, pool=None):
         if pool is not None:
-            F.load_instruments.return_value = pool
+            F.load_merged_instruments.return_value = pool
         rows, _ = F._build_factors_from_local_files(
             str(self._file(lib or {}, "lib.json")), str(self._file(decisions or {}, "dec.json")),
             str(self._file(state or {}, "st.json")), [], "2026-09-21 12:00:00")

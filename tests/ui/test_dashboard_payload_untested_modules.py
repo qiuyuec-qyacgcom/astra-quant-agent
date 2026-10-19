@@ -191,7 +191,7 @@ class BuildFactorsListTest(_Base):
         d = self._write("ai_brain_decisions.json", decisions or {})
         s = self._write("trading_state.json", state or {})
         f = self._write("factor_library.json", lib or {})
-        with patch.object(factors_view, "load_instruments", lambda: list(self.POOL)):
+        with patch.object(factors_view, "load_merged_instruments", lambda: list(self.POOL)):
             return factors_view.build_factors_list(d, s, f, positions or [], ts)
 
     # ---- 形状 ----

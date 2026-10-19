@@ -63,6 +63,48 @@ class DashboardFactorsViewTailsTests(unittest.TestCase):
         self.assertEqual(factors_list[0]["vwap_bias"], 1.25)
         self.assertEqual(factors_list[0]["price"], 60000.0)
 
+    def test_build_factors_list_merges_binance_snapshot_with_okx_priority(self):
+        """分所快照合并：OKX 与币安都有同一 instId 时，OKX 因子优先；币安独有币种照常进入。"""
+        from unittest.mock import patch
+        from astra_backend.dashboard_payload import factors_view as FV
+
+        # 合并池：OKX 的 BTC + 币安独有 SOL
+        merged_pool = [
+            {"instId": "BTC-USDT-SWAP", "name": "BTC", "ccy": "BTC", "venue": "okx"},
+            {"instId": "SOL-USDT-SWAP", "name": "SOL", "ccy": "SOL", "venue": "binance"},
+        ]
+        # OKX 快照：BTC 的 price=60000
+        okx_file = self.tmp_path / "factor_library_snapshot.json"
+        okx_file.write_text(json.dumps({"instruments": [
+            {"instId": "BTC-USDT-SWAP", "price": 60000.0, "chg24h": 1.0}
+        ]}), encoding="utf-8")
+        # 币安快照：BTC 的 price=99999（应被 OKX 覆盖）+ 币安独有 SOL
+        binance_file = self.tmp_path / "factor_library_snapshot_binance.json"
+        binance_file.write_text(json.dumps({"instruments": [
+            {"instId": "BTC-USDT-SWAP", "price": 99999.0, "chg24h": 9.0},
+            {"instId": "SOL-USDT-SWAP", "price": 150.0, "chg24h": 2.0},
+        ]}), encoding="utf-8")
+
+        state_file = self.tmp_path / "trading_state.json"
+        state_file.write_text(json.dumps({"instruments": []}), encoding="utf-8")
+
+        with patch.object(FV, "load_merged_instruments", return_value=merged_pool):
+            factors_list, _ = build_factors_list(
+                decisions_file=self.dec_file,
+                state_file=state_file,
+                factor_file=okx_file,
+                positions=[],
+                timestamp_full="2026-09-22 12:00:00",
+            )
+
+        by_id = {row["instId"]: row for row in factors_list}
+        self.assertEqual(by_id["BTC-USDT-SWAP"]["price"], 60000.0,
+                         "重复 instId 因子取 OKX 优先")
+        self.assertEqual(by_id["BTC-USDT-SWAP"]["venue"], "okx")
+        self.assertEqual(by_id["SOL-USDT-SWAP"]["price"], 150.0,
+                         "币安独有币种读币安快照")
+        self.assertEqual(by_id["SOL-USDT-SWAP"]["venue"], "binance")
+
 
 if __name__ == "__main__":
     unittest.main()
