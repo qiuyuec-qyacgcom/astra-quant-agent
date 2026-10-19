@@ -139,6 +139,101 @@ def fast_close_confirmed(close_token: str, confirmation: str) -> dict[str, Any]:
 
 
 # =====================================================================
+# 币安应急平仓（与 OKX 同构的一次性 intent 令牌机制）
+#
+# 币安持仓的归一化字段是 `amount`（币本位数量，正数）+ `posSide`（long/short），
+# 与 OKX 的 `pos`（有符号张数）不同；且币安无 `posId`。故 intent record 加 `venue`
+# 标记，平仓时按 venue 走 `BinanceExchange.close_position`（内部处理 hedge/net、
+# reduce-only 与保护单清扫）。
+# =====================================================================
+
+
+def create_binance_intent(env: Any, position: dict[str, Any]) -> tuple[str, str]:
+    """为币安持仓生成一次性平仓令牌（复用 `_INTENTS` 存储，record 带 venue 标记）。"""
+    token = secrets.token_urlsafe(32)
+    size = abs(float(position.get("amount") or position.get("pos") or 0.0))
+    side = str(position.get("posSide") or "net").lower()
+    inst_id = str(position.get("instId") or "")
+    confirmation = f"CLOSE BINANCE {inst_id} {side.upper()} {size:g}"
+    record = {
+        "venue": "binance",
+        "environment_id": str(getattr(env, "mode", "") or ""),
+        "instId": inst_id,
+        "posSide": side,
+        "posId": "",
+        "expected_size": size,
+        "confirmation": confirmation,
+        "expires_at": time.time() + INTENT_TTL_SECONDS,
+    }
+    with _INTENT_LOCK:
+        now = time.time()
+        stale = [key for key, value in _INTENTS.items() if value["expires_at"] < now]
+        for key in stale:
+            _INTENTS.pop(key, None)
+        _INTENTS[token] = record
+    return token, confirmation
+
+
+def binance_fast_close_confirmed(close_token: str, confirmation: str) -> dict[str, Any]:
+    """币安应急平仓：校验并消费一次性令牌后走 `BinanceExchange.close_position`。
+
+    与 OKX `fast_close_confirmed` 同构的 fail-closed 语义：先 peek 校验环境/短语，
+    全部通过后才消费令牌，避免一次性令牌被误消耗（审计 2026-10-17 教训）。
+    """
+    from astra_backend.exchanges.registry import get_adapter, venue_credentials
+
+    env = current_environment()
+    try:
+        ak, sk = venue_credentials("binance", env.mode)
+    except Exception:
+        ak, sk = "", ""
+    if not (ak and sk):
+        raise ValueError("BINANCE API Key/Secret 未配置，请在后台「账户接入」录入后重试（禁止应急平仓）")
+
+    intent = _peek_intent(close_token)
+    if intent.get("venue") != "binance":
+        raise ValueError("平仓令牌不属于币安，请刷新当前持仓")
+    if confirmation.strip().upper() != intent["confirmation"]:
+        raise ValueError(f"确认短语必须精确为：{intent['confirmation']}")
+    intent = _consume_intent(close_token)
+
+    try:
+        adapter = get_adapter("binance", env.mode)
+    except Exception as exc:
+        raise ValueError(f"币安适配器解析失败: {type(exc).__name__}: {exc}") from exc
+
+    # 回读实时持仓，校验目标仓位仍存在且数量未变（防 stale token 平错仓）
+    try:
+        live = {p.get("instId"): p for p in adapter.exchange.positions()}
+    except Exception as exc:
+        raise ValueError(f"币安持仓读取失败: {type(exc).__name__}: {exc}") from exc
+    target = live.get(intent["instId"])
+    if not target:
+        raise ValueError("目标仓位已不存在，请刷新")
+    actual = abs(float(target.get("amount") or target.get("pos") or 0.0))
+    tolerance = max(1e-12, actual * 1e-6)
+    if abs(actual - intent["expected_size"]) > tolerance:
+        raise ValueError(f"仓位数量已从 {intent['expected_size']} 变化为 {actual}，请刷新")
+
+    close_side = intent["posSide"] if intent["posSide"] in {"long", "short"} else "net"
+    try:
+        close_result = adapter.exchange.close_position(intent["instId"], close_side)
+    except Exception as exc:
+        raise RuntimeError(f"币安平仓失败: {type(exc).__name__}: {exc}") from exc
+
+    return {
+        "status": "confirmed_closed",
+        "environment": env.mode,
+        "venue": "binance",
+        "instId": intent["instId"],
+        "posSide": intent["posSide"],
+        "closed_size": actual,
+        "canceled_entry_orders": [],
+        "close_result": close_result,
+    }
+
+
+# =====================================================================
 # US-004 · attachAlgoOrds 保护核验（审计 2026-09-10 §2 OKX / 设计 §0-3、§6）
 # attachAlgoOrds ≠ 受理时即生效的原子保护：官方 attachAlgoClOrdId 说明——普通订单
 # **完全成交后**才提交附带算法单，回执含 failCode/failReason；HTTP 200 或附带字段

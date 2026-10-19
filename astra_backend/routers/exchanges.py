@@ -564,8 +564,8 @@ def _binance_account_snapshot(env: Any) -> dict[str, Any]:
     """币安持仓快照（应急风控与持仓页「当前活动持仓与挂单快照」按所分流）。
 
     币安走 BinanceTradingAdapter 的归一化持仓（`positions()` 已补 venue/instId/
-    posSide/upl/margin_mode 等 OKX 同构字段）。币安无 OKX 的「平仓 intent 令牌」
-    机制，故挂单与 close_token 均不提供（快照页仅只读展示，应急平仓仍走 OKX）。
+    posSide/upl/margin_mode 等 OKX 同构字段）。每笔持仓生成一次性平仓令牌
+    （`close_token`/`close_confirmation`），与 OKX 同构，供应急平仓二次确认使用。
     """
     try:
         from astra_backend.exchanges.registry import get_adapter
@@ -584,11 +584,16 @@ def _binance_account_snapshot(env: Any) -> dict[str, Any]:
             status_code=503,
             detail=f"BINANCE {str(env.mode).upper()} API Key/Secret 未配置，请在后台「账户接入」录入后重试（系统未接入，禁止交易）")
 
+    from astra_backend.okx_trade_service import create_binance_intent, INTENT_TTL_SECONDS
     positions: list[dict[str, Any]] = []
     try:
         for p in adapter.exchange.positions():
             p_copy = dict(p)
             p_copy.setdefault("venue", "binance")
+            token, confirmation = create_binance_intent(env, p_copy)
+            p_copy["close_token"] = token
+            p_copy["close_confirmation"] = confirmation
+            p_copy["close_token_expires_in"] = INTENT_TTL_SECONDS
             positions.append(p_copy)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"币安持仓读取失败: {type(exc).__name__}: {exc}") from exc

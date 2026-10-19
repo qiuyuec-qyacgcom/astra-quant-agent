@@ -139,20 +139,26 @@ class BinanceSnapshotRouteTest(unittest.TestCase):
         self.assertNotIn("OKX", ctx.exception.detail, "币安分流不得再显示 OKX 文案")
 
     def test_binance_positions_are_returned_with_venue_tag(self):
-        """已配凭证 ⇒ 返回币安归一化持仓，且补 venue=binance。"""
+        """已配凭证 ⇒ 返回币安归一化持仓，补 venue 且生成一次性平仓令牌。"""
         adapter = MagicMock()
         adapter.exchange.positions.return_value = [
-            {"instId": "BTCUSDT", "posSide": "long", "upl": "1.5"},
+            {"instId": "BTCUSDT", "posSide": "long", "amount": "0.01", "upl": "1.5"},
         ]
         with patch("astra_backend.exchanges.registry.get_adapter",
                    return_value=adapter), \
              patch("astra_backend.exchanges.registry.venue_credentials",
-                   return_value=("ak", "sk")):
+                   return_value=("ak", "sk")), \
+             patch("astra_backend.okx_trade_service.create_binance_intent",
+                   return_value=("tok-abc", "CLOSE BINANCE BTCUSDT LONG 0.01")), \
+             patch("astra_backend.okx_trade_service.INTENT_TTL_SECONDS", 90):
             out = R.admin_okx_account_snapshot(None, None, venue="binance")
         self.assertEqual(out["environment_id"], "binance:live")
         self.assertEqual(len(out["positions"]), 1)
         self.assertEqual(out["positions"][0]["venue"], "binance")
         self.assertEqual(out["positions"][0]["instId"], "BTCUSDT")
+        self.assertEqual(out["positions"][0]["close_token"], "tok-abc")
+        self.assertEqual(out["positions"][0]["close_confirmation"],
+                         "CLOSE BINANCE BTCUSDT LONG 0.01")
 
 
 class VenueAccountsRouteTest(unittest.TestCase):

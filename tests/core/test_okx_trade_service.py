@@ -669,5 +669,61 @@ class ConcurrencyTests(_Base):
         self.assertEqual(len(OT._INTENTS), 24)
 
 
+class BinanceIntentTests(_Base):
+    """币安应急平仓的一次性 intent 令牌（与 OKX 同构，但字段用 amount + venue 标记）。"""
+
+    def _binance_pos(self):
+        return {"instId": "BTCUSDT", "posSide": "long", "amount": "0.01"}
+
+    def test_create_binance_intent_tags_venue_and_uses_amount(self):
+        env = types.SimpleNamespace(mode="live")
+        token, confirmation = OT.create_binance_intent(env, self._binance_pos())
+        rec = OT._INTENTS[token]
+        self.assertEqual(rec["venue"], "binance")
+        self.assertEqual(rec["instId"], "BTCUSDT")
+        self.assertEqual(rec["expected_size"], 0.01)
+        self.assertEqual(rec["confirmation"], "CLOSE BINANCE BTCUSDT LONG 0.01")
+        self.assertIn("BINANCE", confirmation)
+
+    def test_binance_close_rejects_wrong_venue_token(self):
+        env = types.SimpleNamespace(mode="live")
+        token, confirmation = OT.create_binance_intent(env, self._binance_pos())
+        # 把令牌伪装成 OKX（venue 不符）
+        with OT._INTENT_LOCK:
+            OT._INTENTS[token]["venue"] = "okx"
+        with mock.patch.object(OT, "current_environment", return_value=env), \
+             mock.patch("astra_backend.exchanges.registry.venue_credentials",
+                        return_value=("ak", "sk")):
+            with self.assertRaises(ValueError) as ctx:
+                OT.binance_fast_close_confirmed(token, confirmation)
+        self.assertIn("不属于币安", str(ctx.exception))
+
+    def test_binance_close_requires_credentials(self):
+        env = types.SimpleNamespace(mode="live")
+        token, confirmation = OT.create_binance_intent(env, self._binance_pos())
+        with mock.patch.object(OT, "current_environment", return_value=env), \
+             mock.patch("astra_backend.exchanges.registry.venue_credentials",
+                        return_value=("", "")):
+            with self.assertRaises(ValueError) as ctx:
+                OT.binance_fast_close_confirmed(token, confirmation)
+        self.assertIn("BINANCE", str(ctx.exception))
+
+    def test_binance_close_confirms_and_consumes_token(self):
+        env = types.SimpleNamespace(mode="live")
+        token, confirmation = OT.create_binance_intent(env, self._binance_pos())
+        adapter = mock.Mock()
+        adapter.exchange.positions.return_value = [{"instId": "BTCUSDT", "posSide": "long", "amount": "0.01"}]
+        adapter.exchange.close_position.return_value = {"orderId": "1"}
+        with mock.patch.object(OT, "current_environment", return_value=env), \
+             mock.patch("astra_backend.exchanges.registry.venue_credentials",
+                        return_value=("ak", "sk")), \
+             mock.patch("astra_backend.exchanges.registry.get_adapter", return_value=adapter):
+            out = OT.binance_fast_close_confirmed(token, confirmation)
+        self.assertEqual(out["venue"], "binance")
+        self.assertEqual(out["closed_size"], 0.01)
+        adapter.exchange.close_position.assert_called_once_with("BTCUSDT", "long")
+        self.assertNotIn(token, OT._INTENTS, "一次性令牌必须在平仓后消费掉")
+
+
 if __name__ == "__main__":
     unittest.main()

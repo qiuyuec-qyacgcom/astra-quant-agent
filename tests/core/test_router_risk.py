@@ -553,6 +553,10 @@ class ManualCloseTests(_Base):
                                                   "posSide": "long", "closed_size": 1.0,
                                                   "environment": "live"})
         self._start(mock.patch.object(A, "fast_close_confirmed", self.fast_close))
+        self.binance_close = mock.Mock(return_value={"instId": "BTCUSDT",
+                                                     "posSide": "long", "closed_size": 0.01,
+                                                     "environment": "live", "venue": "binance"})
+        self._start(mock.patch.object(A, "binance_fast_close_confirmed", self.binance_close))
 
     def _payload(self, **kw):
         base = {"close_token": "tok-" + "x" * 20, "admin_password": "pw",
@@ -617,6 +621,16 @@ class ManualCloseTests(_Base):
             A.manual_close_position(self._payload(venue="gate"))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("不支持的平仓场所", str(ctx.exception.detail))
+
+    def test_binance_success_routes_to_binance_close_and_audits(self):
+        """币安应急平仓走 binance_fast_close_confirmed，审计 venue 记为 binance。"""
+        out = A.manual_close_position(self._payload(venue="binance"))
+        self.assertEqual(out["instId"], "BTCUSDT")
+        self.binance_close.assert_called_once()
+        self.fast_close.assert_not_called()
+        self.assertEqual(self._rec()[0], "position.close")
+        self.assertEqual(self._rec()[1], "confirmed_closed")
+        self.assertEqual(self._rec()[2]["venue"], "binance")
 
     def test_close_failures_map_to_distinct_statuses_and_audits(self):
         from scripts.okx_rest import OKXNotConfigured
