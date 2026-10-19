@@ -262,6 +262,11 @@ export const enAdminSecurity = {
   // ── Binance access (credentials & capital tier + market health) ──
   binanceCredsTitle: 'Binance Credentials & Capital Tier',
   binanceCredsDesc: 'Binance USDⓈ-M encrypted credentials; tier follows the global unified environment.',
+  venueOkx: 'OKX',
+  venueBinance: 'Binance',
+  venueSwitchLabel: 'Switch trading venue',
+  toastVenueSwitched: 'Switched to {venue}; account and symbol pool synced',
+  errVenueSwitch: 'Switch failed: {msg}',
   binanceName: 'Binance',
   binanceApiLabel: 'USDⓈ-M Perp Direct Sign',
   binanceReady: 'Connected READY',

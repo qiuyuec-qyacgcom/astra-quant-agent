@@ -265,6 +265,11 @@ export const zhAdminSecurity = {
   // ── 币安接入（接入凭证与资金档位 + 行情健康容灾）──
   binanceCredsTitle: '币安接入凭证与资金档位',
   binanceCredsDesc: '币安 USDⓈ-M 凭证加密存储，资金档位跟随全局统一环境。',
+  venueOkx: 'OKX',
+  venueBinance: '币安',
+  venueSwitchLabel: '切换交易交易所',
+  toastVenueSwitched: '已切换为 {venue}，账户与标的池已同步',
+  errVenueSwitch: '切换失败：{msg}',
   binanceName: '币安 · Binance',
   binanceApiLabel: 'USDⓈ-M 永续直签',
   binanceReady: '已接入 READY',

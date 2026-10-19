@@ -118,6 +118,39 @@ const instruments = ref<any[]>([])
 const instLimits = ref<any>({ minimum: 1, maximum: 20 })
 const newInstId = ref('')
 
+// ---- 双所切换（账户/标的池/持仓统一跟随）----
+// activeVenue 是**服务端**的生效所（venue-selection），不是本地偏好：
+// 切换必须落盘，否则交易进程仍在用旧所的池（用户明确要求"切换后不走切换前的标的池"）。
+const activeVenue = ref<'okx' | 'binance'>('okx')
+const switchingVenue = ref(false)
+const venueOptions = computed(() => [
+  { key: 'okx' as const, label: t('admin.security.venueOkx') },
+  { key: 'binance' as const, label: t('admin.security.venueBinance') },
+])
+// 账户卡片默认只显示当前生效所（需求：隐藏未选中的那张卡）
+const showOkxCard = computed(() => activeVenue.value === 'okx')
+const showBinanceCard = computed(() => activeVenue.value === 'binance')
+
+async function switchVenue(target: 'okx' | 'binance') {
+  if (target === activeVenue.value || switchingVenue.value) return
+  const label = target === 'binance' ? t('admin.security.venueBinance') : t('admin.security.venueOkx')
+  switchingVenue.value = true
+  try {
+    const res = await api('/api/v1/admin/venue-selection', {
+      method: 'PUT',
+      body: JSON.stringify({ venue: target }),
+    })
+    activeVenue.value = (res?.active_venue === 'binance' ? 'binance' : 'okx')
+    toast.ok(res?.message || t('admin.security.toastVenueSwitched', undefined, { venue: label }))
+    // 全量重载：本金、标的池、持仓都要立刻换成新所的数据
+    await loadAll()
+  } catch (e: any) {
+    toast.err(t('admin.security.errVenueSwitch', undefined, { msg: e?.message || e }))
+  } finally {
+    switchingVenue.value = false
+  }
+}
+
 // ---- positions & close ----
 const snapshot = ref<any>(null)
 const snapshotState = ref('')
@@ -201,12 +234,17 @@ async function loadAll() {
   loading.value = true
   loadError.value = ''
   try {
-    const [cfg, rt] = await Promise.all([
+    const [cfg, rt, poolMeta] = await Promise.all([
       api('/api/v1/admin/config'),
       api('/api/v1/admin/okx/runtime?refresh=1').catch(() => null),
+      api('/api/v1/admin/pool-venues').catch(() => null),
     ])
     config.value = cfg
     applyRuntime(rt)
+    // 生效所以服务端为准（切换按钮写的也是它），先同步再取池，避免"读旧池"
+    if (poolMeta?.active_venue) {
+      activeVenue.value = poolMeta.active_venue === 'binance' ? 'binance' : 'okx'
+    }
     if (cfg?.editable?.okx_environment) {
       okxCredViewLive.value = (cfg.editable.okx_environment === 'live')
       binanceCredViewLive.value = (cfg.editable.okx_environment === 'live')
@@ -219,7 +257,8 @@ async function loadAll() {
     scaleOutEnabled.value = cfg?.editable?.scale_out_enabled !== false
     newCapital.value = String(cfg.editable?.initial_capital ?? '')
     manualClose.value = !!cfg.editable?.manual_close_enabled
-    const inst = await api('/api/v1/admin/instruments')
+    // 显式带上 venue：标的池必须取**当前生效所**那一份
+    const inst = await api(`/api/v1/admin/instruments?venue=${encodeURIComponent(activeVenue.value)}`)
     instruments.value = inst.instruments || []
     instLimits.value = inst.limits || instLimits.value
   } catch (e: any) {
@@ -325,7 +364,7 @@ async function saveCapital() {
   if (capitalConfirm.value.trim().toUpperCase() !== 'UPDATE CAPITAL') { toast.err(t('admin.security.errPhraseCapital')); return }
   savingCapital.value = true
   try {
-    const res = await api('/api/v1/admin/account-baseline', { method: 'PUT', body: JSON.stringify({ initial_capital: parseFloat(newCapital.value), confirmation: capitalConfirm.value }) })
+    const res = await api(`/api/v1/admin/account-baseline?venue=${encodeURIComponent(activeVenue.value)}`, { method: 'PUT', body: JSON.stringify({ initial_capital: parseFloat(newCapital.value), confirmation: capitalConfirm.value }) })
     toast.ok(res.effect || t('admin.security.toastCapitalSet', undefined, { n: res.initial_capital }))
     capitalConfirm.value = ''
     await loadAll()
@@ -343,7 +382,7 @@ async function addInstrument() {
   }
   if (!/^[A-Z0-9]{2,15}-USDT-SWAP$/.test(instId)) { toast.err(t('admin.security.errInstFormat')); return }
   try {
-    const res = await api('/api/v1/admin/instruments', { method: 'POST', body: JSON.stringify({ inst_id: instId }) })
+    const res = await api(`/api/v1/admin/instruments?venue=${encodeURIComponent(activeVenue.value)}`, { method: 'POST', body: JSON.stringify({ inst_id: instId }) })
     toast.ok(res.message || t('admin.security.toastInstAdded', undefined, { inst: instId }))
     newInstId.value = ''
     await loadAll()
@@ -368,7 +407,7 @@ async function removeInstrument(item: any) {
   })
   if (!_ok) return
   try {
-    const res = await api(`/api/v1/admin/instruments/${encodeURIComponent(item.instId)}`, {
+    const res = await api(`/api/v1/admin/instruments/${encodeURIComponent(item.instId)}?venue=${encodeURIComponent(activeVenue.value)}`, {
       method: 'DELETE',
       body: JSON.stringify({ confirmation: `REMOVE ${item.instId}` })
     })
@@ -658,6 +697,22 @@ onMounted(() => {
   <div class="sc">
     <PageHeader :title="t('nav.admin.security')">
       <template #actions>
+        <!-- 一键切换交易所：账户卡片 / 标的池 / 持仓全部跟随 -->
+        <div class="seg seg-compact" role="group" :aria-label="t('admin.security.venueSwitchLabel')">
+          <button
+            v-for="v in venueOptions"
+            :key="v.key"
+            type="button"
+            class="disabled:opacity-40 disabled:cursor-not-allowed"
+            :aria-pressed="activeVenue === v.key"
+            :class="{ 'seg-on': activeVenue === v.key }"
+            :disabled="switchingVenue"
+            @click="switchVenue(v.key)"
+          >
+            <Loader2 v-if="switchingVenue && activeVenue !== v.key" :size="12" class="animate-spin shrink-0" />
+            <span>{{ v.label }}</span>
+          </button>
+        </div>
         <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
           {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.optDemo') }}
         </span>
@@ -832,8 +887,8 @@ onMounted(() => {
           </div>
         </SettingsSection>
 
-        <!-- OKX 接入凭证 -->
-        <SettingsSection :title="t('admin.security.credsTitle')" :icon="KeyRound">
+        <!-- OKX 接入凭证（仅当前生效所是 OKX 时显示） -->
+        <SettingsSection v-if="showOkxCard" :title="t('admin.security.credsTitle')" :icon="KeyRound">
           <div class="sc-venues">
             <article class="sc-venue-card">
               <header class="sc-venue-head">
@@ -934,7 +989,7 @@ onMounted(() => {
         </SettingsSection>
 
         <!-- OKX 行情健康 -->
-        <SettingsSection :title="t('admin.security.healthTitle')" :icon="Activity">
+        <SettingsSection v-if="showOkxCard" :title="t('admin.security.healthTitle')" :icon="Activity">
           <template #actions>
             <span class="badge" :class="healthAllOk ? 'badge-up' : 'badge-warn'">
               {{ healthAllOk ? t('admin.security.healthOk') : t('admin.security.healthDegraded') }}
@@ -966,8 +1021,8 @@ onMounted(() => {
           </div>
         </SettingsSection>
 
-        <!-- 币安接入凭证与资金档位 -->
-        <SettingsSection :title="t('admin.security.binanceCredsTitle')" :icon="KeyRound">
+        <!-- 币安接入凭证与资金档位（仅当前生效所是币安时显示） -->
+        <SettingsSection v-if="showBinanceCard" :title="t('admin.security.binanceCredsTitle')" :icon="KeyRound">
           <div class="sc-venues">
             <article class="sc-venue-card">
               <header class="sc-venue-head">
@@ -1056,7 +1111,7 @@ onMounted(() => {
         </SettingsSection>
 
         <!-- 币安行情健康容灾 -->
-        <SettingsSection :title="t('admin.security.binanceHealthTitle')" :icon="Activity">
+        <SettingsSection v-if="showBinanceCard" :title="t('admin.security.binanceHealthTitle')" :icon="Activity">
           <template #actions>
             <span class="badge" :class="binanceHealth.connected ? 'badge-up' : 'badge-warn'">
               {{ binanceHealth.connected ? t('admin.security.binanceConnected') : t('admin.security.binanceNotConnected') }}
@@ -1266,6 +1321,10 @@ onMounted(() => {
 
         <SettingsSection :title="t('admin.security.poolTitle')" :icon="Layers">
           <template #actions>
+            <!-- 明示正在编辑哪一份池：两所池互相独立，误改另一所会直接影响实盘 -->
+            <span class="badge badge-accent mono">
+              {{ activeVenue === 'binance' ? t('admin.security.venueBinance') : t('admin.security.venueOkx') }}
+            </span>
             <input
               v-model="newInstId"
               :aria-label="t('admin.security.instAria')"
