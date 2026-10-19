@@ -504,11 +504,23 @@ def admin_okx_runtime(x_astra_session: str | None = Header(default=None, alias="
 @router.get("/api/v1/admin/okx/account-snapshot")
 def admin_okx_account_snapshot(
     x_astra_admin_token: str | None = Header(default=None),
-    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")
+    x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
+    venue: str | None = Query(default="okx"),
 ) -> dict[str, Any]:
     require_admin_header(x_astra_admin_token, x_astra_session)
     from scripts.okx_runtime import current_environment
     env = current_environment()
+
+    # 直接调用（测试/内部）时 venue 可能是 Query 对象或 None，统一归一为字符串；
+    # FastAPI 路由下 `?venue=binance` 才是真正的按所分流开关。
+    venue_raw = venue if isinstance(venue, str) else "okx"
+    venue_key = str(venue_raw).strip().lower() or "okx"
+    if venue_key not in ("okx", "binance"):
+        raise HTTPException(status_code=400, detail="venue 只允许 okx 或 binance")
+
+    # ── 币安持仓快照：与 OKX 分流，避免切换所后仍显示 OKX 的「未配置」提示 ──
+    if venue_key == "binance":
+        return _binance_account_snapshot(env)
 
     combined_positions: list[dict[str, Any]] = []
     combined_orders: list[dict[str, Any]] = []
@@ -544,6 +556,50 @@ def admin_okx_account_snapshot(
         "positions": combined_positions,
         "orders": combined_orders,
         "venue_errors": venue_errors,
+        "captured_at_ms": int(time.time() * 1000),
+    }
+
+
+def _binance_account_snapshot(env: Any) -> dict[str, Any]:
+    """币安持仓快照（应急风控与持仓页「当前活动持仓与挂单快照」按所分流）。
+
+    币安走 BinanceTradingAdapter 的归一化持仓（`positions()` 已补 venue/instId/
+    posSide/upl/margin_mode 等 OKX 同构字段）。币安无 OKX 的「平仓 intent 令牌」
+    机制，故挂单与 close_token 均不提供（快照页仅只读展示，应急平仓仍走 OKX）。
+    """
+    try:
+        from astra_backend.exchanges.registry import get_adapter
+        adapter = get_adapter("binance", env.mode)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"币安适配器解析失败: {type(exc).__name__}: {exc}") from exc
+
+    try:
+        from astra_backend.exchanges.registry import venue_credentials
+        ak, sk = venue_credentials("binance", env.mode)
+    except Exception:
+        ak, sk = "", ""
+
+    if not (ak and sk):
+        raise HTTPException(
+            status_code=503,
+            detail=f"BINANCE {str(env.mode).upper()} API Key/Secret 未配置，请在后台「账户接入」录入后重试（系统未接入，禁止交易）")
+
+    positions: list[dict[str, Any]] = []
+    try:
+        for p in adapter.exchange.positions():
+            p_copy = dict(p)
+            p_copy.setdefault("venue", "binance")
+            positions.append(p_copy)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"币安持仓读取失败: {type(exc).__name__}: {exc}") from exc
+
+    return {
+        "environment": env.mode,
+        "environment_id": f"binance:{env.mode}",
+        "credential_source": "binance-adapter",
+        "positions": positions,
+        "orders": [],
+        "venue_errors": {},
         "captured_at_ms": int(time.time() * 1000),
     }
 

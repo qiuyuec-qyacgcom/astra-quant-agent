@@ -109,6 +109,52 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(len(out["positions"]), 1)
 
 
+class BinanceSnapshotRouteTest(unittest.TestCase):
+    """币安持仓快照分流（应急风控与持仓页切换所后按 venue 查询对应所）。"""
+
+    def setUp(self):
+        p = patch.object(R, "require_admin_header")
+        self.auth = p.start()
+        self.addCleanup(p.stop)
+        p2 = patch("scripts.okx_runtime.current_environment",
+                   return_value=types.SimpleNamespace(mode="live", configured=True,
+                                                      simulated=False, fingerprint="FP-9"))
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    def test_invalid_venue_is_400(self):
+        with self.assertRaises(HTTPException) as ctx:
+            R.admin_okx_account_snapshot(None, None, venue="gate")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_binance_unconfigured_is_503_with_binance_wording(self):
+        """币安未配凭证 ⇒ 503，文案必须指向 BINANCE 而非 OKX。"""
+        with patch("astra_backend.exchanges.registry.get_adapter"), \
+             patch("astra_backend.exchanges.registry.venue_credentials",
+                   return_value=("", "")):
+            with self.assertRaises(HTTPException) as ctx:
+                R.admin_okx_account_snapshot(None, None, venue="binance")
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIn("BINANCE", ctx.exception.detail)
+        self.assertNotIn("OKX", ctx.exception.detail, "币安分流不得再显示 OKX 文案")
+
+    def test_binance_positions_are_returned_with_venue_tag(self):
+        """已配凭证 ⇒ 返回币安归一化持仓，且补 venue=binance。"""
+        adapter = MagicMock()
+        adapter.exchange.positions.return_value = [
+            {"instId": "BTCUSDT", "posSide": "long", "upl": "1.5"},
+        ]
+        with patch("astra_backend.exchanges.registry.get_adapter",
+                   return_value=adapter), \
+             patch("astra_backend.exchanges.registry.venue_credentials",
+                   return_value=("ak", "sk")):
+            out = R.admin_okx_account_snapshot(None, None, venue="binance")
+        self.assertEqual(out["environment_id"], "binance:live")
+        self.assertEqual(len(out["positions"]), 1)
+        self.assertEqual(out["positions"][0]["venue"], "binance")
+        self.assertEqual(out["positions"][0]["instId"], "BTCUSDT")
+
+
 class VenueAccountsRouteTest(unittest.TestCase):
     def setUp(self):
         p = patch.object(R, "require_admin_header")
@@ -134,12 +180,15 @@ class VenueAccountsRouteTest(unittest.TestCase):
     def test_valid_environment_aggregates_okx(self):
         sentinel = {"OKX汇总": True}
         with patch.object(R, "_venue_accounts_okx", return_value={"status": "ready"}) as a, \
+             patch.object(R, "_venue_accounts_binance", return_value={"status": "unavailable"}) as b, \
              patch("astra_backend.portfolio_aggregator.aggregate_venue_accounts",
                    return_value=sentinel) as agg:
             out = R.venue_accounts("live", None, None)
-        self.assertEqual(list(out["venues"]), ["okx"])
+        # 币安接入后 venues_map 恒含两所（okx + binance）
+        self.assertEqual(list(out["venues"]), ["okx", "binance"])
         self.assertIs(out["portfolio_summary"], sentinel, "汇总来自聚合器（不自己算）")
         self.assertEqual(a.call_args.args[0], "live")
+        self.assertEqual(b.call_args.args[0], "live")
         self.assertEqual(out["environment"], "live")
         self.assertTrue(self.auth.called)
         self.assertEqual(out["environment"], "live")

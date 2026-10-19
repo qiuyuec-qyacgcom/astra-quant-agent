@@ -144,6 +144,10 @@ async function switchVenue(target: 'okx' | 'binance') {
     toast.ok(res?.message || t('admin.security.toastVenueSwitched', undefined, { venue: label }))
     // 全量重载：本金、标的池、持仓都要立刻换成新所的数据
     await loadAll()
+    // 已打开过应急风控页时，持仓快照要立刻换成新所（否则仍显示旧所 OKX 的「未配置」提示）
+    if (positionsLoadedOnce.value) {
+      await loadPositions()
+    }
   } catch (e: any) {
     toast.err(t('admin.security.errVenueSwitch', undefined, { msg: e?.message || e }))
   } finally {
@@ -422,7 +426,8 @@ async function loadPositions() {
   snapshotState.value = t('admin.security.loadingPositions')
   snapshotError.value = false
   try {
-    const d = await api('/api/v1/admin/okx/account-snapshot')
+    // 按当前生效所分流：切换后持仓快照必须查对应所，不能仍显示 OKX 的「未配置」提示
+    const d = await api(`/api/v1/admin/okx/account-snapshot?venue=${encodeURIComponent(activeVenue.value)}`)
     snapshot.value = d
     snapshotState.value = ''
   } catch (e: any) {
