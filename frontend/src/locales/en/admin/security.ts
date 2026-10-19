@@ -269,6 +269,7 @@ export const enAdminSecurity = {
   errVenueSwitch: 'Switch failed: {msg}',
   binanceName: 'Binance',
   binanceApiLabel: 'USDⓈ-M Perp Direct Sign',
+  binanceApi: 'Binance · USDⓈ-M API',
   binanceReady: 'Connected READY',
   binanceNotReady: 'Not ready',
   binanceHealthTitle: 'Binance Market Health & Failover',

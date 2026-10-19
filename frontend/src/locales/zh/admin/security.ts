@@ -272,6 +272,7 @@ export const zhAdminSecurity = {
   errVenueSwitch: '切换失败：{msg}',
   binanceName: '币安 · Binance',
   binanceApiLabel: 'USDⓈ-M 永续直签',
+  binanceApi: '币安 · USDⓈ-M 接口',
   binanceReady: '已接入 READY',
   binanceNotReady: '未就绪',
   binanceHealthTitle: '币安行情健康容灾',

@@ -569,14 +569,22 @@ const healthUnknownTotal = computed(() =>
 )
 
 // ---- 顶部概览四元指标带 ----
+// 第一项「交易所接入」随 activeVenue 动态切换：切到币安时显示币安的接入状态与档位，
+// 不再固守 OKX 的 READY/LIVE（此前切换所后顶部仍显示 OKX 状态，造成误导）。
+const venueLinked = computed(() =>
+  activeVenue.value === 'binance' ? binanceLinked.value : okxLinked.value,
+)
 const bandFacts = computed(() => {
+  const isBinance = activeVenue.value === 'binance'
   return [
     {
       icon: ShieldCheck,
-      label: t('admin.security.okxApi'),
-      value: okxLinked.value ? t('admin.security.okxReady') : t('admin.security.okxNotReady'),
-      foot: envBadge(runtime.value?.environment),
-      tone: okxLinked.value ? 'is-up' : 'is-down',
+      label: isBinance ? t('admin.security.binanceApi') : t('admin.security.okxApi'),
+      value: venueLinked.value
+        ? (isBinance ? t('admin.security.binanceReady') : t('admin.security.okxReady'))
+        : (isBinance ? t('admin.security.binanceNotReady') : t('admin.security.okxNotReady')),
+      foot: isBinance ? binanceEnv.value.toUpperCase() : envBadge(runtime.value?.environment),
+      tone: venueLinked.value ? 'is-up' : 'is-down',
     },
     {
       icon: Layers,
