@@ -46,14 +46,14 @@ DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard_last_good.json"
 TIER_PROFILES = {
     "tier_1_bluechip": {
         "label": "蓝筹主流",
-        "max_leverage": 5,
+        "max_leverage": 20,
         "base_risk_ratio": 1.0,
         "sl_atr_mult": 1.8,
         "min_vol_24h_usd": 100_000_000,
     },
     "tier_2_momentum": {
         "label": "高弹性动量",
-        "max_leverage": 3,
+        "max_leverage": 20,
         "base_risk_ratio": 0.75,
         "sl_atr_mult": 2.2,
         "min_vol_24h_usd": 20_000_000,
@@ -73,7 +73,7 @@ TIER_PROFILES = {
 # 规格取自 OKX /public/instruments 实时数据；BTC 为 Tier-1 蓝筹（兼全局黑天鹅哨兵基准）。
 # 扩容说明：MAX_CONCURRENT_POSITIONS = len(池) 自动跟随（当前 1）。
 DEFAULT_INSTRUMENTS = [
-    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "risk_per_trade_usd": 0.0},
+    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 20, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 1, "ctVal": 0.01, "tickSz": "0.1", "minSz": "0.01", "risk_per_trade_usd": 0.0},
 ]
 
 
@@ -93,25 +93,24 @@ def derive_instrument_leverage_cap(
     """根据标的分层 (Tier 1 蓝筹 vs Tier 2 动量) 与全局风控杠杆区间动态派生单标的上限。
 
     - Tier 1 (蓝筹 BTC/ETH)：跟随全局上限 MAX_LEVERAGE；
-    - Tier 2 (动量高弹性 SOL/DOGE 等)：在 [MIN_LEVERAGE, MAX_LEVERAGE] 区间内按风险梯度收紧，
-      保证不低于 MIN_LEVERAGE 且不高于 MAX_LEVERAGE。
+    - Tier 2 (动量高弹性 SOL/DOGE 等)：同样跟随全局上限 MAX_LEVERAGE。
+
+    2026-10-19 起取消 tier_2 的 40% 弹性跨度收紧（原 `lo + (hi-lo)*0.4`），
+    用户要求「所有币种统一 20x」：单标的硬上限不再按分层差异化，全部对齐全局上限。
     """
     if min_leverage is None or max_leverage is None:
         try:
             from scripts.risk_constants import MIN_LEVERAGE as _RC_MIN, MAX_LEVERAGE as _RC_MAX
         except Exception:
-            _RC_MIN, _RC_MAX = 2.0, 5.0
+            _RC_MIN, _RC_MAX = 2.0, 20.0
         if min_leverage is None:
             min_leverage = float(os.getenv("ASTRA_MIN_LEVERAGE", "") or _RC_MIN or 2.0)
         if max_leverage is None:
-            max_leverage = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _RC_MAX or 5.0)
+            max_leverage = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _RC_MAX or 20.0)
     lo = max(1.0, float(min_leverage or 2.0))
-    hi = max(lo, float(max_leverage or 5.0))
-    if tier == "tier_1_bluechip":
-        return max(1, int(round(hi)))
-    # 动量币在 [lo, hi] 内取约 40% 的弹性跨度（在默认 2~5x 时刚好为 3x，与出厂基线完美对齐）
-    cap = int(round(lo + (hi - lo) * 0.4))
-    return max(int(round(lo)), min(int(round(hi)), cap))
+    hi = max(lo, float(max_leverage or 20.0))
+    # 所有分层统一跟随全局上限（取消动量币梯度收紧）
+    return max(1, int(round(hi)))
 
 
 def sync_pool_leverage_caps(
@@ -242,7 +241,7 @@ REQUIRED_POOL_FIELDS = ("instId", "name", "ctVal")
 #: 规格（precision/tickSz/minSz）取自币安 USDⓈ-M 永续，**ctVal 恒 1、按币数下单**，
 #: precision 为该所最小下单量 stepSize 的小数位（币安 BTC 永续为 0.001 ⇒ 3）。
 BINANCE_DEFAULT_INSTRUMENTS = [
-    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 12, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.1", "minSz": "0.001", "risk_per_trade_usd": 0.0},
+    {"instId": "BTC-USDT-SWAP", "name": "BTC", "type": "crypto", "ccy": "BTC", "tier": "tier_1_bluechip", "max_leverage": 20, "sl_atr_mult": 1.8, "base_sz": 1, "precision": 3, "ctVal": 1.0, "tickSz": "0.1", "minSz": "0.001", "risk_per_trade_usd": 0.0},
 ]
 
 
@@ -372,9 +371,9 @@ def load_instruments(venue: Any = None) -> list[dict[str, Any]]:
     try:
         from scripts.risk_constants import MIN_LEVERAGE as _RC_MIN, MAX_LEVERAGE as _RC_MAX
     except Exception:
-        _RC_MIN, _RC_MAX = 2.0, 5.0
+        _RC_MIN, _RC_MAX = 2.0, 20.0
     _cur_min = float(os.getenv("ASTRA_MIN_LEVERAGE", "") or _RC_MIN or 2.0)
-    _cur_max = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _RC_MAX or 5.0)
+    _cur_max = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _RC_MAX or 20.0)
     if _cur_min > _cur_max:
         _cur_min = _cur_max
 
@@ -384,8 +383,9 @@ def load_instruments(venue: Any = None) -> list[dict[str, Any]]:
             item["sl_atr_mult"] = TIER_PROFILES[item["tier"]]["sl_atr_mult"]
         tier = item["tier"]
         cur_cap = item.get("max_leverage")
-        # 兼容自适应：若池内上限低于当前全局下限、或高于全局上限、或蓝筹未跟随全局上限，按当前风控区间派生
-        if cur_cap is None or cur_cap < _cur_min or cur_cap > _cur_max or (tier == "tier_1_bluechip" and cur_cap != int(round(_cur_max))):
+        # 兼容自适应：若池内上限低于当前全局下限、或高于全局上限、或未跟随全局上限，按当前风控区间派生。
+        # 2026-10-19 起取消分层梯度：所有 tier 一律跟随全局上限（原仅 tier_1 蓝筹强制跟随）。
+        if cur_cap is None or cur_cap < _cur_min or cur_cap > _cur_max or cur_cap != int(round(_cur_max)):
             item["max_leverage"] = derive_instrument_leverage_cap(tier, min_leverage=_cur_min, max_leverage=_cur_max)
     _POOL_STATE.update({
         "status": "ok" if not dropped else "invalid",

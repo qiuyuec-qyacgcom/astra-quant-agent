@@ -260,7 +260,7 @@ def admin_risk_update(payload: RiskConfigUpdate, x_astra_session: str | None = H
         from scripts.instrument_pool import sync_pool_leverage_caps
         cur_v = risk_config.current_values()
         _sync_min = float(env_updates.get("ASTRA_MIN_LEVERAGE", cur_v.get("ASTRA_MIN_LEVERAGE", 2.0)))
-        _sync_max = float(env_updates.get("ASTRA_MAX_LEVERAGE", cur_v.get("ASTRA_MAX_LEVERAGE", 5.0)))
+        _sync_max = float(env_updates.get("ASTRA_MAX_LEVERAGE", cur_v.get("ASTRA_MAX_LEVERAGE", 20.0)))
         sync_pool_leverage_caps(min_leverage=_sync_min, max_leverage=_sync_max)
     except Exception:
         pass
@@ -291,7 +291,7 @@ def admin_risk_reset(payload: RiskResetRequest, x_astra_session: str | None = He
         from scripts.instrument_pool import sync_pool_leverage_caps
         cur_v = risk_config.current_values()
         sync_pool_leverage_caps(min_leverage=float(cur_v.get("ASTRA_MIN_LEVERAGE", 2.0)),
-                                max_leverage=float(cur_v.get("ASTRA_MAX_LEVERAGE", 5.0)))
+                                max_leverage=float(cur_v.get("ASTRA_MAX_LEVERAGE", 20.0)))
     except Exception:
         pass
     audit_record("risk.config.reset", "success", {"actor": actor["username"]})

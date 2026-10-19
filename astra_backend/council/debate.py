@@ -303,9 +303,9 @@ def execute_council_debate(load_config: Callable[[], Dict[str, Any]], resolve_se
         try:
             from scripts.risk_constants import MAX_LEVERAGE as _ASTRA_MAX_LEVERAGE, MIN_LEVERAGE as _ASTRA_MIN_LEVERAGE
         except Exception:
-            _ASTRA_MAX_LEVERAGE = 5.0
+            _ASTRA_MAX_LEVERAGE = 20.0
             _ASTRA_MIN_LEVERAGE = 2.0
-    _ASTRA_MAX_LEVERAGE = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _ASTRA_MAX_LEVERAGE or 5.0)
+    _ASTRA_MAX_LEVERAGE = float(os.getenv("ASTRA_MAX_LEVERAGE", "") or _ASTRA_MAX_LEVERAGE or 20.0)
     _ASTRA_MIN_LEVERAGE = float(os.getenv("ASTRA_MIN_LEVERAGE", "") or _ASTRA_MIN_LEVERAGE or 2.0)
     if _ASTRA_MIN_LEVERAGE > _ASTRA_MAX_LEVERAGE:
         _ASTRA_MIN_LEVERAGE = _ASTRA_MAX_LEVERAGE

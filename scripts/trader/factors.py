@@ -67,7 +67,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         "minSz": min_sz,
         # 标的分级信息随因子包下发，供拦截插件与提示词按「层级」而非写死币种名做通用判断
         "tier": item.get("tier", "tier_2_momentum"),
-        "max_leverage": item.get("max_leverage", 3),
+        "max_leverage": item.get("max_leverage", 20),
         "sl_atr_mult": item.get("sl_atr_mult", 2.2),
         "price": 0.0,
         "change24h": 0.0,

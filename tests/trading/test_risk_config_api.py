@@ -231,20 +231,28 @@ class RiskConfigApiTests(unittest.TestCase):
         self.assertIn("未知风控预设套件", res.json()["detail"])
 
     def test_pool_leverage_caps_synced_on_risk_update(self):
-        """风控管理页保存杠杆区间（如 5~7x）时，标的池必须同步刷新 max_leverage（蓝筹 7x，动量 6x）。"""
+        """风控管理页保存杠杆区间（如 5~7x）时，标的池必须同步刷新 max_leverage（所有 tier 跟随全局上限）。"""
         from unittest.mock import patch
         import scripts.instrument_pool as ip
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_1_bluechip", 2.0, 5.0), 5)
-        self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum", 2.0, 5.0), 3)
+        self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum", 2.0, 5.0), 5)
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_1_bluechip", 5.0, 7.0), 7)
-        self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum", 5.0, 7.0), 6)
+        self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum", 5.0, 7.0), 7)
 
         # ⚠️ 夹具不再抄**运行态**池文件（2026-09-30）：那份文件可被后台随时增删
         # （本次收敛 8 → 6 就把 SUI 删掉了，本用例当场 StopIteration）。改用出厂默认清单
         # —— 它有独立门禁（tests/audit/test_audit_config_p4_cleanup.py::DefaultRosterIntegrityTests）
         # 保证合法且含 BTC，是**稳定的**夹具来源。
+        # 2026-10-19：默认清单已收敛为单 BTC（蓝筹），为覆盖「动量币同样跟随上限」，
+        # 追加一条 SOL 动量币进夹具池。
         sandbox_pool = Path(self.temp.name) / "instrument_pool.json"
-        sandbox_pool.write_text(json.dumps({"version": 1, "instruments": ip.DEFAULT_INSTRUMENTS},
+        roster = [dict(i) for i in ip.DEFAULT_INSTRUMENTS] + [
+            {"instId": "SOL-USDT-SWAP", "name": "SOL", "type": "crypto", "ccy": "SOL",
+             "tier": "tier_2_momentum", "max_leverage": 7, "sl_atr_mult": 2.2,
+             "base_sz": 1, "precision": 2, "ctVal": 1.0, "tickSz": "0.01", "minSz": "0.01",
+             "risk_per_trade_usd": 0.0},
+        ]
+        sandbox_pool.write_text(json.dumps({"version": 1, "instruments": roster},
                                            ensure_ascii=False, indent=2), encoding="utf-8")
 
         with patch.object(ip, "POOL_FILE", sandbox_pool):
@@ -257,15 +265,15 @@ class RiskConfigApiTests(unittest.TestCase):
             btc = next(item for item in pool if item["instId"] == "BTC-USDT-SWAP")
             sol = next(item for item in pool if item["instId"] == "SOL-USDT-SWAP")
             self.assertEqual(btc["max_leverage"], 7)
-            self.assertEqual(sol["max_leverage"], 6)
+            self.assertEqual(sol["max_leverage"], 7)
 
             res_reset = self.client.post("/api/v1/admin/risk/reset", headers=headers, json={"confirmation": "RESET RISK"})
             self.assertEqual(res_reset.status_code, 200)
             pool_reset = ip.load_instruments()
             btc_reset = next(item for item in pool_reset if item["instId"] == "BTC-USDT-SWAP")
             sol_reset = next(item for item in pool_reset if item["instId"] == "SOL-USDT-SWAP")
-            self.assertEqual(btc_reset["max_leverage"], 5)
-            self.assertEqual(sol_reset["max_leverage"], 3)
+            self.assertEqual(btc_reset["max_leverage"], 20)
+            self.assertEqual(sol_reset["max_leverage"], 20)
 
 
 class PromptRiskContractTests(unittest.TestCase):

@@ -122,10 +122,10 @@ class LeverageCapTests(unittest.TestCase):
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_1_bluechip",
                                                            min_leverage=2, max_leverage=7), 7)
 
-    def test_momentum_takes_forty_percent_of_the_span(self):
-        # 出厂基线 2~5 ⇒ 2 + 3*0.4 = 3.2 ⇒ round → 3（与 DEFAULT_INSTRUMENTS 对齐）
+    def test_momentum_follows_the_global_ceiling(self):
+        # 2026-10-19 起取消 tier_2 梯度：动量币单标的硬上限同样跟随全局上限（原 2~5 ⇒ 3x）
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum",
-                                                           min_leverage=2, max_leverage=5), 3)
+                                                           min_leverage=2, max_leverage=5), 5)
 
     def test_momentum_never_drops_below_the_floor(self):
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum",
@@ -143,10 +143,10 @@ class LeverageCapTests(unittest.TestCase):
                                                            min_leverage=5, max_leverage=1), 5)
 
     def test_a_zero_bound_is_falsy_and_falls_back_to_the_factory_band(self):
-        # `float(min_leverage or 2.0)` —— **0 是 falsy** ⇒ 回落到 2.0/5.0，
+        # `float(min_leverage or 2.0)` —— **0 是 falsy** ⇒ 回落到 2.0/20.0，
         # 不是"把下限抬到 1"。要显式拿到 1 必须传 1。
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum",
-                                                           min_leverage=0, max_leverage=0), 3)
+                                                           min_leverage=0, max_leverage=0), 20)
         self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum",
                                                            min_leverage=1, max_leverage=1), 1)
 
@@ -161,7 +161,7 @@ class LeverageCapTests(unittest.TestCase):
         self.assertIsInstance(ip.derive_instrument_leverage_cap("tier_2_momentum"), int)
 
     def test_an_unimportable_risk_constants_falls_back_to_the_factory_band(self):
-        # ★ 第 94 行 —— `from scripts.risk_constants import ...` 抛 ⇒ (2.0, 5.0)。
+        # ★ 第 94 行 —— `from scripts.risk_constants import ...` 抛 ⇒ (2.0, 20.0)。
         # ⚠️ 环境变量优先于回落常量（`os.getenv("ASTRA_MIN_LEVERAGE")`）⇒
         #    必须把它清掉，否则会读到**别的测试留下的**值（本刀在全量里就因此在
         #    单独跑绿、合起来红 —— 典型的测试顺序依赖）。
@@ -169,7 +169,7 @@ class LeverageCapTests(unittest.TestCase):
                  if k not in ("ASTRA_MIN_LEVERAGE", "ASTRA_MAX_LEVERAGE")}
         with patch.dict(sys.modules, {"scripts.risk_constants": None}), \
              patch.dict(os.environ, clean, clear=True):
-            self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum"), 3)
+            self.assertEqual(ip.derive_instrument_leverage_cap("tier_2_momentum"), 20)
 
 
 # ───────────────────── 候选评分 ─────────────────────
@@ -418,13 +418,13 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=1)])
         with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
-        self.assertEqual(out[0]["max_leverage"], 3)
+        self.assertEqual(out[0]["max_leverage"], 5)
 
     def test_a_cap_above_the_global_ceiling_is_realigned(self):
         self._write_pool([self._item(tier="tier_2_momentum", max_leverage=99)])
         with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
-        self.assertEqual(out[0]["max_leverage"], 3)
+        self.assertEqual(out[0]["max_leverage"], 5)
 
     def test_a_bluechip_not_tracking_the_ceiling_is_realigned(self):
         self._write_pool([self._item(tier="tier_1_bluechip", max_leverage=2)])
@@ -433,10 +433,10 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
         self.assertEqual(out[0]["max_leverage"], 5)
 
     def test_a_compliant_cap_is_left_untouched(self):
-        self._write_pool([self._item(tier="tier_2_momentum", max_leverage=3)])
+        self._write_pool([self._item(tier="tier_2_momentum", max_leverage=5)])
         with patch.dict(os.environ, {"ASTRA_MIN_LEVERAGE": "2", "ASTRA_MAX_LEVERAGE": "5"}):
             out = ip.load_instruments()
-        self.assertEqual(out[0]["max_leverage"], 3)
+        self.assertEqual(out[0]["max_leverage"], 5)
 
     def test_a_missing_tier_and_sl_mult_are_backfilled(self):
         item = self._item()
@@ -463,7 +463,7 @@ class LeverageRealignTests(_Sandbox, unittest.TestCase):
             for key in ("ASTRA_MIN_LEVERAGE", "ASTRA_MAX_LEVERAGE"):
                 os.environ.pop(key, None)
             out = ip.load_instruments()
-        self.assertEqual(out[0]["max_leverage"], 3)
+        self.assertEqual(out[0]["max_leverage"], 20)
 
 
 # ───────────────────── 锁与写入 ─────────────────────
@@ -753,7 +753,7 @@ class SyncPoolLeverageCapsTests(_Sandbox, unittest.TestCase):
                                      tier="tier_2_momentum", max_leverage=99)])
         out = ip.sync_pool_leverage_caps(min_leverage=2, max_leverage=5)
         caps = {i["name"]: i["max_leverage"] for i in out}
-        self.assertEqual(caps, {"BTC": 5, "SOL": 3})
+        self.assertEqual(caps, {"BTC": 5, "SOL": 5})
 
     def test_a_missing_tier_is_derived_from_the_inst_id(self):
         item = self._item(instId="SOL-USDT-SWAP", name="SOL")
@@ -761,7 +761,7 @@ class SyncPoolLeverageCapsTests(_Sandbox, unittest.TestCase):
         self._write_pool([item])
         out = ip.sync_pool_leverage_caps(min_leverage=2, max_leverage=5)
         self.assertEqual(out[0]["tier"], "tier_2_momentum")
-        self.assertEqual(out[0]["max_leverage"], 3)
+        self.assertEqual(out[0]["max_leverage"], 5)
 
 
 if __name__ == "__main__":
