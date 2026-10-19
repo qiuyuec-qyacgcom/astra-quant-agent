@@ -80,22 +80,27 @@ export function deriveBinanceLinked(mx: any, environment: 'demo' | 'live'): bool
 export function deriveMxHealthChips(mx: MxLike | null | undefined) {
   const venues = mx?.health?.venues
   if (!venues) return null
-  return Object.entries(venues).map(([name, v]: [string, any]) => {
-    const ok = (v.ok || []).length
-    const failed = Array.isArray(v.failed) ? v.failed.length : Object.keys(v.failed || {}).length
-    const unknown = (v.unknown || []).length
-    const total = typeof v.total === 'number' && v.total > 0 ? v.total : ok + failed
-    return {
-      name,
-      ok,
-      failed,
-      unknown,
-      total,
-      avg_ms: v.avg_ms || 0,
-      testnet: !!v.testnet,
-      allOk: unknown === 0 && total > 0 && ok === total,
-    }
-  })
+  // 只对「有逐标的 ok/failed 名单」的所生成 chip。币安等仅做「连通/延迟/凭证」的所
+  // 没有 `ok` 名单（后端 design：不做逐标的 ok/failed 名单），此前也被遍历进来
+  // 渲染成 `0/0 币` —— 那是误导，必须跳过。
+  return Object.entries(venues)
+    .filter(([, v]: [string, any]) => Array.isArray(v?.ok) || Array.isArray(v?.failed))
+    .map(([name, v]: [string, any]) => {
+      const ok = (v.ok || []).length
+      const failed = Array.isArray(v.failed) ? v.failed.length : Object.keys(v.failed || {}).length
+      const unknown = (v.unknown || []).length
+      const total = typeof v.total === 'number' && v.total > 0 ? v.total : ok + failed
+      return {
+        name,
+        ok,
+        failed,
+        unknown,
+        total,
+        avg_ms: v.avg_ms || 0,
+        testnet: !!v.testnet,
+        allOk: unknown === 0 && total > 0 && ok === total,
+      }
+    })
 }
 
 /** OKX 资金档位文字（三态：live / demo / 其它一律 unknown）。 */

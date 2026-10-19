@@ -86,7 +86,10 @@ try {
     m.deriveMxHealthChips({health:{}}),
     m.deriveMxHealthChips({health:{venues:{}}}),
     m.deriveMxHealthChips({health:{venues:{okx:{ok:[1,2],failed:{a:1,b:2},avg_ms:30,testnet:true}}}}),
-    m.deriveMxHealthChips({health:{venues:{okx:{}}}}),
+    // 有逐标的 ok 名单（空数组）但 avg_ms/testnet 缺省 ⇒ 默认值兜底。
+    m.deriveMxHealthChips({health:{venues:{okx:{ok:[]}}}}),
+    // 混入币安（仅连通/延迟，无 ok/failed 名单）⇒ 被过滤，只剩 okx 一个 chip。
+    m.deriveMxHealthChips({health:{venues:{okx:{ok:['BTC'],failed:[],total:1},binance:{avg_ms:12,connected:true}}}}),
   ];
   out.okxenv = [
     m.okxEnvText('live', t), m.okxEnvText('demo', t),
@@ -333,6 +336,12 @@ class NodeOracleTest(unittest.TestCase):
         self.assertEqual(row["total"], 0)
         self.assertEqual(row["avg_ms"], 0, "avg_ms 缺省 0（不是 None）")
         self.assertIs(row["testnet"], False)
+
+    def test_chips_filters_venues_without_roster(self):
+        """币安只做连通/延迟/凭证，无逐标的 ok/failed 名单 ⇒ 必须被过滤，不得渲染成 0/0。"""
+        rows = self.data["chips"][6]
+        self.assertEqual([r["name"] for r in rows], ["okx"],
+                         "无 ok/failed 名单的所（币安）应被跳过，仅保留 okx")
 
     def test_okx_env_text_case_sensitive(self):
         got = self.data["okxenv"]
