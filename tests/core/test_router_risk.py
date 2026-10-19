@@ -424,6 +424,77 @@ class AddInstrumentTests(_Base):
         self.assertEqual(out["count"], 2)
         self.assertEqual(self._rec()[0], "instrument.add")
 
+    def test_venue_is_read_from_query_not_body(self):
+        # 前端通过 `?venue=` query string 传交易所（body 只含 `{ inst_id }`）。
+        # 若 `venue` 被声明成 `Body`，FastAPI 会把整个 body 当成「必须同时含
+        # payload + venue 两个字段」的对象 → 前端只发 inst_id 时 422（标的加不进去）。
+        # 锁定：`venue` 的默认值必须是 fastapi.Query 实例。
+        import inspect
+        from fastapi.params import Query as FastAPIQuery
+        sig = inspect.signature(A.add_admin_instrument)
+        default = sig.parameters["venue"].default
+        self.assertIsInstance(default, FastAPIQuery,
+                              "add_admin_instrument 的 venue 必须是 Query 参数"
+                              "（前端经 ?venue= 传），不能是 Body")
+
+    def test_binance_venue_routes_through_binance_lookup(self):
+        # 币安分支必须走 _binance_public_instruments（公开接口），而非 okx.instruments。
+        self._start(mock.patch.object(
+            A, "_binance_public_instruments",
+            return_value=[{"instId": "ETH-USDT-SWAP", "baseCcy": "ETH",
+                           "settleCcy": "USDT", "state": "live", "ctVal": "1",
+                           "lotSz": "0.001", "minSz": "0.001", "tickSz": "0.01"}]))
+        self._start(mock.patch.object(
+            A, "from_instrument",
+            return_value={"instId": "ETH-USDT-SWAP", "name": "ETH"}))
+        self.mutate.side_effect = lambda fn: fn([{"instId": "BTC-USDT-SWAP"}])
+        out = A.add_admin_instrument(InstrumentAddRequest(inst_id="ETH-USDT-SWAP"),
+                                     venue="binance", x_astra_admin_token="tok")
+        self.assertEqual(out["added"]["instId"], "ETH-USDT-SWAP")
+        self.okx.instruments.assert_not_called()
+        self.assertEqual(self._rec()[2]["venue"], "binance")
+
+
+class _BinancePublicInstrumentsTests(_Base):
+    """`_binance_public_instruments` 把 InstrumentSpec 映射成 add 校验需要的 OKX 口径 dict。"""
+
+    def _spec(self, status="trading", **kw):
+        from astra_backend.exchanges.base import InstrumentSpec
+        defaults = dict(venue="binance", inst_id="ETH-USDT-SWAP", base="ETH",
+                        tick_size=0.01, step_size=0.001, ct_val=1.0, min_size=0.001,
+                        status=status)
+        defaults.update(kw)
+        return InstrumentSpec(**defaults)
+
+    def test_maps_spec_fields_to_okx_shape(self):
+        spec = self._spec()
+        adapter = mock.Mock()
+        adapter.fetch_instrument_spec.return_value = spec
+        with mock.patch("astra_backend.exchanges.binance.BinancePublicAdapter",
+                        return_value=adapter):
+            rows = A._binance_public_instruments("ETH-USDT-SWAP")
+        self.assertEqual(rows[0]["baseCcy"], "ETH")
+        self.assertEqual(rows[0]["state"], "live")
+        self.assertEqual(rows[0]["lotSz"], "0.001")
+        self.assertEqual(rows[0]["tickSz"], "0.01")
+
+    def test_non_trading_spec_maps_to_closed_not_live(self):
+        # 已下架/暂停的币安合约必须被 add 校验（state != live）拒绝，不能硬编码 live。
+        spec = self._spec(status="closed")
+        adapter = mock.Mock()
+        adapter.fetch_instrument_spec.return_value = spec
+        with mock.patch("astra_backend.exchanges.binance.BinancePublicAdapter",
+                        return_value=adapter):
+            rows = A._binance_public_instruments("ETH-USDT-SWAP")
+        self.assertEqual(rows[0]["state"], "closed")
+
+    def test_no_spec_returns_empty(self):
+        adapter = mock.Mock()
+        adapter.fetch_instrument_spec.return_value = None
+        with mock.patch("astra_backend.exchanges.binance.BinancePublicAdapter",
+                        return_value=adapter):
+            self.assertEqual(A._binance_public_instruments("XXX-USDT-SWAP"), [])
+
 
 class DeleteInstrumentTests(_Base):
     def setUp(self):

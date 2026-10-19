@@ -126,9 +126,11 @@ def _binance_public_instruments(inst_id: str) -> list[dict[str, Any]]:
             return []
         return [{
             "instId": inst_id,
-            "baseCcy": getattr(spec, "base_ccy", None) or inst_id.split("-", 1)[0],
+            "baseCcy": getattr(spec, "base", None) or inst_id.split("-", 1)[0],
             "settleCcy": "USDT",
-            "state": "live",
+            # 币安 InstrumentSpec.status 是 "trading"/"closed"，映射到 OKX 口径的
+            # "live" 供 add 校验（`state != "live"` ⇒ 400）。非 trading 的合约必须被拒。
+            "state": "live" if getattr(spec, "status", None) == "trading" else "closed",
             "ctVal": "1",
             "lotSz": str(getattr(spec, "step_size", "") or "1"),
             "minSz": str(getattr(spec, "min_size", "") or "1"),
@@ -514,7 +516,7 @@ def admin_instruments(
 @router.post("/api/v1/admin/instruments")
 def add_admin_instrument(
     payload: InstrumentAddRequest,
-    venue: str = Body(default="", description="目标标的池所属交易所：okx | binance；留空=当前生效所"),
+    venue: str = Query(default="", description="目标标的池所属交易所：okx | binance；留空=当前生效所"),
     x_astra_admin_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     refresh_settings()
