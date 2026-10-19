@@ -2056,7 +2056,8 @@ class BinanceEnvironment:
 
     凭证读取优先级与 ``registry.venue_credentials`` 一致：
     ``BINANCE_{MODE}_API_KEY``（demo/live 分档）→ 回退 ``BINANCE_API_KEY`` 通用档。
-    mode 由 ``ASTRA_BINANCE_ENV`` 决定（demo/live），默认 demo（与 OKX 对齐）。
+    mode 由 ``ASTRA_BINANCE_ENV`` 决定（demo/live）；未显式设置时回退读全站统一档位
+    ``ASTRA_OKX_ENV``（「跟随统一档位」），最后默认 demo（与 OKX 对齐）。
     """
     mode: str
     api_key: str = field(default="", repr=False)
@@ -2086,7 +2087,9 @@ def make_binance_env(values: dict[str, str] | None = None) -> BinanceEnvironment
     for key, value in os.environ.items():
         env.setdefault(key, value)
 
-    mode = str(env.get("ASTRA_BINANCE_ENV") or "demo").strip().lower()
+    # 档位：ASTRA_BINANCE_ENV 显式指定优先；否则回退读全站统一档位 ASTRA_OKX_ENV
+    # （「跟随统一档位」），最后再回退 demo（与 OKX 对齐）。
+    mode = str(env.get("ASTRA_BINANCE_ENV") or env.get("ASTRA_OKX_ENV") or "demo").strip().lower()
     if mode not in {"demo", "live"}:
         mode = "demo"
     prefix = f"BINANCE_{mode.upper()}"

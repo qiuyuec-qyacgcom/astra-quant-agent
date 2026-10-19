@@ -35,7 +35,7 @@ import { useApi } from '../../composables/useApi'
 import { useAuthStore } from '../../stores/auth'
 import { fmtDateTime } from '../../utils/format'
 import {
-  deriveOkxLinked, deriveMxHealthChips, okxEnvText as okxEnvTextOf, envBadge,
+  deriveOkxLinked, deriveBinanceLinked, deriveMxHealthChips, okxEnvText as okxEnvTextOf, envBadge,
 } from './securityLogic'
 import BaseSwitch from '../../components/base/BaseSwitch.vue'
 import BaseDialog from '../../components/base/BaseDialog.vue'
@@ -100,6 +100,9 @@ function openExternal(url: string) {
 // ---- LIVE / DEMO API keys (OKX) ----
 const keys = ref({ live_key: '', live_secret: '', live_pass: '', demo_key: '', demo_secret: '', demo_pass: '' })
 
+// ---- LIVE / DEMO API keys (Binance，两件套无 Passphrase) ----
+const binanceKeys = ref({ live_key: '', live_secret: '', demo_key: '', demo_secret: '' })
+
 // ---- capital ----
 const newCapital = ref<string>('')
 const capitalConfirm = ref<string>('')
@@ -142,7 +145,9 @@ const scaleOutEnabled = ref(true)
 const savingScaleOut = ref(false)
 const venueLatencies = ref<Record<string, number>>({})
 const savingOkx = ref(false)
-const probingVenue = ref<'' | 'okx'>('')
+const probingVenue = ref<'' | 'okx' | 'binance'>('')
+const savingBinance = ref(false)
+const binanceCredViewLive = ref(false)
 const savingUnifiedEnv = ref(false)
 const isUnifiedLive = computed(() => config.value?.editable?.okx_environment === 'live')
 
@@ -204,6 +209,7 @@ async function loadAll() {
     applyRuntime(rt)
     if (cfg?.editable?.okx_environment) {
       okxCredViewLive.value = (cfg.editable.okx_environment === 'live')
+      binanceCredViewLive.value = (cfg.editable.okx_environment === 'live')
     }
     if (cfg?.editable?.order_mode) {
       orderMode.value = (cfg.editable.order_mode === 'limit' ? 'limit' : 'market')
@@ -247,6 +253,25 @@ async function saveEnvironment() {
     toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
   } finally {
     savingOkx.value = false
+  }
+}
+
+async function saveBinanceEnvironment() {
+  savingBinance.value = true
+  try {
+    const body: any = {}
+    if (binanceKeys.value.live_key) body.binance_live_api_key = binanceKeys.value.live_key
+    if (binanceKeys.value.live_secret) body.binance_live_secret_key = binanceKeys.value.live_secret
+    if (binanceKeys.value.demo_key) body.binance_demo_api_key = binanceKeys.value.demo_key
+    if (binanceKeys.value.demo_secret) body.binance_demo_secret_key = binanceKeys.value.demo_secret
+    await api('/api/v1/admin/config', { method: 'PUT', body: JSON.stringify(body) })
+    binanceKeys.value = { live_key: '', live_secret: '', demo_key: '', demo_secret: '' }
+    toast.ok(t('admin.security.toastBinanceCredsSaved'))
+    await loadMx()
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingBinance.value = false
   }
 }
 
@@ -421,7 +446,7 @@ async function loadMx(preserveVenue?: string | Event) {
   }
 }
 
-async function probeVenue(venue: 'okx') {
+async function probeVenue(venue: 'okx' | 'binance') {
   probingVenue.value = venue
   try {
     const isDemo = config.value?.editable?.okx_environment === 'demo'
@@ -432,14 +457,25 @@ async function probeVenue(venue: 'okx') {
       environment: env,
     }
 
-    if (isDemo) {
-      if (keys.value.demo_key.trim()) payload.api_key = keys.value.demo_key.trim()
-      if (keys.value.demo_secret.trim()) payload.secret_key = keys.value.demo_secret.trim()
-      if (keys.value.demo_pass.trim()) payload.passphrase = keys.value.demo_pass.trim()
+    if (venue === 'binance') {
+      // 币安两件套（无 Passphrase）
+      if (isDemo) {
+        if (binanceKeys.value.demo_key.trim()) payload.api_key = binanceKeys.value.demo_key.trim()
+        if (binanceKeys.value.demo_secret.trim()) payload.secret_key = binanceKeys.value.demo_secret.trim()
+      } else {
+        if (binanceKeys.value.live_key.trim()) payload.api_key = binanceKeys.value.live_key.trim()
+        if (binanceKeys.value.live_secret.trim()) payload.secret_key = binanceKeys.value.live_secret.trim()
+      }
     } else {
-      if (keys.value.live_key.trim()) payload.api_key = keys.value.live_key.trim()
-      if (keys.value.live_secret.trim()) payload.secret_key = keys.value.live_secret.trim()
-      if (keys.value.live_pass.trim()) payload.passphrase = keys.value.live_pass.trim()
+      if (isDemo) {
+        if (keys.value.demo_key.trim()) payload.api_key = keys.value.demo_key.trim()
+        if (keys.value.demo_secret.trim()) payload.secret_key = keys.value.demo_secret.trim()
+        if (keys.value.demo_pass.trim()) payload.passphrase = keys.value.demo_pass.trim()
+      } else {
+        if (keys.value.live_key.trim()) payload.api_key = keys.value.live_key.trim()
+        if (keys.value.live_secret.trim()) payload.secret_key = keys.value.live_secret.trim()
+        if (keys.value.live_pass.trim()) payload.passphrase = keys.value.live_pass.trim()
+      }
     }
 
     const res: any = await api('/api/v1/admin/multi-exchange/test-connection', {
@@ -468,6 +504,18 @@ async function probeVenue(venue: 'okx') {
 const okxLinked = computed(() => deriveOkxLinked(runtime.value))
 const mxHealthChips = computed(() => deriveMxHealthChips(mx.value))
 const okxEnvText = computed(() => okxEnvTextOf(config.value?.editable?.okx_environment, t))
+
+// ---- 币安派生 ----
+const binanceEnv = computed<'demo' | 'live'>(() => (isUnifiedLive.value ? 'live' : 'demo'))
+const binanceLinked = computed(() => deriveBinanceLinked(mx.value, binanceEnv.value))
+const binanceHealth = computed(() => {
+  const v = mx.value?.health?.venues?.binance
+  return {
+    avg_ms: v?.avg_ms || 0,
+    connected: v?.connected === true,
+    testnet: !!v?.testnet,
+  }
+})
 
 const healthAllOk = computed(() => {
   const chips = mxHealthChips.value || []
@@ -915,6 +963,124 @@ onMounted(() => {
               <span v-if="h.testnet" class="badge">{{ t('admin.security.sandboxTag') }}</span>
             </div>
             <p v-if="healthUnknownTotal" class="sc-hint pad">{{ t('admin.security.healthUnknownNote') }}</p>
+          </div>
+        </SettingsSection>
+
+        <!-- 币安接入凭证与资金档位 -->
+        <SettingsSection :title="t('admin.security.binanceCredsTitle')" :icon="KeyRound">
+          <div class="sc-venues">
+            <article class="sc-venue-card">
+              <header class="sc-venue-head">
+                <div class="sc-venue-id">
+                  <h3 class="sc-venue-name">{{ t('admin.security.binanceName') }}</h3>
+                  <span class="sc-venue-api">{{ t('admin.security.binanceApiLabel') }}</span>
+                </div>
+                <span class="badge" :class="binanceLinked ? 'badge-up' : 'badge-down'">
+                  {{ binanceLinked ? t('admin.security.binanceReady') : t('admin.security.binanceNotReady') }}
+                </span>
+              </header>
+
+              <div class="kv-row">
+                <span class="sc-venue-env-label">{{ t('admin.security.fundEnv') }}</span>
+                <span class="sc-venue-env-value mono">{{ okxEnvText }}</span>
+              </div>
+
+              <div class="sc-venue-body">
+                <div class="field-stack">
+                  <span class="form-label">{{ t('admin.security.endpointTier') }}</span>
+                  <div class="sc-env-indicator">
+                    <span class="badge mono" :class="isUnifiedLive ? 'badge-warn' : 'badge-accent'">
+                      {{ isUnifiedLive ? t('admin.security.envLive') : t('admin.security.envDemoOkx') }}
+                    </span>
+                    <span class="sc-env-hint">{{ t('admin.security.binanceEnvFollowsUnified') }}</span>
+                  </div>
+                </div>
+
+                <div class="sc-creds">
+                  <div class="sc-creds-header">
+                    <span class="form-label">
+                      {{ (binanceCredViewLive ? t('admin.security.binanceLiveTrio') : t('admin.security.binanceDemoTrio')) }}
+                    </span>
+                    <div class="seg seg-compact" role="group" :aria-label="t('admin.security.binanceCredViewLabel')">
+                      <button
+                        type="button"
+                        :aria-pressed="!binanceCredViewLive"
+                        :class="{ 'seg-on': !binanceCredViewLive }"
+                        @click="binanceCredViewLive = false"
+                      >
+                        <span>{{ t('admin.security.viewDemoCred') }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        :aria-pressed="binanceCredViewLive"
+                        :class="{ 'seg-on': binanceCredViewLive }"
+                        @click="binanceCredViewLive = true"
+                      >
+                        <span>{{ t('admin.security.viewLiveCred') }}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-show="!binanceCredViewLive" class="sc-creds-group">
+                    <input v-model="binanceKeys.demo_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.binanceDemoKeyAria')" />
+                    <input v-model="binanceKeys.demo_secret" type="password" :placeholder="t('admin.security.binancePhApiSecret')" class="field" :aria-label="t('admin.security.binanceDemoSecretAria')" />
+                  </div>
+                  <div v-show="binanceCredViewLive" class="sc-creds-group">
+                    <input v-model="binanceKeys.live_key" type="password" :placeholder="t('admin.security.apiKeyKeep')" class="field" :aria-label="t('admin.security.binanceApiKeyAria')" />
+                    <input v-model="binanceKeys.live_secret" type="password" :placeholder="t('admin.security.binancePhApiSecret')" class="field" :aria-label="t('admin.security.binanceSecretAria')" />
+                  </div>
+                </div>
+
+                <p class="sc-hint"><AlertTriangle :size="11" />{{ t('admin.security.confirmBinanceLiveNote') }}</p>
+              </div>
+
+              <footer class="sc-venue-foot">
+                <span v-if="binanceHealth.avg_ms" class="sc-latency mono num">
+                  <Radar :size="12" />
+                  <span>{{ binanceHealth.avg_ms }}ms</span>
+                </span>
+                <div class="sc-venue-actions">
+                  <button type="button" class="btn btn-quiet btn-sm" :disabled="probingVenue === 'binance'" @click="probeVenue('binance')">
+                    <RefreshCw :size="14" :class="probingVenue === 'binance' ? 'animate-spin shrink-0' : ''" />
+                    <span>{{ probingVenue === 'binance' ? t('admin.security.probing') : t('admin.security.detect') }}</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm" :disabled="savingBinance" @click="saveBinanceEnvironment">
+                    <Loader2 v-if="savingBinance" :size="12" class="animate-spin shrink-0" />
+                    <Save v-else :size="12" />
+                    <span>{{ savingBinance ? t('admin.security.saving') : t('admin.security.binanceSave') }}</span>
+                  </button>
+                </div>
+              </footer>
+            </article>
+          </div>
+        </SettingsSection>
+
+        <!-- 币安行情健康容灾 -->
+        <SettingsSection :title="t('admin.security.binanceHealthTitle')" :icon="Activity">
+          <template #actions>
+            <span class="badge" :class="binanceHealth.connected ? 'badge-up' : 'badge-warn'">
+              {{ binanceHealth.connected ? t('admin.security.binanceConnected') : t('admin.security.binanceNotConnected') }}
+            </span>
+            <button type="button" class="btn btn-quiet btn-sm" @click="loadMx()">
+              <RefreshCw :size="14" />
+              <span>{{ t('admin.security.recheck') }}</span>
+            </button>
+          </template>
+
+          <div class="sc-health">
+            <div class="sc-health-row" :class="{ 'is-ok': binanceHealth.connected }">
+              <span class="sc-health-name">{{ t('admin.security.binanceName') }}</span>
+              <span v-if="binanceHealth.connected && binanceHealth.avg_ms" class="sc-health-stat mono num">
+                {{ t('admin.security.binanceHealthConnected', undefined, { ms: binanceHealth.avg_ms }) }}
+              </span>
+              <span v-else-if="!binanceHealth.connected" class="sc-health-stat mono">
+                {{ t('admin.security.binanceHealthNotConnected') }}
+              </span>
+              <span v-if="binanceHealth.testnet" class="badge">{{ t('admin.security.sandboxTag') }}</span>
+              <span class="badge" :class="binanceLinked ? 'badge-up' : 'badge-warn'">
+                {{ binanceLinked ? t('admin.security.binanceCredConfigured') : t('admin.security.binanceCredNotConfigured') }}
+              </span>
+            </div>
           </div>
         </SettingsSection>
 

@@ -57,6 +57,13 @@ export function deriveOkxLinked(runtime: any): boolean {
   return runtime?.status === 'READY' && runtime?.mode_configured === true
 }
 
+/** 币安是否已接入：当前档位（live/demo）的 API Key 与 Secret 都已配置。 */
+export function deriveBinanceLinked(mx: any, environment: 'demo' | 'live'): boolean {
+  const acct = mx?.accounts_status?.binance?.[environment]
+  if (!acct) return false
+  return acct.has_api_key === true && acct.has_secret === true
+}
+
 /**
  * 交易所健康度 chip。
  *

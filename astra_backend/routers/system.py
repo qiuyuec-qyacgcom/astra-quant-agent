@@ -346,7 +346,7 @@ def admin_config(x_astra_admin_token: str | None = Header(default=None)) -> dict
 def update_admin_config(payload: AdminConfigUpdate, x_astra_admin_token: str | None = Header(default=None), x_astra_session: str | None = Header(default=None, alias="X-Astra-Session")) -> dict[str, Any]:
     refresh_settings()
     data = payload.model_dump(exclude_none=True)
-    sensitive = any(key.startswith("okx_") or key in ("manual_close_enabled",) for key in data)
+    sensitive = any(key.startswith(("okx_", "binance_")) or key in ("manual_close_enabled",) for key in data)
     if sensitive:
         require_superadmin(x_astra_session)
     else:
@@ -374,6 +374,8 @@ def update_admin_config(payload: AdminConfigUpdate, x_astra_admin_token: str | N
         "OKX_LIVE_API_KEY": data.get("okx_live_api_key"), "OKX_LIVE_SECRET_KEY": data.get("okx_live_secret_key"), "OKX_LIVE_PASSPHRASE": data.get("okx_live_passphrase"),
         "OKX_DEMO_API_KEY": data.get("okx_demo_api_key"), "OKX_DEMO_SECRET_KEY": data.get("okx_demo_secret_key"), "OKX_DEMO_PASSPHRASE": data.get("okx_demo_passphrase"),
         "OKX_API_KEY": data.get("okx_api_key"), "OKX_SECRET_KEY": data.get("okx_secret_key"), "OKX_PASSPHRASE": data.get("okx_passphrase"),
+        "BINANCE_LIVE_API_KEY": data.get("binance_live_api_key"), "BINANCE_LIVE_SECRET_KEY": data.get("binance_live_secret_key"),
+        "BINANCE_DEMO_API_KEY": data.get("binance_demo_api_key"), "BINANCE_DEMO_SECRET_KEY": data.get("binance_demo_secret_key"),
         "LLM_API_KEY": data.get("llm_api_key"),
     }
     save_secrets({key: value for key, value in secret_values.items() if value})

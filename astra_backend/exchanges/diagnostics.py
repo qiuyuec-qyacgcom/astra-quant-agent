@@ -1,6 +1,7 @@
-"""OKX 账户凭证连接诊断引擎（US-003）。
+"""交易所账户凭证连接诊断引擎（US-003）。
 
-支持 OKX 的 LIVE / DEMO（模拟盘）资金环境与凭证验证：
+支持 OKX 的 LIVE / DEMO（模拟盘）资金环境与凭证验证，以及币安 USDⓈ-M
+的 LIVE / DEMO（demo-fapi）环境与凭证验证：
 1. 既有凭证检测（从密钥库读取已加密凭证）
 2. 预保存检测（用户录入 Key/Secret 但尚未提交保存，先做预检验证）
 3. 零凭证回退（只读公共网络与行情端点连通性测试）
@@ -8,7 +9,7 @@
 封闭三律遵守：
 - 支持依赖注入测试（http_client / urlopen 可 mock）
 - 错误信息全结构化返回，永不抛出 500
-- 严格遵循 OKX V5 鉴权规范
+- 严格遵循 OKX V5 与币安 HMAC-SHA256 鉴权规范
 - 永不在诊断响应中泄露 API Secret 或 Passphrase 明文
 """
 from __future__ import annotations
@@ -21,12 +22,15 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .identity import is_sandbox_environment
 from .registry import venue_credentials, venue_passphrase
 
 OKX_BASE_URL = "https://www.okx.com"
+BINANCE_LIVE_BASE_URL = "https://fapi.binance.com"
+BINANCE_DEMO_BASE_URL = "https://demo-fapi.binance.com"
 
 
 def _default_http_call(url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None,
@@ -67,21 +71,21 @@ def diagnose_venue_connection(
     """诊断指定交易所及环境的连接与凭证有效性。
 
     入参：
-    - venue: "okx"（唯一受支持场所；其他场所显式拒答）
+    - venue: "okx" | "binance"（其他场所显式拒答）
     - environment: "live" | "demo" | "testnet" | "sandbox"
     - api_key/secret_key/passphrase: 显式指定则优先使用（预保存预检）；否则从加密库加载
     - timeout: 超时秒数
     - http_client: 可选注入，用于单元测试封闭性
     """
     v = str(venue or "").strip().lower()
-    if v != "okx":
+    if v not in ("okx", "binance"):
         return {
             "ok": False,
             "venue": v,
             "environment": environment,
             "authenticated": False,
             "mode": "invalid_venue",
-            "message": f"不支持的交易所：{venue!r}，可用: ['okx']",
+            "message": f"不支持的交易所：{venue!r}，可用: ['okx', 'binance']",
             "latency_ms": None,
             "details": {},
         }
@@ -111,6 +115,8 @@ def diagnose_venue_connection(
     # 2. 已认证私有端点探测
     t0 = time.monotonic()
     try:
+        if v == "binance":
+            return _diagnose_binance(env, is_sandbox, ak, sk, caller, timeout, t0)
         return _diagnose_okx(env, is_sandbox, ak, sk, pp, caller, timeout, t0)
     except Exception as exc:
         latency = max(1, round((time.monotonic() - t0) * 1000))
@@ -129,8 +135,12 @@ def diagnose_venue_connection(
 def _diagnose_public_ping(venue: str, env: str, caller: Callable, timeout: float) -> Dict[str, Any]:
     t0 = time.monotonic()
     try:
-        base_url = OKX_BASE_URL
-        path = "/api/v5/public/time"
+        if venue == "binance":
+            base_url = BINANCE_DEMO_BASE_URL if is_sandbox_environment(env) else BINANCE_LIVE_BASE_URL
+            path = "/fapi/v1/ping"
+        else:
+            base_url = OKX_BASE_URL
+            path = "/api/v5/public/time"
 
         status, data, _ = caller(f"{base_url}{path}", method="GET", timeout=timeout)
         latency = max(1, round((time.monotonic() - t0) * 1000))
@@ -205,4 +215,54 @@ def _diagnose_okx(env: str, is_sandbox: bool, ak: str, sk: str, pp: str,
             "latency_ms": latency,
             "message": f"OKX 鉴权失败: [{code or status}] {err_msg}",
             "details": {"status_code": status, "code": code, "msg": msg},
+        }
+
+
+def _diagnose_binance(env: str, is_sandbox: bool, ak: str, sk: str,
+                      caller: Callable, timeout: float, t0: float) -> Dict[str, Any]:
+    """币安 USDⓈ-M HMAC-SHA256 凭证鉴权探测。
+
+    base_url 按档位选 demo-fapi（模拟）/ fapi（实盘）；鉴权端点用
+    ``GET /fapi/v1/account``（账户信息，最轻的需签名只读端点）。签名规范：
+    ``signature = HMAC_SHA256(secret, queryString)``，头带 ``X-MBX-APIKEY``。
+    """
+    base_url = BINANCE_DEMO_BASE_URL if is_sandbox else BINANCE_LIVE_BASE_URL
+    path = "/fapi/v1/account"
+    ts = int(time.time() * 1000)
+    unsigned = urlencode({"timestamp": ts, "recvWindow": 5000})
+    signature = hmac.new(sk.encode("utf-8"), unsigned.encode("utf-8"), hashlib.sha256).hexdigest()
+    query = f"{unsigned}&signature={signature}"
+    headers = {
+        "X-MBX-APIKEY": ak,
+        "Accept": "application/json",
+        "User-Agent": "ASTRA-Diag/1.0",
+    }
+
+    status, data, _ = caller(f"{base_url}{path}?{query}", method="GET", headers=headers, timeout=timeout)
+    latency = max(1, round((time.monotonic() - t0) * 1000))
+
+    # 币安错误体：HTTP 200 且 body 含 "code"（负值）表示业务错误；成功账户响应无 code 字段
+    code = data.get("code") if isinstance(data, dict) else None
+    if status == 200 and code is None:
+        return {
+            "ok": True,
+            "venue": "binance",
+            "environment": env,
+            "authenticated": True,
+            "mode": "authenticated",
+            "latency_ms": latency,
+            "message": f"BINANCE {env.upper()} 凭证鉴权成功，连接正常（延迟 {latency}ms）",
+            "details": {"has_account_data": bool(data)},
+        }
+    else:
+        err_msg = str(data.get("msg") or "") if isinstance(data, dict) else ""
+        return {
+            "ok": False,
+            "venue": "binance",
+            "environment": env,
+            "authenticated": False,
+            "mode": "auth_failed",
+            "latency_ms": latency,
+            "message": f"BINANCE 鉴权失败: [{code or status}] {err_msg or ('HTTP ' + str(status))}",
+            "details": {"status_code": status, "code": code, "msg": err_msg},
         }

@@ -202,6 +202,59 @@ def _venue_accounts_okx(environment: str) -> dict[str, Any]:
     return out
 
 
+def _venue_accounts_binance(environment: str) -> dict[str, Any]:
+    """币安账户读取（只读，经 BinanceTradingAdapter 桥接 BinanceExchange 私有面）。
+
+    返回与 `_venue_accounts_okx` 同构的 `{status, reason, equity, available,
+    positions_count, open_orders_count, last_sync_ms}`。币安无 Passphrase，
+    凭证档解析与 OKX 同构（BINANCE_{LIVE,DEMO}_* → 通用档回退）。
+    """
+    try:
+        from astra_backend.exchanges.registry import get_adapter
+        adapter = get_adapter("binance", environment)
+    except Exception as exc:
+        return _venue_account_unknown("unavailable", f"币安适配器解析失败: {type(exc).__name__}: {exc}")
+    try:
+        from astra_backend.exchanges.registry import venue_credentials
+        ak, sk = venue_credentials("binance", environment)
+    except Exception:
+        ak, sk = "", ""
+    if not (ak and sk):
+        return _venue_account_unknown(
+            "unavailable",
+            f"BINANCE {environment.upper()} API Key/Secret 未配置，未发起任何请求；"
+            "请在后台「账户接入」录入后自动出现")
+    try:
+        rows = adapter.exchange.balance()
+        pos = adapter.exchange.positions()
+    except Exception as exc:
+        return _venue_account_unknown("degraded", f"币安账户读取失败: {type(exc).__name__}: {exc}")
+    out = {"status": "ready", "reason": f"BINANCE {environment.upper()} 只读"}
+    try:
+        eq_val = 0.0
+        avail_val = 0.0
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            asset = str(r.get("asset") or r.get("ccy") or "").upper()
+            if asset != "USDT":
+                continue
+            try:
+                eq_val = float(r.get("balance") or r.get("eq") or 0.0)
+                avail_val = float(r.get("availableBalance") or r.get("availEq") or eq_val)
+            except (TypeError, ValueError):
+                eq_val = avail_val = 0.0
+            break
+        out["equity"] = eq_val if eq_val > 0 else None
+        out["available"] = avail_val
+        out["positions_count"] = sum(1 for p in (pos or []) if abs(float((p.get("amount") or p.get("pos") or 0))) > 1e-12)
+        out["open_orders_count"] = 0  # 币安桥接面不主动拉挂单数；仅账户与持仓
+        out["last_sync_ms"] = int(time.time() * 1000)
+    except Exception as exc:
+        return _venue_account_unknown("degraded", f"币安返回解析失败: {type(exc).__name__}: {exc}")
+    return out
+
+
 @router.get("/api/v1/admin/multi-exchange")
 def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
     require_admin_header(x_astra_admin_token)
@@ -224,10 +277,17 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
         okx_demo_pp = venue_passphrase("okx", "demo")
     except Exception:
         okx_live_pp, okx_demo_pp = "", ""
+    # 币安两件套（无 Passphrase）：凭证档解析与 OKX 同构（BINANCE_{LIVE,DEMO}_* → 通用档回退）。
+    binance_live_ak, binance_live_sk = _read_creds("binance", "live")
+    binance_demo_ak, binance_demo_sk = _read_creds("binance", "demo")
     accounts_status = {
         "okx": {
             "live": {"has_api_key": bool(okx_live_ak), "has_secret": bool(okx_live_sk), "has_passphrase": bool(okx_live_pp)},
             "demo": {"has_api_key": bool(okx_demo_ak), "has_secret": bool(okx_demo_sk), "has_passphrase": bool(okx_demo_pp)},
+        },
+        "binance": {
+            "live": {"has_api_key": bool(binance_live_ak), "has_secret": bool(binance_live_sk)},
+            "demo": {"has_api_key": bool(binance_demo_ak), "has_secret": bool(binance_demo_sk)},
         },
     }
 
@@ -265,13 +325,31 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
                 okx_h["avg_ms"] = diag["latency_ms"]
                 from datetime import datetime, timezone
                 health["updated_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                health["venues"] = {"okx": okx_h}
+                # 只更新 okx 键，不覆盖其他 venue（币安等）的已有键
+                health.setdefault("venues", {})["okx"] = okx_h
                 try:
                     (DATA_DIR / "venue_health.json").write_text(json.dumps(health, ensure_ascii=False, indent=2), encoding="utf-8")
                 except Exception:
                     pass
         except Exception:
             pass
+
+    # 币安行情健康容灾：只显示「连通 + 延迟 + 凭证已配」，不做逐标的 ok/failed 名单。
+    # 档位跟随统一档位（ASTRA_BINANCE_ENV 缺失时回退 ASTRA_OKX_ENV），故用 okx_env.mode。
+    if "binance" not in health["venues"] or not isinstance(health["venues"]["binance"], dict):
+        health["venues"]["binance"] = {}
+    binance_h = health["venues"]["binance"]
+    binance_h["testnet"] = bool(okx_env.simulated)
+    try:
+        from astra_backend.exchanges.diagnostics import diagnose_venue_connection
+        binance_diag = diagnose_venue_connection("binance", okx_env.mode, timeout=2.5)
+        if binance_diag.get("latency_ms"):
+            binance_h["avg_ms"] = binance_diag["latency_ms"]
+        binance_h["connected"] = bool(binance_diag.get("ok"))
+        binance_h["mode"] = binance_diag.get("mode")
+    except Exception:
+        # 币安诊断失败不阻断 OKX 主流程；保持已读到的旧值（若有）
+        pass
 
     from astra_backend.exchanges import routing_policy
     pref = routing_policy.load_preferred_venue()
@@ -306,6 +384,10 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         "OKX_DEMO_API_KEY": payload.okx_demo_api_key,
         "OKX_DEMO_SECRET_KEY": payload.okx_demo_secret_key,
         "OKX_DEMO_PASSPHRASE": payload.okx_demo_passphrase,
+        "BINANCE_LIVE_API_KEY": payload.binance_live_api_key,
+        "BINANCE_LIVE_SECRET_KEY": payload.binance_live_secret_key,
+        "BINANCE_DEMO_API_KEY": payload.binance_demo_api_key,
+        "BINANCE_DEMO_SECRET_KEY": payload.binance_demo_secret_key,
     }
     secret_values = {k: str(v).strip() for k, v in secret_map.items() if v and str(v).strip()}
     fn_save_secrets = app_attr("save_secrets", save_secrets)
@@ -373,7 +455,7 @@ def admin_multi_exchange_test_connection(
         "mode": result.get("mode"),
         "ok": result.get("ok"),
     })
-    if result.get("latency_ms") and payload.venue == "okx":
+    if result.get("latency_ms") and payload.venue in ("okx", "binance"):
         try:
             health_path = DATA_DIR / "venue_health.json"
             h: dict[str, Any] = {}
@@ -384,10 +466,11 @@ def admin_multi_exchange_test_connection(
                     h = {}
             if not isinstance(h.get("venues"), dict):
                 h["venues"] = {}
-            if "okx" not in h["venues"] or not isinstance(h["venues"]["okx"], dict):
-                h["venues"]["okx"] = {}
-            h["venues"]["okx"]["avg_ms"] = result["latency_ms"]
-            h["venues"]["okx"]["testnet"] = (payload.environment == "demo")
+            venue_key = payload.venue
+            if venue_key not in h["venues"] or not isinstance(h["venues"][venue_key], dict):
+                h["venues"][venue_key] = {}
+            h["venues"][venue_key]["avg_ms"] = result["latency_ms"]
+            h["venues"][venue_key]["testnet"] = (payload.environment == "demo")
             from datetime import datetime, timezone
             h["updated_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             health_path.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -475,6 +558,7 @@ def venue_accounts(environment: str = Query(default="demo"),
     require_admin_header(x_astra_admin_token, x_astra_session)
     venues_map = {
         "okx": _venue_accounts_okx(env_key),
+        "binance": _venue_accounts_binance(env_key),
     }
     from astra_backend.portfolio_aggregator import aggregate_venue_accounts
     summary = aggregate_venue_accounts(venues_map, env_key)

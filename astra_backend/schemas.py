@@ -36,6 +36,10 @@ class MultiExchangeUpdate(BaseModel):
     okx_demo_api_key: str | None = None
     okx_demo_secret_key: str | None = None
     okx_demo_passphrase: str | None = None
+    binance_live_api_key: str | None = None
+    binance_live_secret_key: str | None = None
+    binance_demo_api_key: str | None = None
+    binance_demo_secret_key: str | None = None
     okx_execution: bool | None = None      # ASTRA_OKX_EXECUTION 总开关
     okx_environment: str | None = None     # OKX 资金环境：demo|live
     preferred_venue: str | None = None  # 全局路由首选（合法值见 routing_policy.VALID_PREFERRED_VENUES）
@@ -44,7 +48,7 @@ class MultiExchangeUpdate(BaseModel):
 
 
 class VenueTestConnectionRequest(BaseModel):
-    venue: str = Field(..., pattern=r"^okx$")
+    venue: str = Field(..., pattern=r"^(okx|binance)$")
     environment: str = Field(default="live", pattern=r"^(live|demo|testnet|sandbox)$")
     api_key: str | None = None
     secret_key: str | None = None
@@ -63,6 +67,10 @@ class AdminConfigUpdate(BaseModel):
     okx_api_key: str | None = None
     okx_secret_key: str | None = None
     okx_passphrase: str | None = None
+    binance_live_api_key: str | None = None
+    binance_live_secret_key: str | None = None
+    binance_demo_api_key: str | None = None
+    binance_demo_secret_key: str | None = None
     okx_simulated: bool | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = None
