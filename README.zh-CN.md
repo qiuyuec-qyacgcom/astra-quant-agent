@@ -6,7 +6,7 @@
 
 ### 基于多大模型分析与确定性代码风控的加密货币自主量化交易系统
 
-[![Release](https://img.shields.io/badge/Release-v8.7.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
+[![Release](https://img.shields.io/badge/Release-v8.8.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
 [![License](https://img.shields.io/badge/License-AGPLv3%20%2B%20Commons%20Clause-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -289,7 +289,7 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 | **行情防伪造** | 限速 + 指数退避重试的行情服务，只返回已收盘确认 K 线。 |
 | **实盘切换前体检** | 切换实盘前的只读余额/持仓/权限探测。 |
 | **推广链接** | 交易所推广链接已替换为本 fork 自有通道（见[交易所开户与手续费返现](#交易所开户与手续费返现)）。 |
-| **品牌与版本** | 更名为 **AstraQuant豪华3000型**，版本号升级至 **v8.7.1**。 |
+| **品牌与版本** | 更名为 **AstraQuant豪华3000型**，版本号升级至 **v8.8.1**。 |
 
 > 完全保留对原项目的署名与 AGPL-3.0 + Commons Clause 协议；本 fork 仅新增特性，未删除或重新授权原作品。
 

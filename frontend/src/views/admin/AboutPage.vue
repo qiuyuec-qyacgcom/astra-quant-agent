@@ -44,6 +44,7 @@ import { Info, GitBranch, Download, RefreshCw, CheckCircle2, AlertTriangle,
   ShieldCheck, Terminal, Loader2, ArrowUpRight, Link2, ExternalLink, Sparkles } from 'lucide-vue-next';
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 import CopyButton from '../../components/base/CopyButton.vue';
+import { OFFICIAL_REPO } from '../../config/version';
 
 const { api } = useApi();
 
@@ -252,7 +253,7 @@ const bandFacts = computed(() => {
 
             <footer class="ab-block-foot">
               <a
-                href="https://github.com/0xethanq/astra-quant-agent"
+                :href="OFFICIAL_REPO"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="btn btn-primary btn-sm"

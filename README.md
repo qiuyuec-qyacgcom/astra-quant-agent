@@ -6,7 +6,7 @@
 
 ### Autonomous Crypto Trading System with Multi-LLM Analysis & Deterministic Risk Control
 
-[![Release](https://img.shields.io/badge/Release-v8.7.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
+[![Release](https://img.shields.io/badge/Release-v8.8.1-00E599.svg?style=flat-square)](https://github.com/qiuyuec-qyacgcom/astra-quant-agent/releases)
 [![License](https://img.shields.io/badge/License-AGPLv3%20%2B%20Commons%20Clause-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-4FC08D.svg?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
@@ -289,7 +289,7 @@ This repository is a maintained fork of the original [`0xethanq/astra-quant-agen
 | **Market-data anti-forgery** | Rate-limited, backoff-retried market data that only ever returns confirmed closed candles. |
 | **Live preflight check** | Read-only balance/position/permission probe before switching to live trading. |
 | **Referral channels** | Exchange referral links updated to this fork's own channels (see [Exchange Referral](#exchange-referral--fee-rebates)). |
-| **Branding & version** | Rebranded to **AstraQuant豪华3000型**, version bumped to **v8.7.1**. |
+| **Branding & version** | Rebranded to **AstraQuant豪华3000型**, version bumped to **v8.8.1**. |
 
 > Upstream project credit and the AGPL-3.0 + Commons Clause license are fully retained; this fork adds features without removing or relicensing the original work.
 

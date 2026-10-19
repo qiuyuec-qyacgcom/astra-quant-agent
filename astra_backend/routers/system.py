@@ -471,7 +471,7 @@ def admin_about(
             {"name": "Gateway Event Runtime", "version": GATEWAY_VERSION},
             {"name": "SQLite", "version": __import__("sqlite3").sqlite_version},
         ],
-        "repository": {"url": "https://github.com/0xethanq/astra-quant-agent", "branch": app_attr("git", git)(["branch", "--show-current"]), "commit": app_attr("git", git)(["rev-parse", "--short", "HEAD"])},
+        "repository": {"url": "https://github.com/qiuyuec-qyacgcom/astra-quant-agent", "branch": app_attr("git", git)(["branch", "--show-current"]), "commit": app_attr("git", git)(["rev-parse", "--short", "HEAD"])},
         "update": dict(app_attr("update_status", update_status)()),
         # 注册/返佣通道（后台「关于」页渲染成可复制入口）。
         # ⚠️ URL 走 settings（可被 OKX_INVITE_URL 覆盖，便于分发副本替换）。

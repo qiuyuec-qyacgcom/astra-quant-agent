@@ -106,7 +106,7 @@ function openExternal(url: string) {
 
 // 终端部署命令复制
 const copiedCmd = ref(false);
-const DOCKER_CMD = 'git clone https://github.com/0xethanq/astra-quant-agent.git && cd astra-quant-agent && ./setup.sh';
+const DOCKER_CMD = 'git clone https://github.com/qiuyuec-qyacgcom/astra-quant-agent.git && cd astra-quant-agent && ./setup.sh';
 
 async function copyCommand() {
   try {
