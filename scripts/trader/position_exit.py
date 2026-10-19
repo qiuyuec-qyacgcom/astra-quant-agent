@@ -58,6 +58,25 @@ def _is_simulated() -> bool:
         return True
 
 
+def _purge_after_close(inst_id, purge):
+    """机械平仓成功后，剔除主脑指令文件里针对该标的的陈旧指令。
+
+    所有机械平仓分支（硬止损/保护失效/时间止损/阶梯锁利/移动止盈）都会让持仓从
+    OKX 真实持仓里消失。若主脑指令文件（`ai_position_management.json`）里还残留着
+    针对该标的的 UPDATE_SL/CLOSE_MARKET 指令，下一轮 `execute_ai_position_management`
+    会再消费一条**注定无法执行**的指令，打出"不在本路径持仓字典"的误报。
+
+    本函数把清理动作收敛到一处，**fail-open**：`purge` 为 None（测试或未接线）或
+    清理抛异常时一律静默跳过，绝不影响平仓主流程。
+    """
+    if purge is None:
+        return
+    try:
+        purge(inst_id)
+    except Exception:
+        pass
+
+
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions,
     *,
     _float_or_zero,
@@ -79,7 +98,8 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     notify_trade_close,
     protection_signals,
     ratcheted_trailing_stop,
-    resolve_decision_attribution):
+    resolve_decision_attribution,
+    purge_ai_position_instructions=None):
     # ⚠️ 2026-09-30（通知单一事实源）：本模块**不再发布**任何 `trade.closed`。
     #     此前硬止损/保护失效/时间止损/阶梯锁利四处各发一张卡片，而台账同步路径
     #     （`scripts/sync_full_ledger.py` → `scripts/ledger/notify.py`）会对同一笔再发
@@ -219,6 +239,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         ), position=curr_pos)
         add_stop_cooldown(inst_id, "long" if is_long else "short", "硬止损")
         trackers.pop(pos_key, None)
+        _purge_after_close(inst_id, purge_ai_position_instructions)
         return True, "已硬止损"
 
     default_tp_dist = max(atr * profile["tp_atr_mult"], entry_px * profile["min_profit_ratio"])
@@ -272,6 +293,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         ), position=curr_pos)
         add_stop_cooldown(inst_id, _pos_side, "云端保护失效")
         trackers.pop(pos_key, None)
+        _purge_after_close(inst_id, purge_ai_position_instructions)
         return True, "保护失效安全退出"
     t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": protection_detail}
 
@@ -295,7 +317,10 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             pos_sz=pos_sz, cur_px=cur_px, fee=close_fee, pnl=curr_pos["upl"],
             remark=f"持仓超 {max_hold_hours:g} 小时无突破，主动平仓释放配比",
         ), position=curr_pos)
+        # 时间止损平仓后，剔除主脑指令文件里针对该标的的陈旧指令，避免下一轮
+        # 消费一条注定无法执行（持仓已消失）的 UPDATE_SL/CLOSE_MARKET 告警。
         if pos_key in trackers: del trackers[pos_key]
+        _purge_after_close(inst_id, purge_ai_position_instructions)
         return True, "时间止损"
 
     # 3. Three-Tier Ratchet Profit-Locking & Momentum Take-Profit Engine
@@ -351,6 +376,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最高 {t['highWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
             ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
+            _purge_after_close(inst_id, purge_ai_position_instructions)
             return True, "已阶梯锁利"
 
         # B. Kinetic Momentum Pullback Exit from Peak (Symmetric 2.0x ATR profit with 0.75x ATR pullback)
@@ -369,6 +395,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最高 {t['highWaterMark']} 动能回撤触及移动止盈线",
             ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
+            _purge_after_close(inst_id, purge_ai_position_instructions)
             return True, "已移动止盈"
 
     else:
@@ -412,6 +439,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最低 {t['lowWaterMark']} 触发阶梯利润锁定线 {dynamic_floor_sl}",
             ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
+            _purge_after_close(inst_id, purge_ai_position_instructions)
             return True, "已阶梯锁利"
 
         # B. Kinetic Momentum Pullback Exit from Peak (Symmetric 2.0x ATR profit with 0.75x ATR pullback)
@@ -430,6 +458,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
                 remark=f"最低 {t['lowWaterMark']} 动能反弹触及移动止盈线",
             ), position=curr_pos)
             if pos_key in trackers: del trackers[pos_key]
+            _purge_after_close(inst_id, purge_ai_position_instructions)
             return True, "已移动止盈"
 
     return False, "持仓监控中"

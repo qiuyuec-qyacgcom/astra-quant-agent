@@ -46,6 +46,7 @@ from scripts.trader.reservation_reconcile import (
 )
 from scripts.trader.position_mgmt import (
     execute_ai_position_management as _execute_ai_position_management_impl,
+    purge_ai_position_instructions as _purge_ai_position_instructions_impl,
 )
 from scripts.trader.leverage import clamp_ai_leverage
 from scripts.trader.sizing import size_for_decision
@@ -992,6 +993,16 @@ def sync_cloud_algo_stop(inst_id: str, pos_side: str, new_sl: float, reason: str
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
     return _cloud_protection_sync_stop(inst_id, pos_side, new_sl, reason, okx_rest=okx_rest)
 
+def _purge_ai_position_instructions(inst_id):
+    """门面内绑定 `AI_POSITION_MANAGEMENT_FILE` 的清理闭包（供 position_exit 注入）。
+
+    `position_exit` 只传 `inst_id`（持仓标识），文件路径这一 I/O 事实源收敛在门面，
+    与 `execute_ai_position_management` 的注入模式一致。
+    """
+    return _purge_ai_position_instructions_impl(
+        inst_id, ai_position_management_file=AI_POSITION_MANAGEMENT_FILE)
+
+
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions):
     """壳（第八十九刀搬至 `scripts/trader/position_exit.py`，调用期同名注入）。"""
     try:
@@ -1031,7 +1042,8 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         notify_trade_close=notify_trade_close,
         protection_signals=protection_signals,
         ratcheted_trailing_stop=ratcheted_trailing_stop,
-        resolve_decision_attribution=resolve_decision_attribution)
+        resolve_decision_attribution=resolve_decision_attribution,
+        purge_ai_position_instructions=_purge_ai_position_instructions)
 
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions):
     """执行主脑写下的持仓指令。实现与两条安全语义见 scripts/trader/position_mgmt.py。

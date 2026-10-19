@@ -74,6 +74,7 @@ class _Rig:
         self.notifies = []
         self.cooldowns = []
         self.synced = []
+        self.purged = []
         # 三所持仓接管（2026-09-28）：平仓与云 OCO 核验都必须**按场所**分流，
         # 故要把它们的真实入参记下来逐条钉住。
         self.close_calls = []
@@ -115,6 +116,8 @@ class _Rig:
             # 2026-10：建档时钉死"谁做的决定"（单模型 / 投委会＋采纳席位），供平仓
             # 证据归档读取。桩按"读不到"诚实返回 unknown（不冒充单模型）。
             resolve_decision_attribution=lambda inst_id: ("unknown", None),
+            # 机械平仓成功后清理主脑指令（`purge_ai_position_instructions`）—— 记录调用。
+            purge_ai_position_instructions=lambda inst_id: self.purged.append(inst_id),
         )
 
     def _close(self, *a, **k):
@@ -400,6 +403,80 @@ class ExitFailureBranchTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, "已阶梯锁利")
         self.assertNotIn(key, trackers)
+
+
+class PurgeOnEveryMechanicalCloseTest(unittest.TestCase):
+    """机械平仓成功后，**每个**整仓退出分支都必须清理主脑指令（彻底消除误报）。
+
+    `_Rig.kwargs()` 已注入记录桩 `purge_ai_position_instructions` ⇒ 任一平仓成功
+    分支都应调用一次 `purge(inst_id)`。本类逐分支钉住这条契约，防止将来新增平仓
+    分支时漏挂清理、或重构时把某个分支的清理调用删掉。
+    """
+
+    def _run(self, rig, f=None):
+        f = f or _f()
+        key, trackers = rig.trackers(f)
+        ok, detail = manage_position_tp_and_trailing(
+            f, rig._pos, trackers, "2026-09-21 12:00:00", rig.actions, **rig.kwargs())
+        return ok, detail, trackers, key
+
+    def test_hard_stop_close_purges(self):
+        rig = _Rig(hard_stop=True)
+        ok, detail, _, _ = self._run(rig)
+        self.assertTrue(ok)
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"硬止损后必须清理：{rig.purged}")
+
+    def test_protection_lost_close_purges(self):
+        rig = _Rig(protection=(False, "云端 OCO 缺失"))
+        ok, detail, _, _ = self._run(rig)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "保护失效安全退出")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"保护失效退出后必须清理：{rig.purged}")
+
+    def test_time_stop_close_purges(self):
+        rig = _Rig(entry_ts=int(time.time()) - int(25 * HOUR))
+        ok, detail, _, _ = self._run(rig)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "时间止损")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"时间止损后必须清理：{rig.purged}")
+
+    def test_long_ratchet_close_purges(self):
+        rig = _Rig(floor=71000.0, stage_desc="🔒 锁利一档", old_sl=69000.0, high_water=71500.0)
+        rig._pos = _pos(avgPx=70000.0)
+        ok, detail, _, _ = self._run(rig, _f(price=71000.0))
+        self.assertTrue(ok)
+        self.assertEqual(detail, "已阶梯锁利")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"多阶梯锁利后必须清理：{rig.purged}")
+
+    def test_long_momentum_close_purges(self):
+        rig = _Rig(floor=69000.0, high_water=71750.0)
+        ok, detail, _, _ = self._run(rig, _f(price=71200.0))
+        self.assertTrue(ok)
+        self.assertEqual(detail, "已移动止盈")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"多移动止盈后必须清理：{rig.purged}")
+
+    def test_short_ratchet_close_purges(self):
+        rig = _Rig(floor=68000.0, side="short", low_water=68250.0, old_sl=71000.0)
+        rig._pos = _pos(side="short", avgPx=70000.0)
+        ok, detail, _, _ = self._run(rig, _f(price=68000.0))
+        self.assertTrue(ok)
+        self.assertEqual(detail, "已阶梯锁利")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"空阶梯锁利后必须清理：{rig.purged}")
+
+    def test_short_momentum_close_purges(self):
+        rig = _Rig(floor=76000.0, side="short", low_water=67500.0, old_sl=71000.0)
+        rig._pos = _pos(side="short", avgPx=70000.0)
+        ok, detail, _, _ = self._run(rig, _f(price=68100.0))
+        self.assertTrue(ok)
+        self.assertEqual(detail, "已移动止盈")
+        self.assertEqual(rig.purged, ["BTC-USDT-SWAP"], f"空移动止盈后必须清理：{rig.purged}")
+
+    def test_close_failure_never_purges(self):
+        """平仓失败 ⇒ 仓位仍在 ⇒ 主脑指令**仍可能有效**，绝不得清理。"""
+        rig = _Rig(hard_stop=True, close=(False, "交易所拒绝"))
+        ok, detail, _, _ = self._run(rig)
+        self.assertFalse(ok)
+        self.assertEqual(rig.purged, [], f"平仓失败时不得清理：{rig.purged}")
 
 
 class CrossVenueExitRoutingTest(unittest.TestCase):

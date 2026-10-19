@@ -33,6 +33,7 @@ import 期绑定会变成过期快照（`astra_backend/README.md` §5）。
 """
 import json
 import os
+import tempfile
 import time
 
 from astra_backend import analysis_capture
@@ -261,3 +262,56 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
                     pass
             else:
                 executed_actions.append(f"[{name}] 止盈调整未生效（原挂单与真源保持不变）: {_detail}")
+
+
+def purge_ai_position_instructions(inst_id, *, ai_position_management_file):
+    """从主脑持仓指令文件里剔除指定标的的指令（保守读改写 + 原子写回）。
+
+    背景（时间止损误报闭环）：主脑写 `ai_position_management.json` 时某标的**仍在
+    持仓**，但等执行器消费时该持仓已被**时间止损**（或其它机械退出）平掉 —— 于是
+    `execute_ai_position_management` 打印"不在本路径持仓字典"的告警。这条告警本身
+    无害（不发任何交易指令），但它暴露了"AI 认知快照落后于机械平仓"的时序差。
+
+    本函数在机械平仓成功后调用，把该标的的陈旧指令从文件里剔除，避免下一轮再
+    消费一条**注定无法执行**的指令。语义约束：
+
+    - **保守读改写**：若文件不存在 / 解析失败 / 不含该 `instId`，一律**原样不动**
+      （返回 `False`），绝不凭空新建或改写文件。
+    - **只过滤匹配项**：保留 `timestamp`/`time_str`/`policy_version` 等其余字段与
+      其它标的的指令原样。
+    - **原子写回**：`tempfile + os.replace`，读者永不观察到半截文件（与主脑的
+      `atomic_write_json` 同构）。
+    - **失败静默**：任何异常都吞掉并返回 `False`，绝不把清理动作升格为交易故障。
+
+    返回 `True` 表示确实剔除了至少一条指令（调用方可据此留痕）；`False` 表示无事
+    可做或失败（调用方通常无需处理）。
+    """
+    if not os.path.exists(ai_position_management_file):
+        return False
+    try:
+        with open(ai_position_management_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        instructions = payload.get("instructions") if isinstance(payload, dict) else None
+        if not isinstance(instructions, list):
+            return False
+        kept = [i for i in instructions
+                if not (isinstance(i, dict) and str(i.get("instId", "")) == str(inst_id))]
+        if len(kept) == len(instructions):
+            return False  # 没有匹配项，不写文件
+        payload["instructions"] = kept
+        d = os.path.dirname(ai_position_management_file)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".ai-posmgmt-purge-", suffix=".tmp", dir=d or ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, ai_position_management_file)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        return True
+    except Exception:
+        return False
