@@ -18,12 +18,16 @@ import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 
 from pathlib import Path
-from astra_backend import analysis_capture
 
+# 先把项目根目录加入 sys.path，再 import 项目内模块（astra_backend/scripts.*），
+# 否则独立进程以 `python scripts/self_improvement_engine.py` 启动时
+# 会 `ModuleNotFoundError: No module named 'astra_backend'`。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from astra_backend import analysis_capture
 
 try:
     from astra_backend.config import settings as standalone_settings
