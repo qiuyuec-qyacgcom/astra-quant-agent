@@ -74,10 +74,11 @@ const agents = computed<any[]>(() => data.value?.agents || []);
 const calls = computed<any[]>(() => (data.value?.model_calls || []).slice(0, 30));
 const showSkeleton = computed(() => loading.value && !loaded.value);
 
-/** 状态语义 → 徽章色调（判定集合与旧版 statusColor 完全一致） */
+/** 状态语义 → 徽章色调（与后端 agent_statuses 的 health 三态对齐：
+ *  healthy/degraded/cold；兼容旧版 success/running/online/idle 等枚举）。 */
 function statusTone(s: string): string {
-  if (['success', 'running', 'online', 'idle'].includes(s)) return 'badge-up';
-  if (['failed', 'error', 'offline'].includes(s)) return 'badge-down';
+  if (['healthy', 'success', 'running', 'online', 'idle'].includes(s)) return 'badge-up';
+  if (['degraded', 'failed', 'error', 'offline'].includes(s)) return 'badge-down';
   return 'badge-warn';
 }
 
@@ -87,7 +88,7 @@ function statusLabel(s: string): string {
 }
 
 const healthyCount = computed(
-  () => agents.value.filter((a) => ['success', 'running', 'online', 'idle'].includes(a.health)).length,
+  () => agents.value.filter((a) => ['healthy', 'success', 'running', 'online', 'idle'].includes(a.health)).length,
 );
 const issueCount = computed(() => agents.value.length - healthyCount.value);
 
