@@ -2414,6 +2414,16 @@ class BinanceTradingAdapter(BinancePublicAdapter):
     def set_leverage(self, inst_id: str, leverage: Any, pos_side: str = "long") -> dict[str, Any]:
         return self._ex.set_leverage(inst_id, leverage, pos_side=pos_side)
 
+    def positions_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        """币安平仓历史 → OKX 同构（桥接内部 ``BinanceExchange.positions_history``）。
+
+        主脑台账同步（``sync_full_ledger`` / ``analysis_sync``）用它与 ``okx_rest.
+        positions_history`` 同构的平仓周期枚举来折算 ``venue=binance`` 的 closed 行；
+        本方法补上 ``BinanceTradingAdapter`` 这一支，避免调用方直接依赖
+        ``adapter.exchange.positions_history`` 的内部实现路径。
+        """
+        return self._ex.positions_history(limit=limit)
+
     def reconcile_pending_entries(self) -> dict[str, Any]:
         return self._ex.reconcile_pending_entries()
 
