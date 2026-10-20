@@ -426,7 +426,8 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         return None, "unknown"
     margin, margin_basis = lifecycle_margin()
     return {
-        "id":lifecycle_id(row),"pos_id":row.get("posId"),"inst":str(row.get("instId","")).replace("-USDT-SWAP",""),
+        "id":lifecycle_id(row),"pos_id":row.get("posId"),"venue":str(row.get("venue") or "okx").lower(),
+        "inst":str(row.get("instId","")).replace("-USDT-SWAP",""),
         "inst_id":row.get("instId"),"side":direction,"status":status,"open_ms":opened,
         "close_ms":updated if status=="closed" else None,"open_time":time_text(opened),
         "close_time":time_text(updated) if status=="closed" else "",
@@ -446,5 +447,5 @@ def normalize_position(row: dict, live: bool = False) -> dict:
         "components_complete":components_complete,
         "known_net_pnl":val(gross+fee) if gross is not None and fee is not None else None,
         "exit_reason":reason,"exit_evidence":"confirmed" if reason else "unknown",
-        "strategy":"unknown","source":"okx_positions","raw_type":kind,
+        "strategy":"unknown","source":("binance_positions" if str(row.get("venue") or "").lower() == "binance" else "okx_positions"),"raw_type":kind,
     }

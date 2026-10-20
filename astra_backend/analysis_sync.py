@@ -262,9 +262,26 @@ def reconcile(archive: Archive, account: str, positions: list[dict] | None = Non
     archive.upsert_trades(account,trades)
     return archive.trades(account)
 
-def sync_archive(positions: list[dict] | None = None, max_pages: int = 2, account: str | None = None) -> list[dict]:
+def _resolve_active_venue(venue: str | None = None) -> str:
+    """归一当前生效交易所：显式 venue 优先，否则读 preferred_venue（auto→okx）。"""
+    from scripts.instrument_pool import normalize_venue as _norm
+    if venue:
+        return _norm(venue)
+    try:
+        from astra_backend.exchanges.routing_policy import load_preferred_venue
+        return _norm(load_preferred_venue())
+    except Exception:
+        return "okx"
+
+
+def sync_archive(positions: list[dict] | None = None, max_pages: int = 2, account: str | None = None, venue: str | None = None) -> list[dict]:
     from astra_backend.analysis_capture import enabled
     if not enabled(): return []
+    # 双所分派：币安走「预聚合平仓周期」简化路径（无 OKX 的 order/fill join 埋点），
+    # OKX 走完整四类历史对账链路。venue 未显式指定时按当前生效所（preferred_venue）归一。
+    active = _resolve_active_venue(venue)
+    if active == "binance":
+        return sync_archive_binance(positions=positions, account=account)
     env = selected_environment()
     from astra_backend.analysis_capture import resolve_identity
     account = account or resolve_identity(env)
@@ -288,3 +305,51 @@ def sync_archive(positions: list[dict] | None = None, max_pages: int = 2, accoun
     emit("archive.sync",{"trades":len(result), "timings":timings},"completed",account=account)
     print("[analysis_archive] " + json.dumps({"trades":len(result), "timings":timings}))
     return result
+
+
+def sync_archive_binance(positions: list[dict] | None = None, account: str | None = None) -> list[dict]:
+    """币安平仓归档（简化路径）。
+
+    币安 adapter 的 `positions_history` 已预聚合出完整开→平周期（openAvgPx/
+    closeAvgPx/pnl/fee/direction/cTime/uTime），无需 OKX 的 order/fill join。
+    决策来源与出场原因埋点在币安侧缺失，故 `exit_evidence` 退化为 unknown、
+    `decision_id` 置空——这是数据源限制，不是错误。
+    """
+    from astra_backend.analysis_capture import resolve_identity, venue_identity
+    from astra_backend.exchanges import registry
+    archive = Archive()
+    started = time.perf_counter()
+    timings = {}
+    # account 身份：优先显式传入，否则按币安凭证指纹生成（与 OKX 档案隔离）。
+    if account is None:
+        try:
+            account = venue_identity("binance")
+        except Exception:
+            from scripts.okx_runtime import current_environment
+            account = f"binance:{current_environment().mode}:unresolved"
+    try:
+        adapter = registry.get_adapter("binance")
+        rows = adapter.positions_history(limit=100) or []
+        trades = [normalize_position(r) for r in rows if isinstance(r, dict)]
+        # 活动持仓并入（标记 holding + venue，避免与已平仓周期冲突、并正确归所）
+        live_rows = adapter.positions() or []
+        for p in live_rows or []:
+            if not isinstance(p, dict):
+                continue
+            p = dict(p)
+            p["venue"] = "binance"
+            t = normalize_position(p, live=True)
+            trades = [x for x in trades if x["id"] != t["id"]]
+            trades.append(t)
+        archive.upsert_trades(account, trades)
+        timings["total_seconds"] = time.perf_counter() - started
+    except Exception as exc:
+        fault(exc, "binance_archive_sync")
+        timings["error"] = str(exc)
+        timings["total_seconds"] = time.perf_counter() - started
+        emit("archive.sync", {"trades": 0, "timings": timings}, "failed", account=account)
+        print("[analysis_archive] binance sync failed: " + str(exc))
+        return []
+    emit("archive.sync", {"trades": len(trades), "timings": timings}, "completed", account=account)
+    print("[analysis_archive] " + json.dumps({"venue": "binance", "trades": len(trades), "timings": timings}))
+    return trades

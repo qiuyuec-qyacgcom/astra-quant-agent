@@ -31,10 +31,11 @@ const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: fa
  * 上游**根本没上报缓存字段**（旧实现把它印成"缓存: 0"，于是"还是 0 缓存"永远说不清）。
  * `cache_hit_rate` 为 `null` 一律显示 `--`（不可判定 ≠ 0%）。
  */
-import { computed } from 'vue';
+import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { fmtDateTime } from '../../utils/format';
 import { useI18n } from '../../composables/useI18n';
 const { t } = useI18n();
+import { useApi } from '../../composables/useApi';
 import PageHeader from '../../components/admin/PageHeader.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import { useResource } from '../../composables/useResource';
@@ -45,6 +46,29 @@ import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
 const { data, loading, error, loaded, reload: load } = useResource<any>('/api/v1/admin/agents', {
   immediate: true,
 });
+
+// 当前生效交易所（随账户与标的页切换联动；Agents 页从 pool-venues 读初始值 + 监听事件刷新）
+const { api } = useApi();
+const activeVenue = ref<'okx' | 'binance'>('okx');
+const venueLabel = computed(() => activeVenue.value === 'binance' ? t('admin.security.venueBinance') : t('admin.security.venueOkx'));
+
+async function refreshVenue() {
+  try {
+    const res = await api<any>('/api/v1/admin/pool-venues');
+    activeVenue.value = (res?.active_venue === 'binance' ? 'binance' : 'okx');
+  } catch { /* 失败保持默认 okx，不阻断名册渲染 */ }
+}
+
+function onVenueChanged(e: Event) {
+  const venue = (e as CustomEvent).detail?.venue;
+  activeVenue.value = venue === 'binance' ? 'binance' : 'okx';
+  void load();
+}
+onMounted(() => {
+  void refreshVenue();
+  window.addEventListener('astra:venue-changed', onVenueChanged);
+});
+onUnmounted(() => window.removeEventListener('astra:venue-changed', onVenueChanged));
 
 const agents = computed<any[]>(() => data.value?.agents || []);
 const calls = computed<any[]>(() => (data.value?.model_calls || []).slice(0, 30));
@@ -128,6 +152,7 @@ function ageText(a: any): string {
   <div class="ag">
     <PageHeader :embedded="props.embedded" :title="t('admin.agents.title')">
       <template #actions>
+        <span class="badge badge-accent mono">{{ venueLabel }}</span>
         <span class="badge badge-accent mono">{{ t('admin.agents.policyChip') }}</span>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="load">
           <Loader2 v-if="loading && loaded" :size="14" class="animate-spin shrink-0" />

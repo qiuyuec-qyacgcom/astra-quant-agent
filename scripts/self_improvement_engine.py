@@ -429,7 +429,20 @@ def _match_snapshot(journal_by_inst, inst, open_time, side=None):
     return (best_rec or {}).get("snapshot")
 
 
+def _resolve_active_venue() -> str:
+    """归一当前生效交易所（auto/空/非法 → okx），与复盘归档共用同一单一事实源。"""
+    try:
+        from astra_backend.exchanges.routing_policy import load_preferred_venue
+        from scripts.instrument_pool import normalize_venue
+        return normalize_venue(load_preferred_venue())
+    except Exception:
+        return "okx"
+
+
 def load_closed_trades(start_time_override: str | None = None):
+    # 自进化只复盘「当前生效所」：随账户与标的页切换联动（与复盘归档一致）。
+    # 显式 venue 优先（台账字段），否则按 preferred_venue 归一（auto→okx）。
+    active_venue = _resolve_active_venue()
     account_init_file = os.path.join(DATA_DIR, "account_initial_state.json")
     reset_time_str = "1970-01-01 00:00:00"
     evo_start_str = os.getenv("ASTRA_EVOLUTION_START_TIME", "").strip()
@@ -463,9 +476,10 @@ def load_closed_trades(start_time_override: str | None = None):
                     if t.get("status") == "holding":
                         continue
 
-                    # OKX专用化：严格过滤非OKX（如历史残留的 Binance / Gate）订单
-                    venue = str(t.get("venue") or t.get("exchange") or "okx").lower()
-                    if venue != "okx":
+                    # 双所版：只复盘「当前生效所」，随账户与标的页切换联动。
+                    # 台账缺失 venue 时按当前生效所归并，避免误杀（旧版硬编码 OKX 会漏掉币安）。
+                    venue = str(t.get("venue") or t.get("exchange") or active_venue).lower()
+                    if venue != active_venue:
                         continue
                     
                     c_time = str(t.get("close_time") or t.get("time") or "")
@@ -1066,6 +1080,7 @@ def run_self_evolution(force: bool = False):
     log_msg(f"🧬 启动 AstraQuant AI 大脑自进化认知复盘与实战心法提炼 (v{__version__} Crypto Focus)...")
 
     closed_trades = load_closed_trades()
+    active_venue = _resolve_active_venue()
     total_trades = len(closed_trades)
     ledger_revision = hashlib.sha256(
         json.dumps(closed_trades, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -1260,6 +1275,9 @@ def run_self_evolution(force: bool = False):
         timestamp_str=timestamp_str,
         total_trades=total_trades,
         win_rate=win_rate    )
+
+    # 双所版：报告透出当前生效所，前端自进化页据此标注「当前交易所」。
+    report_payload["active_venue"] = active_venue
 
     atomic_write_json(REPORT_JSON_FILE, report_payload)
 

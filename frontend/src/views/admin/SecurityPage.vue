@@ -148,6 +148,8 @@ async function switchVenue(target: 'okx' | 'binance') {
     if (positionsLoadedOnce.value) {
       await loadPositions()
     }
+    // 通知自进化 / 复盘 / Agents 等页联动切换并刷新（标注当前交易所）
+    window.dispatchEvent(new CustomEvent('astra:venue-changed', { detail: { venue: activeVenue.value } }))
   } catch (e: any) {
     toast.err(t('admin.security.errVenueSwitch', undefined, { msg: e?.message || e }))
   } finally {

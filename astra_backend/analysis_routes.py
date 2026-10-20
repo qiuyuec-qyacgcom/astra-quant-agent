@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from astra_backend import analysis_service as service
 from astra_backend.analysis_store import Archive
-from astra_backend.analysis_capture import identity
+from astra_backend.analysis_capture import identity, venue_identity
 from astra_backend.analysis_metrics import breakdown
 from astra_backend.analysis_export import write_bundle
 from astra_backend.analysis_export_jobs import ExportJobs, ExportBusy
@@ -32,10 +32,23 @@ def install_routes(app, require_admin):
     def authenticate(x_astra_session: str | None = Header(default=None,alias="X-Astra-Session")):
         return require_admin(x_astra_session=x_astra_session)
 
+    def _active_venue() -> str:
+        """归一当前生效交易所（auto/空/非法 → okx），与切换器共用同一单一事实源。"""
+        try:
+            from astra_backend.exchanges.routing_policy import load_preferred_venue
+            from scripts.instrument_pool import normalize_venue
+            return normalize_venue(load_preferred_venue())
+        except Exception:
+            return "okx"
+
+    def _active_account() -> str:
+        """复盘归档按当前生效所隔离：OKX 用默认 profile 身份，币安用指纹身份。"""
+        return venue_identity("binance") if _active_venue() == "binance" else identity()
+
     def selection(account: str = "", start: str | None = None, end: str | None = None,
                   inst: str = "", side: str = "", config_id: str = "", result: str = "", status: str = "closed"):
         try:
-            return account or identity(), service.filters(start,end,inst,side,config_id,result,status)
+            return account or _active_account(), service.filters(start,end,inst,side,config_id,result,status)
         except ValueError as exc:
             raise HTTPException(status_code=422,detail=str(exc)) from exc
 
@@ -45,7 +58,7 @@ def install_routes(app, require_admin):
         ids = set(trade_ids.split(",")) - {""}
         if len(ids) > 100:
             raise HTTPException(status_code=422, detail="最多统计 100 笔可见记录")
-        rows = [t for t in Archive().trades(identity()) if t["id"] in ids]
+        rows = [t for t in Archive().trades(_active_account()) if t["id"] in ids]
         return {"statistics": summarize(rows), "performance": legacy_performance(rows)}
 
     prefix = "/api/v1/admin/analysis"
@@ -53,7 +66,9 @@ def install_routes(app, require_admin):
 
     @app.get(prefix+"/summary",dependencies=dependencies)
     def summary(selected=Depends(selection)):
-        return service.load_summary(*selected)
+        payload = service.load_summary(*selected)
+        payload["active_venue"] = _active_venue()
+        return payload
 
     @app.get(prefix+"/breakdown",dependencies=dependencies)
     def grouped(by: str = "inst", selected=Depends(selection)):
@@ -69,7 +84,7 @@ def install_routes(app, require_admin):
 
     @app.get(prefix+"/trades/{trade_id}",dependencies=dependencies)
     def trade(trade_id: str,account: str = ""):
-        value=service.trade_detail(account or identity(),trade_id)
+        value=service.trade_detail(account or _active_account(),trade_id)
         if value is None: raise HTTPException(status_code=404,detail="交易不存在或不属于所选账户")
         return value
 
@@ -79,13 +94,13 @@ def install_routes(app, require_admin):
 
     @app.get(prefix+"/events/{event_id}",dependencies=dependencies)
     def event(event_id: str,account: str = ""):
-        value=service.event_detail(account or identity(),event_id)
+        value=service.event_detail(account or _active_account(),event_id)
         if value is None: raise HTTPException(status_code=404,detail="事件不存在或不属于所选账户")
         return value
 
     @app.get(prefix+"/configurations/{config_id}",dependencies=dependencies)
     def configuration(config_id: str,account: str = ""):
-        value=service.configuration_detail(account or identity(),config_id)
+        value=service.configuration_detail(account or _active_account(),config_id)
         if value is None: raise HTTPException(status_code=404,detail="配置不存在或不属于所选账户")
         return value
 

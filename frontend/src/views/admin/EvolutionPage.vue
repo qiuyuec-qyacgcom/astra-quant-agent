@@ -33,7 +33,7 @@ import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
 const toast = useToast();
 const { ask } = useConfirm();
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import PageHeader from '../../components/admin/PageHeader.vue';
 import BaseDialog from '../../components/base/BaseDialog.vue';
 import BaseSwitch from '../../components/base/BaseSwitch.vue';
@@ -68,6 +68,9 @@ const memoryVersion = ref<string | null>(null);
 const memoryStructured = ref<boolean | null>(null);
 const newMemoryText = ref('');
 const evolutionReport = ref<any>(null);
+// 当前生效交易所（随账户与标的页切换联动；报告产物透出 active_venue）
+const activeVenue = ref<'okx' | 'binance'>('okx');
+const venueLabel = computed(() => activeVenue.value === 'binance' ? t('admin.security.venueBinance') : t('admin.security.venueOkx'));
 const evolutionStartTime = ref('2026-09-01 00:00:00');
 const activeTradesCount = ref<number | null>(null);
 const savingStartTime = ref(false);
@@ -228,6 +231,7 @@ async function loadData() {
     memoryVersion.value = memRes?.version || null;
     memoryStructured.value = memRes && 'legacy_read_only' in memRes ? !memRes.legacy_read_only : null;
     evolutionReport.value = reportRes || null;
+    activeVenue.value = (reportRes?.active_venue === 'binance' ? 'binance' : 'okx');
     loadEvolutionConfig();
     syncWorkingModules();
   } catch (e: any) {
@@ -484,12 +488,22 @@ function evoStatusLabel(status?: string, error?: string): string {
 }
 
 onMounted(loadData);
+
+// 监听交易所切换：联动刷新并标注当前所
+function onVenueChanged(e: Event) {
+  const venue = (e as CustomEvent).detail?.venue;
+  activeVenue.value = venue === 'binance' ? 'binance' : 'okx';
+  void loadData();
+}
+onMounted(() => window.addEventListener('astra:venue-changed', onVenueChanged));
+onUnmounted(() => window.removeEventListener('astra:venue-changed', onVenueChanged));
 </script>
 
 <template>
   <div class="evo">
     <PageHeader :title="t('nav.admin.evolution')">
       <template #actions>
+        <span class="badge badge-accent mono">{{ venueLabel }}</span>
         <span class="dsh-pill">
           <span class="dsh-status-dot active" aria-hidden="true" />
           {{ t('admin.evolution.guardChip') }}

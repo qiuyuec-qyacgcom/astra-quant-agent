@@ -21,6 +21,9 @@ const tr = (key: string) => t(`analysis.${key}`);
 const toast = useToast();
 const api = '/api/v1/admin/analysis';
 const summary = ref<RecordData | null>(null);
+// 当前生效交易所（随账户与标的页切换联动；复盘 summary 返回 active_venue）
+const activeVenue = ref<'okx' | 'binance'>('okx');
+const venueLabel = computed(() => activeVenue.value === 'binance' ? t('admin.security.venueBinance') : t('admin.security.venueOkx'));
 const loading = ref(false), exporting = ref(false), error = ref('');
 interface ExportJob {
   id: string; state: 'running' | 'cancelling' | 'ready' | 'failed' | 'cancelled';
@@ -93,6 +96,7 @@ async function apply(reset = true) {
     ]);
     if (id !== sequence) return;
     summary.value = s; account.value = s.account;
+    activeVenue.value = (s.active_venue === 'binance' ? 'binance' : 'okx');
     const fixed = new URLSearchParams(query); fixed.set('account', s.account); applied.value = fixed.toString();
     trades.value = rows.items; tradeTotal.value = rows.total; groups.value = grouped.items;
     events.value = history.items; eventTotal.value = history.total;
@@ -300,14 +304,25 @@ onMounted(() => {
       void pollExport(id);
     }
   } catch { /* The export remains usable without browser storage. */ }
+  // 监听交易所切换：联动刷新并标注当前所
+  window.addEventListener('astra:venue-changed', onVenueChanged);
 });
-onUnmounted(() => { disposed = true; clearTimeout(exportTimer); });
+onUnmounted(() => { disposed = true; clearTimeout(exportTimer); window.removeEventListener('astra:venue-changed', onVenueChanged); });
+
+function onVenueChanged(e: globalThis.Event) {
+  const venue = (e as CustomEvent).detail?.venue;
+  activeVenue.value = venue === 'binance' ? 'binance' : 'okx';
+  // 切换所后清空本地筛选身份，让后端按新生效所解析 account，再全量刷新
+  account.value = '';
+  void apply();
+}
 </script>
 
 <template>
   <div class="analysis-page space-y-4">
     <PageHeader :title="tr('title')" :description="tr('subtitle')">
       <template #actions>
+        <span class="badge badge-accent mono">{{ venueLabel }}</span>
         <button type="button" class="btn btn-ghost btn-sm" :disabled="loading" @click="apply(false)"><RefreshCw class="shrink-0" :class="{ 'animate-spin': loading }" />{{ tr('refresh') }}</button>
         <button type="button" class="btn btn-primary btn-sm" :disabled="exporting || loading || !applied" @click="exportAll"><Download />{{ exporting ? tr('exporting') : tr('export') }}</button>
       </template>

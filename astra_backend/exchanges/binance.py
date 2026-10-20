@@ -1219,6 +1219,7 @@ class BinanceExchange:
             entry_order_ids.append(oid)
         return {
             "instId": inst_id,
+            "venue": "binance",
             "direction": direction,
             "openAvgPx": _text(open_notional / open_qty),
             "closeAvgPx": _text(close_notional / close_qty),
@@ -1231,7 +1232,10 @@ class BinanceExchange:
             "openMaxPos": _text(open_qty),
             "cTime": str(cycle[0].get("time") or ""),
             "uTime": str(cycle[-1].get("time") or ""),
-            "type": "1",
+            # 币安 `_closed_cycle` 每次产出的是一个**完整开→平周期**（running 归零才
+            # 关闭 cycle），等价于 OKX 的 type=2「最终平仓」。此前误标 type=1 会让
+            # 复盘 normalize_position 判成 partial 而漏掉整条平仓记录。
+            "type": "2",
             "pnlRatio": None,
             "posId": str(cycle[0].get("orderId") or ""),
             "entryOrderIds": entry_order_ids,
