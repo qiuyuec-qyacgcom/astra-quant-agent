@@ -348,6 +348,7 @@ def _holding_row(p, venue, *, env, trackers, tz_bj, allowed, council_by_inst,
 
 
 from scripts.ledger.okx_history import build_okx_trade
+from scripts.ledger.binance_history import build_binance_trade
 from scripts.ledger.evidence_join import enrich_closed_rows_with_evidence
 from scripts.trader.close_evidence import load_close_evidence
 from scripts.ledger.merge import merge_lifecycle_trades
@@ -512,6 +513,42 @@ def build_lifecycle_ledger():
             continue
         trades_lifecycle.append(_trade)
 
+    # ── 双所化：币安平仓周期也写进主脑台账 ─────────────────────────────────
+    # 币安 adapter 的 `positions_history` 已预聚合出完整开→平周期（字段对齐 OKX
+    # positions-history：openAvgPx/closeAvgPx/pnl/fee/cTime/uTime/closeTotalPos），
+    # 经 `build_binance_trade` 翻成 venue=binance 的 closed 行并入台账，让「切换交易所
+    # 后自进化引擎按当前所过滤」能命中币安记录（此前台账只收录 OKX → 切币安后有效
+    # 交易数恒为 0）。币安取数失败仅标记旁车并跳过，**绝不阻断 OKX 台账落盘**。
+    _binance_pos_history = []
+    _binance_ok = False
+    try:
+        from astra_backend.exchanges import registry as _venue_registry
+        _binance_adapter = _venue_registry.get_adapter("binance")
+        _binance_pos_history = _binance_adapter.positions_history(limit=100) or []
+        _binance_ok = True
+        _mark("binance", "ok")
+    except Exception as _binance_err:
+        _mark("binance", "failed", reason=str(_binance_err)[:200])
+        print(f"[sync_full_ledger] 币安台账同步跳过: {_binance_err}")
+
+    if _binance_ok:
+        _binance_seen: dict = {}
+        for _h in _binance_pos_history:
+            _bc_ts = int(_h.get("cTime", 0) or 0) / 1000.0
+            _bu_ts = int(_h.get("uTime", 0) or 0) / 1000.0
+            _b_stable = (str(_h.get("posId") or "").strip()
+                         or (str(int(_bc_ts)) if _bc_ts > 0 else str(int(_bu_ts))))
+            _b_key = f"{_b_stable}|{int(_bc_ts)}"
+            _b_seq = _binance_seen.get(_b_key, 0)
+            _binance_seen[_b_key] = _b_seq + 1
+            _b_id_suffix = f"_{int(_bc_ts)}" + (f"#{_b_seq}" if _b_seq else "")
+            _b_trade = build_binance_trade(
+                h=_h, reset_time=reset_time, allowed=allowed, env=env, tz_bj=tz_bj,
+                id_suffix=_b_id_suffix, datetime=datetime, get_ct_val=get_ct_val)
+            if _b_trade is None:
+                continue
+            trades_lifecycle.append(_b_trade)
+
     # 聚合去重合并（按 id 去重，按 close_time 降序）
     trades_map = merge_lifecycle_trades(
         old_trades=old_trades,
@@ -594,10 +631,14 @@ def build_lifecycle_ledger():
         existing_closed_ids=existing_closed_ids,
         trades_lifecycle=trades_lifecycle    )
 
-    # 批E：trades_lifecycle 现含「OKX 平仓 + OKX 活动持仓」，输出必须分开报。
-    _okx_closed_n = sum(1 for t in trades_lifecycle if t.get("status") != "holding")
-    print(f"✅ Authentic OKX Ledger: {len(combined_trades)} total trades "
-          f"(OKX 平仓: {_okx_closed_n}, 活动持仓: {len(_holding_rows)}).")
+    # 批E：trades_lifecycle 现含「OKX 平仓 + 币安平仓 + OKX 活动持仓」，输出分所报。
+    _closed_n = sum(1 for t in trades_lifecycle if t.get("status") != "holding")
+    _binance_closed_n = sum(
+        1 for t in trades_lifecycle
+        if t.get("status") != "holding" and str(t.get("venue") or "").lower() == "binance")
+    _okx_closed_n = _closed_n - _binance_closed_n
+    print(f"✅ Authentic Ledger: {len(combined_trades)} total trades "
+          f"(OKX 平仓: {_okx_closed_n}, 币安平仓: {_binance_closed_n}, 活动持仓: {len(_holding_rows)}).")
     return combined_trades
 
 if __name__ == "__main__":
