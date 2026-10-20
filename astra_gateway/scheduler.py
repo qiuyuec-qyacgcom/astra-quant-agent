@@ -38,9 +38,9 @@ JOBS = (
     # 而 OI 重建本身是 5m 粒度、提示词每 15 分钟才消费一次 ⇒ 10 分钟足够新鲜（引擎侧
     # 30 分钟才算 stale，留 3 倍余量）。超时 300s 给慢网络留头。
     # 平仓复盘归档：只读拉取 OKX 四类历史（positions-history/orders/fills/bills）并对账
-    # join 成完整平仓记录。与 trader 同为 15 分钟周期，offset=30 错峰避免争抢 OKX 接口。
+    # join 成完整平仓记录。每 3 小时一次，offset=30 错峰避免争抢 OKX 接口。
     # 超时 120s 覆盖 4 类 × 2 页 + reconcile；未配置凭证时入口 fail-closed 返回 1。
-    JobSpec("analysis_archive", "sync_analysis_archive.py", 15 * 60, 120, offset_seconds=30),
+    JobSpec("analysis_archive", "sync_analysis_archive.py", 3 * 60 * 60, 120, offset_seconds=30),
     JobSpec("daily_briefing", "daily_summary_and_backup.py", None, 600, "briefing_times", ("08:00", "20:00")),
     JobSpec("self_improvement", "self_improvement_engine.py", None, 1200, "self_improvement_times", ("02:00", "08:00", "14:00", "20:00")),
 )
