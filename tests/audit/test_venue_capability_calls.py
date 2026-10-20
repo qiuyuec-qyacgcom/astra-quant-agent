@@ -55,9 +55,12 @@ VENUEISH_NAMES = {"v", "venue", "_v", "_gv", "target_venue", "venue_key", "name"
 ALLOWLIST: dict[tuple[str, str, int], str] = {
     # BinanceTradingAdapter 组合的 self._ex 是自包含 BinanceExchange（非多态适配器），
     # 其方法集在 __init__ 里已固定，无「另一实现会 AttributeError」的能力差异风险。
-    # set_leverage 在此处是「组合对象上的确定调用」，不是对多态 adapter 的能力探测。
-    ("astra_backend/exchanges/binance.py", "set_leverage", 2394):
+    # set_leverage / open_orders 在此处是「组合对象上的确定调用」，不是对多态 adapter
+    # 的能力探测。
+    ("astra_backend/exchanges/binance.py", "set_leverage", 2415):
         "self._ex 类型固定为 BinanceExchange（自包含类），set_leverage 确定存在，非多态能力差异调用",
+    ("astra_backend/exchanges/binance.py", "open_orders", 2412):
+        "self._ex 类型固定为 BinanceExchange（自包含类），open_orders 确定存在，非多态能力差异调用",
 }
 
 

@@ -615,7 +615,8 @@ def is_circuit_breaker_active(usdt_available: float = None):
 
 def query_positions() -> Tuple[bool, List[Dict[str, Any]], str]:
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
-    return _venue_query_positions(okx_rest=okx_rest)
+    return _venue_query_positions(okx_rest=okx_rest, binance_rest=_binance_adapter(),
+                                  active_venue=_active_venue())
 
 @analysis_capture.observed("position.close")
 def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, venue: str = "okx") -> Tuple[bool, str]:
@@ -828,6 +829,30 @@ def _binance_adapter():
     except Exception as exc:
         print(f"[币安适配器] warn 不可用: {exc}")
         return None
+
+
+def _active_venue():
+    """本轮主脑执行场所 = preferred_venue（binance 时切币安，否则恒 OKX）。
+
+    只认 ``preferred_venue == "binance"``：``auto``/``okx``/任何非法值都回 OKX，
+    保证主脑默认行为与「OKX 为主所」逐位一致。前端「账户/标的」切换按钮把
+    ``data/venue_routing.json`` 的 ``preferred_venue`` 改成 ``binance`` 时，
+    主脑执行面（持仓/挂单/余额/下单/平仓/台账 holding）才真正切到币安。
+    """
+    return "binance" if load_preferred_venue() == "binance" else "okx"
+
+
+def _binance_execution_ready():
+    """币安执行是否就绪：执行开闸 + 适配器可实例化（fail-closed）。"""
+    try:
+        _env = selected_environment()
+        _mode = str(getattr(_env, "mode", "") or "")
+        if not venue_registry.execution_open("binance", _mode):
+            return False
+        return venue_registry.get_adapter("binance") is not None
+    except Exception as exc:
+        print(f"[币安就绪] warn 检查失败: {exc}")
+        return False
 
 
 def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: float, price: float, tp_px: float, sl_px: float, venue_ctx: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
@@ -1217,6 +1242,10 @@ def _format_entry_diagnostics(diag) -> str:
 @single_trader_cycle
 @analysis_capture.cycle("trader")
 def execute_portfolio():
+    # 0. 本轮执行场所（切换按钮 → preferred_venue 联动执行面）。
+    active_venue = _active_venue()
+    print(f"[执行场所] 本轮主脑执行场所 = {active_venue}")
+
     # 0a. 交易时段闸门（2026-09-30）：**在任何网络调用之前**判定，因为它的目的就是省钱。
     #    窗口内 / 未启用 / ASTRA_SESSION_FORCE=1 ⇒ full（后面逐位照旧）；
     #    窗口外 ⇒ manage_only（跳过相位 4 的批量主脑调用与新开仓）或 off（相位 0/0a 后退出）。
@@ -1272,12 +1301,15 @@ def execute_portfolio():
 
     # 1. Fetch Real Positions. A failed account query aborts the complete cycle.
     account_snapshot = {}
+    binance_rest = _binance_adapter()
     _phase1 = fetch_positions_and_reconcile(
         entries_blocked=entries_blocked,
         current_environment=current_environment,
         okx_rest=okx_rest,
         query_positions=query_positions,
         reconcile_reservation_ledger=reconcile_reservation_ledger,
+        binance_rest=binance_rest,
+        active_venue=active_venue,
         account_snapshot=account_snapshot)
     if _phase1 is None:
         return None
@@ -1450,7 +1482,12 @@ def execute_portfolio():
         _atomic_write_json=_atomic_write_json)
 
 if __name__ == "__main__":
-    if not selected_environment().configured:
+    if _active_venue() == "binance":
+        # 币安主脑执行：币安凭证齐备 + 执行开闸才放行，否则 fail-closed 退出。
+        if not _binance_execution_ready():
+            print("[Engine NOT READY] 币安执行未开闸/凭证不可用——退出，不执行任何交易。")
+            sys.exit(3)
+    elif not selected_environment().configured:
         print("[Engine NOT READY] OKX API Key 未配置（LIVE/DEMO）——退出，不执行任何交易。")
         sys.exit(3)
     execute_portfolio()

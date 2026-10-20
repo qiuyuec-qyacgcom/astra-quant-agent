@@ -2357,6 +2357,11 @@ class BinanceTradingAdapter(BinancePublicAdapter):
                 "side": side,
                 "posSide": side,
                 "amount": amount,
+                # 补 `pos` 字段（币数绝对值）：主脑对账 `cycle_stages` 用
+                # `float(p.get("pos", 0) or 0) > 0` 判「是否有持仓」；币安归一化
+                # 行原只有 amount/size_signed，缺 pos 会被静默当成无仓。
+                # 语义仅用于「是否有持仓」判断与多空计数，不参与钱口径换算。
+                "pos": amount,
                 "size_signed": pos_val if side == "long" else -amount,
                 "entry_price": entry,
                 "mark_price": mark,
@@ -2393,6 +2398,18 @@ class BinanceTradingAdapter(BinancePublicAdapter):
 
     def cancel_order(self, inst_id: str, order_id: str) -> dict[str, Any]:
         return self._ex.cancel_order(inst_id, order_id)
+
+    def open_orders(self, inst_id: str | None = None) -> list[dict[str, Any]]:
+        """币安活动挂单 → OKX 同构（桥接内部 ``BinanceExchange.open_orders``）。
+
+        主脑交易循环的挂单对账（``cycle_stages.fetch_positions_and_reconcile``）
+        需要与 ``okx_rest.pending_orders()`` 同构的挂单枚举，本方法补上币安这一支。
+        返回字段经 ``_normalize_order`` 归一为 ``instId/ordId/clOrdId/posSide/side/
+        state/sz/accFillSz/px/avgPx/reduceOnly/cTime/uTime/quantity_unit``，其中
+        ``state`` 映射为 ``live/partially_filled/filled/canceled``，与主脑对账的
+        ``state in {"live","partially_filled"}`` 判定兼容。
+        """
+        return self._ex.open_orders(inst_id)
 
     def set_leverage(self, inst_id: str, leverage: Any, pos_side: str = "long") -> dict[str, Any]:
         return self._ex.set_leverage(inst_id, leverage, pos_side=pos_side)

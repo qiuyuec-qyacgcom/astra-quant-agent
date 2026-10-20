@@ -287,7 +287,9 @@ def _holding_row(p, venue, *, env, trackers, tz_bj, allowed, council_by_inst,
         lever = 3
     fee = float(p.get("fee", 0.0) or 0.0)
     funding_fee = float(p.get("funding_fee", 0.0) or 0.0)
-    ct_val = get_ct_val(inst)
+    # 币安币本位：`pos` 是币数（base_asset），ct_val 恒 1；OKX 才按合约面值换算。
+    # 若误用 get_ct_val（会回退查 OKX 的 ctVal，如 BTC=0.01），币安 notional 会少 100 倍。
+    ct_val = 1.0 if str(venue or "").lower() == "binance" else get_ct_val(inst)
 
     raw_notional = abs(float(p.get("notional", 0.0) or 0.0))
     if raw_notional > 0:
@@ -344,6 +346,30 @@ def _holding_row(p, venue, *, env, trackers, tz_bj, allowed, council_by_inst,
         "scale_out_phase": int(t_info.get("scale_out_phase", 0) or 0),
         "council": council_by_inst.get(inst),
         "signal_snapshot": t_info.get("signal_snapshot"),
+    }
+
+
+def _binance_to_holding_shape(p):
+    """币安 adapter `positions()` 归一化行 → `_holding_row` 期望的 OKX 原始形状。
+
+    `_holding_row` 依赖 OKX 原始字段（pos/avgPx/markPx/upl/lever/notional/margin/cTime），
+    而币安归一化行是 amount/size_signed/entry_price/mark_price/leverage/margin_mode，
+    但 `raw` 保留了 BinanceExchange.positions() 的原始行（含 OKX 同构字段）。
+    """
+    raw = p.get("raw") or {}
+    return {
+        "instId": p.get("instId"),
+        "posSide": p.get("posSide"),
+        "side": p.get("side"),
+        "pos": raw.get("pos", p.get("amount", p.get("pos", 0))),
+        "avgPx": raw.get("avgPx", p.get("entry_price")),
+        "markPx": raw.get("markPx", p.get("mark_price")),
+        "upl": raw.get("upl", p.get("upl")),
+        "lever": raw.get("lever", p.get("leverage")),
+        "mgnMode": raw.get("mgnMode", p.get("margin_mode")),
+        "margin": raw.get("margin", "0"),
+        "notional": raw.get("notionalUsd", "0"),
+        "cTime": raw.get("cTime", ""),
     }
 
 
@@ -453,6 +479,20 @@ def build_lifecycle_ledger():
             _mark("okx", "failed", reason=str(_okx_err)[:200])
             print(f"[sync_full_ledger] OKX 台账同步跳过: {_okx_err}")
 
+    # 双所化：币安活动持仓（holding 行用）——需在 holding 块之前取数。
+    # 仅执行开闸时读取；未开闸/取数失败不阻断 OKX 台账落盘。
+    _binance_pos_data = []
+    _binance_positions_ok = False
+    _binance_adapter = None
+    try:
+        from astra_backend.exchanges import registry as _venue_registry
+        _binance_adapter = _venue_registry.get_adapter("binance")
+        if _venue_registry.execution_open("binance", env.mode):
+            _binance_pos_data = _binance_adapter.positions() or []
+            _binance_positions_ok = True
+    except Exception as _bn_pos_err:
+        print(f"[sync_full_ledger] 币安活动持仓读取跳过: {_bn_pos_err}")
+
     trades_lifecycle = []
 
     # Process Active Holding Positions FIRST（批E）
@@ -471,6 +511,16 @@ def build_lifecycle_ledger():
                             unmanaged=_unmanaged_live)
         if _row:
             _holding_rows.append(_row)
+
+    # 双所化：币安活动持仓也进 holding 行（此前币安只写平仓记录，在持仓位在风险界面不可见）。
+    if _binance_positions_ok:
+        _queried_venues.add("binance")
+        for _bp in _binance_pos_data:
+            _brow = _holding_row(_binance_to_holding_shape(_bp), "binance", env=env,
+                                 trackers=trackers, tz_bj=tz_bj, allowed=allowed,
+                                 council_by_inst=council_by_inst, unmanaged=_unmanaged_live)
+            if _brow:
+                _holding_rows.append(_brow)
 
     trades_lifecycle.extend(_holding_rows)
 
@@ -522,11 +572,12 @@ def build_lifecycle_ledger():
     _binance_pos_history = []
     _binance_ok = False
     try:
-        from astra_backend.exchanges import registry as _venue_registry
-        _binance_adapter = _venue_registry.get_adapter("binance")
-        _binance_pos_history = _binance_adapter.positions_history(limit=100) or []
-        _binance_ok = True
-        _mark("binance", "ok")
+        if _binance_adapter is not None:
+            _binance_pos_history = _binance_adapter.positions_history(limit=100) or []
+            _binance_ok = True
+            _mark("binance", "ok")
+        else:
+            _mark("binance", "failed", reason="adapter unavailable")
     except Exception as _binance_err:
         _mark("binance", "failed", reason=str(_binance_err)[:200])
         print(f"[sync_full_ledger] 币安台账同步跳过: {_binance_err}")

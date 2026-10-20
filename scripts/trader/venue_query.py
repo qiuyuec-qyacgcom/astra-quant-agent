@@ -37,10 +37,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 def query_positions(
                               *,
-                              okx_rest) -> Tuple[bool, List[Dict[str, Any]], str]:
+                              okx_rest,
+                              binance_rest=None,
+                              active_venue="okx") -> Tuple[bool, List[Dict[str, Any]], str]:
     """Distinguish an exchange-confirmed empty account from a failed query."""
     try:
-        rows = okx_rest.positions()
+        from scripts.trader.venue_runtime import get_venue_runtime
+        _rt = get_venue_runtime(active_venue, okx_rest=okx_rest, binance_rest=binance_rest)
+        rows = _rt.positions()
     except Exception as exc:
         return False, [], f"invalid positions response: {exc}"
     return True, rows, ""

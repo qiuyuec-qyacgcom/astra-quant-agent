@@ -205,6 +205,8 @@ def fetch_positions_and_reconcile(*,
         okx_rest,
         query_positions,
         reconcile_reservation_ledger,
+        binance_rest=None,
+        active_venue="okx",
         account_snapshot=None):
     """相位 1：取真实持仓 + 挂单盲区统计 + 预留对账。
 
@@ -255,7 +257,9 @@ def fetch_positions_and_reconcile(*,
     short_count = real_short_count
 
     try:
-        pending_orders = okx_rest.pending_orders()
+        from scripts.trader.venue_runtime import get_venue_runtime as _get_venue_runtime
+        _runtime = _get_venue_runtime(active_venue, okx_rest=okx_rest, binance_rest=binance_rest)
+        pending_orders = _runtime.pending_orders()
     except Exception as pending_exc:
         print(f"[Trader] Abort: unable to verify pending orders: {pending_exc}")
         return None
@@ -292,7 +296,9 @@ def fetch_positions_and_reconcile(*,
         print(f"[预留对账] warn 对账器异常（不影响本周期交易）: {_rc_exc}")
 
     try:
-        bal_res = okx_rest.balances()
+        from scripts.trader.venue_runtime import get_venue_runtime as _get_venue_runtime
+        _runtime = _get_venue_runtime(active_venue, okx_rest=okx_rest, binance_rest=binance_rest)
+        bal_res = _runtime.balances()
     except Exception as bal_exc:
         print(f"[Trader] Abort: unable to verify account balance: {bal_exc}")
         return None

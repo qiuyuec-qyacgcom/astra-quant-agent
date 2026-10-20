@@ -655,7 +655,7 @@ class MainGuardTests(unittest.TestCase):
                     and t.comparators[0].value == "__main__")
         return next(n for n in _TREE.body if _is_main_guard(n))
 
-    def _run_guard(self, configured):
+    def _run_guard(self, configured, active_venue="okx"):
         node = self._main_guard_node()
         module = ast.Module(body=[node], type_ignores=[])
         ast.fix_missing_locations(module)
@@ -664,6 +664,11 @@ class MainGuardTests(unittest.TestCase):
             "__name__": "__main__",
             "selected_environment": lambda: _Frozen() if configured else _Unconfigured(),
             "execute_portfolio": lambda: ran.append(True),
+            # 双所化：入口闸现在按 `_active_venue()` 分派（binance 查币安就绪，
+            # 否则查 OKX configured）。测试默认 active_venue="okx" 走 OKX 分支，
+            # 与旧语义一致。
+            "_active_venue": lambda: active_venue,
+            "_binance_execution_ready": lambda: False,
             "sys": sys,
             "print": lambda *a, **k: None,
         }
@@ -684,6 +689,13 @@ class MainGuardTests(unittest.TestCase):
         error, ran = self._run_guard(True)
         self.assertIsNone(error)
         self.assertEqual(ran, [True])
+
+    def test_binance_not_ready_exits_three(self):
+        """币安主脑执行：未开闸/凭证不可用 → exit 3，不执行交易。"""
+        error, ran = self._run_guard(True, active_venue="binance")
+        self.assertIsInstance(error, SystemExit)
+        self.assertEqual(error.code, 3)
+        self.assertEqual(ran, [])
 
 
 class _Unconfigured:

@@ -95,18 +95,27 @@ def build_state_payload(*, timestamp_full, active_pos_count, max_positions, long
     return payload
 
 
-def venue_position_span(*, okx_count, okx_long, okx_short, max_positions):
+def venue_position_span(*, okx_count, okx_long, okx_short, binance_count=0,
+                        binance_long=0, binance_short=0, max_positions):
     """巡检通知与 AI 提示词共用的「持仓构成」一行（2026-09 用户报缺陷后新增）。
 
     OKX 专用化后系统只有一个场所，故只报 OKX —— 与旧实现"跨所拉不到"时的
     退化输出**逐字相同**（`持仓 N/max (多L/空S)｜okx N`），区别在于那曾是
     "未知/漏报"，现在是**真实全量**。
 
+    币安接入执行面后，币安持仓 > 0 时追加 `binance N` 段；币安为 0 时输出
+    与旧版逐字一致（保证 OKX 主所行为不变）。
+
     返回形如：
 
         持仓 7/9 (多4/空3)｜okx 7
+        持仓 7/9 (多4/空3)｜okx 5 binance 2
 
     纯函数：不碰网络、不读全局，便于逐条钉住口径。
     """
+    if binance_count:
+        return (f"持仓 {int(okx_count + binance_count)}/{max_positions} "
+                f"(多{int(okx_long + binance_long)}/空{int(okx_short + binance_short)})"
+                f"｜okx {int(okx_count)} binance {int(binance_count)}")
     return (f"持仓 {int(okx_count)}/{max_positions} "
             f"(多{int(okx_long)}/空{int(okx_short)})｜okx {int(okx_count)}")
