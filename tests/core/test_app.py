@@ -669,13 +669,27 @@ class AppWiringTests(unittest.TestCase):
     def test_the_eight_routers_are_mounted(self):
         """验证 8 个 APIRouter 的代表性路径都已挂上并生效。
 
-        注意：旧版 FastAPI 的 `include_router` 是**惰性**的——`app.routes` 里躺着 8 个
-        `_IncludedRouter` 包装（`path=None`），真正的路由要经 `app.openapi()` 才摊开。
-        但 FastAPI 0.128+ 已移除 `_IncludedRouter`，`include_router` 改为**立即摊平**成
-        `APIRoute`（`path` 已是具体路径）。故不再断言内部类型，改为直接验证这些代表性
-        路径既在 `app.routes` 里、也在 OpenAPI paths 里，对两个版本都成立。
+        挂载判据用**摊平后的路由路径**：FastAPI 的 `include_router` 在两版实现里表现不一
+        ——旧版（含当前 0.141）把 router 包成 `_IncludedRouter`（`path=None`，惰性摊开），
+        新版则立即摊平成 `APIRoute`（`path` 已是具体路径）。直接读 `app.routes` 的 `path`
+        在旧版下会拿到一堆 `None`。故这里递归展开 `_IncludedRouter` 内层路由收集真实路径，
+        对两版都成立，同时仍以 OpenAPI paths 作为最终一致性锚点。
         """
-        mounted_paths = {getattr(r, "path", None) for r in A.app.routes}
+        def _flatten(routes):
+            out = set()
+            for r in routes:
+                # 新版 FastAPI：`include_router` 已摊平成 APIRoute，path 直接可用
+                p = getattr(r, "path", None)
+                # 旧版 FastAPI（含当前 0.141）：`_IncludedRouter` 惰性包装，真实路由
+                # 在 `original_router.routes` 里，需往下递归摊开
+                original = getattr(r, "original_router", None)
+                if original is not None:
+                    out |= _flatten(getattr(original, "routes", []))
+                elif p is not None:
+                    out.add(p)
+            return out
+
+        mounted_paths = _flatten(A.app.routes)
         paths = _openapi_paths()
         for path in ("/api/v1/health",            # system_router
                      "/api/v1/status",            # system_router
