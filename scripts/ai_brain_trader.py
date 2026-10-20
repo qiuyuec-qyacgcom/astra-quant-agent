@@ -71,7 +71,10 @@ def _get_system_version_tag() -> str:
 
 WORKSPACE_DIR = PROJECT_ROOT
 DATA_DIR = os.path.join(WORKSPACE_DIR, "data")
-from market_data_service import fetch_single_indicator, fetch_ticker, fetch_candles
+from market_data_service import (
+    fetch_single_indicator, fetch_ticker, fetch_candles,
+    fetch_funding_rate, fetch_open_interest, fetch_long_short_ratio, fetch_taker_volume,
+)
 # 结构优化阶段4·B3：单标的数据包装配已搬入 scripts/brain/packages.py（门面保留薄壳）
 from scripts.brain.packages import fetch_single_instrument_package as _fetch_single_instrument_package
 from scripts.brain.prompt import (
@@ -251,6 +254,36 @@ def get_cpa_client_config() -> Tuple[str, str]:
     """
     return _get_cpa_client_config(standalone_settings)
 
+def _active_venue() -> str:
+    """主脑决策链取数场所 = preferred_venue（binance 时切币安，否则恒 OKX）。
+
+    决策链 venue 接线：主脑切币安时，喂给大模型的行情/指标/挂单/撤单必须读币安，
+    不再硬编码 OKX。与 `ai_factor_trader._active_venue()` 语义一致 —— 只有
+    `preferred_venue == "binance"` 才切币安，`auto`/`okx`/非法/读失败都回 OKX。
+
+    直接读单一事实源 `astra_backend.exchanges.routing_policy.load_preferred_venue()`
+    （不 import ai_factor_trader，避免跨进程 worker 耦合与循环依赖）。
+    """
+    try:
+        from astra_backend.exchanges.routing_policy import load_preferred_venue
+        return "binance" if load_preferred_venue() == "binance" else "okx"
+    except Exception:
+        return "okx"
+
+
+def _binance_adapter():
+    """惰性获取币安交易适配器（未配置/未开闸时不实例化，避免无谓出网）。
+
+    决策链 venue 接线：主脑挂单对账/撤单在币安模式下走此适配器（`open_orders`/
+    `cancel_order` 已桥接），与 OKX 直签（okx_rest）并行。
+    """
+    try:
+        from astra_backend.exchanges import registry as venue_registry
+        return venue_registry.get_adapter("binance")
+    except Exception as exc:
+        print(f"[币安适配器] warn 不可用: {exc}")
+        return None
+
 def read_prompt_override() -> str:
     """读取管理员提示词覆盖层（不存在/不可读 → 空串，绝不抛）。"""
     try:
@@ -376,6 +409,12 @@ def fetch_single_instrument_package(item: Dict[str, Any]) -> Dict[str, Any]:
         item,
         fetch_candles=fetch_candles,
         fetch_single_indicator=fetch_single_indicator,
+        fetch_ticker=fetch_ticker,
+        fetch_funding_rate=fetch_funding_rate,
+        fetch_open_interest=fetch_open_interest,
+        fetch_long_short_ratio=fetch_long_short_ratio,
+        fetch_taker_volume=fetch_taker_volume,
+        venue=_active_venue(),
     )
 
 # ── 只读输出 JSON Schema（代码所有，工坊只读不可改）──────────────────────────
@@ -692,11 +731,22 @@ def fetch_pending_orders_list() -> Optional[List[Dict[str, Any]]]:
     行为契约（对齐历史 CLI 挂单查询）：返回列表=成功；查询失败/未配置
     凭证（OKXNotConfigured）→ 告警并返回 None。fail-closed：绝不回退命令行子进程。
 
+    决策链 venue 接线：币安模式走 `_binance_adapter().open_orders()`（已桥接为
+    OKX 同构），否则走 `okx_rest.pending_orders()`。
+
     每笔挂单额外附上 `margin_usdt`（保证金，钱口径）供提示词展示 ——
     消费方（`brain/account_text.build_pending_order_lines`）不得再显示张数。
+    币安侧缺 `lever`/`ctVal` 口径，`margin_usdt` 为 None ⇒ 提示词显示保证金 `--`
+    （fail-closed，不编造）。
     """
     try:
-        fetched = okx_rest.pending_orders()
+        if _active_venue() == "binance":
+            adapter = _binance_adapter()
+            # hasattr 能力探针：币安适配器已桥接 open_orders（能力守卫门要求），
+            # 未桥接时 fail-closed 返回 None（不假定任何适配器都有该方法）。
+            fetched = adapter.open_orders() if (adapter is not None and hasattr(adapter, "open_orders")) else None
+        else:
+            fetched = okx_rest.pending_orders()
     except Exception as e:
         print(f"[AI Brain Batch] Pending orders fetch warning: {e}")
         return None
@@ -713,7 +763,11 @@ def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str
 
     仅当撤单真实成功才打印 🛑（旧 CLI 版失败也无条件打印成功，属假告警，已修正）；
     单笔失败打印 ⚠️ 并继续处理其余项，返回执行日志供测试与审计。
+
+    决策链 venue 接线：币安模式走 `_binance_adapter().cancel_order()`，否则走
+    `okx_rest.cancel_order()`。
     """
+    venue = _active_venue()
     log: List[Dict[str, Any]] = []
     for p_order in pending_mgmt_list or []:
         if not isinstance(p_order, dict):
@@ -724,7 +778,13 @@ def execute_brain_pending_cancels(pending_mgmt_list: List[Any]) -> List[Dict[str
         p_reason = str(p_order.get("reason", "模型指示撤销该挂单"))
         if p_act == "CANCEL" and p_ord_id and p_inst_id:
             try:
-                okx_rest.cancel_order(p_inst_id, p_ord_id)
+                if venue == "binance":
+                    adapter = _binance_adapter()
+                    if adapter is None:
+                        raise RuntimeError("币安适配器不可用，撤单失败")
+                    adapter.cancel_order(p_inst_id, p_ord_id)
+                else:
+                    okx_rest.cancel_order(p_inst_id, p_ord_id)
                 print(f"[AI Brain Batch] 🛑 AI自主撤回失效/过时限价单: {p_inst_id} (ordId={p_ord_id}, 原因={p_reason})")
                 log.append({"ok": True, "instId": p_inst_id, "ordId": p_ord_id, "reason": p_reason})
             except Exception as exc:
@@ -761,31 +821,34 @@ def execute_batch_ai_brain_cycle(
         packages = list(executor.map(fetch_single_instrument_package, TARGET_INSTRUMENTS))
 
     # 顶级聪明钱与大户持仓数据接入（OKX Rubik 公开统计，单一来源）
-    try:
+    # 决策链 venue 接线：币安无等价 Rubik 端点，币安模式跳过（fail-closed，
+    # 保留 smart_money.available=False 与 lsRatio/takerNetUsd 的 "N/A"）。
+    if _active_venue() != "binance":
         try:
-            from scripts.factors.smart_money import fetch_smart_money_for_symbol
-        except ImportError:
-            from factors.smart_money import fetch_smart_money_for_symbol
-        for pkg in packages:
-            ccy = pkg.get("ccy") or pkg.get("name") or ""
-            if not ccy and "-" in pkg.get("instId", ""):
-                ccy = pkg["instId"].split("-")[0]
-            sm_data = fetch_smart_money_for_symbol(ccy, price=float(pkg.get("price") or 0.0))
-            if sm_data:
-                if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
-                    pkg["lsRatio"] = sm_data["lsRatio"]
-                if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
-                    pkg["takerNetUsd"] = sm_data["takerNetUsd"]
-                pkg["smart_money"] = {
-                    "available": True,
-                    "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
-                    "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
-                    "avg_long_entry": "--",
-                    "avg_short_entry": "--",
-                    "top_win_rate": "--",
-                }
-    except Exception as exc:
-        print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
+            try:
+                from scripts.factors.smart_money import fetch_smart_money_for_symbol
+            except ImportError:
+                from factors.smart_money import fetch_smart_money_for_symbol
+            for pkg in packages:
+                ccy = pkg.get("ccy") or pkg.get("name") or ""
+                if not ccy and "-" in pkg.get("instId", ""):
+                    ccy = pkg["instId"].split("-")[0]
+                sm_data = fetch_smart_money_for_symbol(ccy, price=float(pkg.get("price") or 0.0))
+                if sm_data:
+                    if pkg.get("lsRatio") == "N/A" and sm_data.get("lsRatio"):
+                        pkg["lsRatio"] = sm_data["lsRatio"]
+                    if pkg.get("takerNetUsd") == "N/A" and sm_data.get("takerNetUsd"):
+                        pkg["takerNetUsd"] = sm_data["takerNetUsd"]
+                    pkg["smart_money"] = {
+                        "available": True,
+                        "weighted_long_pct": sm_data.get("weighted_long_pct", "--"),
+                        "net_flow_usdt": sm_data.get("takerNetUsd", "--"),
+                        "avg_long_entry": "--",
+                        "avg_short_entry": "--",
+                        "top_win_rate": "--",
+                    }
+        except Exception as exc:
+            print(f"[AI Brain Batch] 聪明钱数据注入降级: {exc}")
 
     positions_context = active_positions_detail
     active_positions_detail = active_positions_detail or []
@@ -826,7 +889,7 @@ def execute_batch_ai_brain_cycle(
         except ImportError:
             from brain.packages import load_quant_factor_tiers
         for _pkg in packages:
-            _fresh_tiers = load_quant_factor_tiers(_pkg.get("instId", ""))
+            _fresh_tiers = load_quant_factor_tiers(_pkg.get("instId", ""), venue=_active_venue())
             if _fresh_tiers:
                 _pkg["quant_factors"] = _fresh_tiers
     except Exception as _qf_err:

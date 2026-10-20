@@ -1139,8 +1139,9 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
 
     每一项失败都只把对应键留 `None`（调用方据此保持占位符），不影响其他项。
 
-    venue="binance"：币安无对等 Rubik 端点（账户多空比/精英持仓/OI 历史序列），
-    返回全 None 空结构，走下游「缺失即缺失」fail-closed 路径。
+    venue="binance"：币安数据门户 `/futures/data/globalLongShortAccountRatio` 提供
+    全网账户多空比等价口径 → 补 `long_short_ratio`；但精英持仓比 / OI 历史序列 /
+    清算脉冲无等价端点 → 保持 None，走下游「缺失即缺失」fail-closed 路径。
     """
     snap: Dict[str, Any] = {
         "funding_rate_pct": None, "next_funding_rate_pct": None,
@@ -1149,6 +1150,18 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
         "liquidation_details": None,
     }
     if _is_binance(venue):
+        # 币安多空比等价口径（`/futures/data/globalLongShortAccountRatio`），经
+        # market_data_service 复用同一封装；其余字段无等价端点保持 None。
+        try:
+            try:
+                from market_data_service import fetch_long_short_ratio
+            except ImportError:  # pragma: no cover - 包导入路径
+                from scripts.market_data_service import fetch_long_short_ratio
+            lsr = fetch_long_short_ratio(inst_id, venue="binance")
+            if lsr is not None:
+                snap["long_short_ratio"] = lsr
+        except Exception:
+            pass  # 取不到就保持 None，不因单点抖动毁掉整轮因子
         return snap
     base = str(ccy or "").upper().strip()
     if not base:
@@ -1215,7 +1228,10 @@ def fetch_taker_volume(ccy: str, period: str, *, timeout: float = 4.0,
     ⚠️ 必须带 TTL：本函数每轮对**每个标的**都要 5m + 1H 两次外呼，
     6 标的池 = 每分钟 12 次；实测不加缓存会偶发 429 并把 CVD 静默打成 0。
 
-    venue="binance"：币安无对等 Rubik taker-volume 端点，返回 None（订单流因子缺失）。
+    venue="binance"：币安 `/futures/data/takerlongshortRatio` 仅提供**单点**快照
+    （无历史序列），无法满足 `compute_cvd_factors` 对 1h 序列与 CVD 背离的计算需求
+    —— 强接会产出残缺 CVD。故保持 fail-closed 返回 None（决策数据包的
+    `takerNetUsd` 单点净差已在 `brain/packages.py` 经 market_data_service 单独补齐）。
     """
     if _is_binance(venue):
         return None

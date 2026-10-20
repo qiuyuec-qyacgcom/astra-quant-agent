@@ -46,8 +46,14 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
                                  news_sentiment_file,
                                  fetch_candles_direct,
                                  instrument_profile,
-                                 load_adaptive_config):
-    """装配单个标的的多因子特征字典。依赖由门面注入，理由见模块 docstring。"""
+                                 load_adaptive_config,
+                                 fetch_ticker=None,
+                                 venue=None):
+    """装配单个标的的多因子特征字典。依赖由门面注入，理由见模块 docstring。
+
+    `venue="binance"` 时 K 线/BBO 盘口走币安公开行情（决策链 venue 接线）；
+    `fetch_ticker` 用于取实时 BBO（币安/OKX 统一走 market_data_service，不再硬编码 URL）。
+    """
     inst_id = item["instId"]
     name = item["name"]
     asset_type = item["type"]
@@ -148,7 +154,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
     # ★ 2026-10：45 → 60。`ema55` 需要 ≥55 根，取 45 根时它**退化等于现价**
     #   （见 `calc_ema` 的缺失语义），而 `signals.py` 用 `px >= ema55*0.994`
     #   判定"顺势回踩"的入场位置 ⇒ 那个条件会恒真。取 60 根后 EMA55 是真指标。
-    raw_15m = fetch_candles_direct(inst_id, "15m", 60)
+    raw_15m = fetch_candles_direct(inst_id, "15m", 60, venue=venue)
     if raw_15m:
         candles_15m = list(reversed(raw_15m))
         closes = [float(c[4]) for c in candles_15m]
@@ -206,14 +212,22 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         f["bidPx"] = f["price"]
         f["askPx"] = f["price"]
         # Fetch Real-time Orderbook Ticker BBO (Best Bid & Ask) for Precision Limit Placement
+        # 决策链 venue 接线：BBO 统一走注入的 fetch_ticker（币安/OKX 由 venue 分流），
+        # 不再硬编码 OKX URL。
         try:
-            req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_t, timeout=3) as response_t:
-                d_t = json.loads(response_t.read().decode("utf-8"))
-                if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
-                    t_item = d_t["data"][0]
+            if fetch_ticker is not None:
+                t_item = fetch_ticker(inst_id, venue=venue)
+                if isinstance(t_item, dict) and t_item.get("last") is not None:
                     f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
                     f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
+            else:
+                req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req_t, timeout=3) as response_t:
+                    d_t = json.loads(response_t.read().decode("utf-8"))
+                    if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
+                        t_item = d_t["data"][0]
+                        f["bidPx"] = float(t_item.get("bidPx", f["price"]) or f["price"])
+                        f["askPx"] = float(t_item.get("askPx", f["price"]) or f["price"])
         except Exception as _bbo_err:
             # 2026-09-16：原先静默 pass —— BBO 取不到时 bid/ask 会悄悄退回最新价，
             # 限价精度随之降级而无人知道。保留降级（不阻断取数），但必须留痕。
@@ -250,7 +264,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
             f["vol_ratio"] = round(f["vol_15m"] / f["vol_ma20"], 2)
 
     # 2. Fetch 1H & 4H Trend Confluence
-    raw_1h = fetch_candles_direct(inst_id, "1H", 35)
+    raw_1h = fetch_candles_direct(inst_id, "1H", 35, venue=venue)
     if raw_1h:
         c_1h = list(reversed(raw_1h))
         closes_1h = [float(c[4]) for c in c_1h]
@@ -297,7 +311,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
             else:
                 f["structure_1h"] = "CHOP"
     
-    raw_4h = fetch_candles_direct(inst_id, "4H", 25)
+    raw_4h = fetch_candles_direct(inst_id, "4H", 25, venue=venue)
     if raw_4h:
         c_4h = list(reversed(raw_4h))
         closes_4h = [float(c[4]) for c in c_4h]

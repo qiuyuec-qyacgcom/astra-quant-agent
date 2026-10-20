@@ -73,6 +73,10 @@ class _Base(unittest.TestCase):
         self.candle_routes: dict = {}
         self.indicator_calls: list = []
         self.indicator_result = {"adx": 27.5}
+        self.funding_calls: list = []
+        self.oi_calls: list = []
+        self.lsr_calls: list = []
+        self.taker_calls: list = []
         for name, value in (
             ("note_failure", lambda src, exc: self.failures.append((src, str(exc)))),
             ("print", lambda *a, **k: self.printed.append(" ".join(str(x) for x in a))),
@@ -87,20 +91,85 @@ class _Base(unittest.TestCase):
         item.update(over)
         return item
 
-    def _fetch_candles(self, inst_id, bar="15m", limit=45):
+    def _fetch_candles(self, inst_id, bar="15m", limit=45, venue=None):
         route = self.candle_routes.get(bar)
         if isinstance(route, Exception):
             raise route
         return route if route is not None else []
 
-    def _fetch_indicator(self, inst_id, name, bar="1H"):
+    def _fetch_indicator(self, inst_id, name, bar="1H", venue=None):
         self.indicator_calls.append((inst_id, name, bar))
         if isinstance(self.indicator_result, Exception):
             raise self.indicator_result
         return self.indicator_result
 
-    def _run(self, *, http=None, item=None, candles=None, full=True):
+    def _ticker_from_http(self, default=TICKER):
+        """从 `http` 覆盖读 ticker 的边界情况（模拟原 urllib 路由语义）。
+
+        返回 `market_data_service.fetch_ticker` 语义的**单行 dict**（`data[0]`），
+        或抛异常（模拟网络错误）。
+        """
+        override = self.http_routes.get("/market/ticker", default)
+        if isinstance(override, Exception):
+            raise override
+        data = override.get("data") or []
+        if override.get("code") != "0" or not data:
+            # 非零 code / 空 data ⇒ 返回 None（等价原「没取到数据」）
+            return None
+        return data[0]
+
+    def _fetch_ticker(self, inst_id, venue=None):
+        t = self._ticker_from_http()
+        return t
+
+    def _funding_from_http(self, default=FUNDING):
+        override = self.http_routes.get("/public/funding-rate", default)
+        if isinstance(override, Exception):
+            raise override
+        data = override.get("data") or []
+        if override.get("code") != "0" or not data:
+            return None
+        # 返回已 ×100 的百分比（等价 market_data_service.fetch_funding_rate 语义）
+        return round(float(data[0].get("fundingRate", 0)) * 100, 4)
+
+    def _fetch_funding_rate(self, inst_id, venue=None):
+        self.funding_calls.append((inst_id, venue))
+        return self._funding_from_http()
+
+    def _oi_from_http(self, default=OPEN_INTEREST):
+        override = self.http_routes.get("/public/open-interest", default)
+        if isinstance(override, Exception):
+            raise override
+        data = override.get("data") or []
+        if override.get("code") != "0" or not data:
+            return None
+        return {"oiUsd": data[0].get("oiUsd", "0")}
+
+    def _fetch_open_interest(self, inst_id, venue=None):
+        self.oi_calls.append((inst_id, venue))
+        return self._oi_from_http()
+
+    def _fetch_long_short_ratio(self, inst_id, venue=None):
+        """币安多空比 mock：从 `self.lsr_result` 读，默认 None（取不到）。"""
+        self.lsr_calls.append((inst_id, venue))
+        if isinstance(self.lsr_result, Exception):
+            raise self.lsr_result
+        return self.lsr_result
+
+    def _fetch_taker_volume(self, inst_id, venue=None):
+        """币安主动买卖量 mock：从 `self.taker_result` 读，默认 None。"""
+        self.taker_calls.append((inst_id, venue))
+        if isinstance(self.taker_result, Exception):
+            raise self.taker_result
+        return self.taker_result
+
+    def _run(self, *, http=None, item=None, candles=None, full=True, venue=None):
         http = http if http is not None else {}
+        self.http_routes = http
+        if not hasattr(self, "lsr_result"):
+            self.lsr_result = None
+        if not hasattr(self, "taker_result"):
+            self.taker_result = None
         routes = {"/market/ticker": TICKER, "/public/funding-rate": FUNDING,
                   "/public/open-interest": OPEN_INTEREST,
                   "long-short-account-ratio": LS_RATIO, "taker-volume": TAKER}
@@ -123,7 +192,13 @@ class _Base(unittest.TestCase):
             return bp.fetch_single_instrument_package(
                 item or self._item(),
                 fetch_candles=self._fetch_candles,
-                fetch_single_indicator=self._fetch_indicator)
+                fetch_single_indicator=self._fetch_indicator,
+                fetch_ticker=self._fetch_ticker,
+                fetch_funding_rate=self._fetch_funding_rate,
+                fetch_open_interest=self._fetch_open_interest,
+                fetch_long_short_ratio=self._fetch_long_short_ratio,
+                fetch_taker_volume=self._fetch_taker_volume,
+                venue=venue)
 
 
 class DefaultShapeTests(_Base, unittest.TestCase):
@@ -376,9 +451,12 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
     def test_crypto_queries_all_swap_specific_sources(self):
         pkg = self._run()
         urls = " ".join(self.calls)
-        for fragment in ("funding-rate", "open-interest", "long-short-account-ratio",
-                         "taker-volume"):
+        # ★ venue 接线后，funding/OI 走注入函数（不再触发 urllib），
+        #   只有 lsRatio/taker 仍走 urllib 的 Rubik 端点
+        for fragment in ("long-short-account-ratio", "taker-volume"):
             self.assertIn(fragment, urls)
+        self.assertEqual(self.funding_calls, [("BTC-USDT-SWAP", None)])
+        self.assertEqual(self.oi_calls, [("BTC-USDT-SWAP", None)])
         self.assertEqual(pkg["fundingRate"], 0.012)      # 0.00012 * 100
         self.assertEqual(pkg["lsRatio"], 1.85)
         self.assertEqual(pkg["adx_1h"], 27.5)
@@ -434,6 +512,46 @@ class CryptoOnlySourceTests(_Base, unittest.TestCase):
         pkg = self._run(http={"/market/ticker": {"code": "0", "data": [{"last": "abc"}]}})
         self.assertEqual([f[0] for f in self.failures], ["okx_ticker"])
         self.assertEqual(pkg["price"], 0.0)
+
+
+class BinanceSourceTests(_Base, unittest.TestCase):
+    """币安模式下 lsRatio/takerNetUsd 走注入函数（数据门户等价口径），不再 hard-skip。"""
+
+    def _binance(self, **kw):
+        kw.setdefault("venue", "binance")
+        return self._run(**kw)
+
+    def test_binance_ls_ratio_and_taker_populate_via_injected_fetchers(self):
+        self.lsr_result = 2.35
+        self.taker_result = {"buyVol": "60000", "sellVol": "40000"}
+        pkg = self._binance()
+        # 走注入函数而非 urllib Rubik
+        self.assertEqual(self.lsr_calls, [("BTC-USDT-SWAP", "binance")])
+        self.assertEqual(self.taker_calls, [("BTC-USDT-SWAP", "binance")])
+        # 不触发 OKX Rubik urllib
+        urls = " ".join(self.calls)
+        self.assertNotIn("long-short-account-ratio", urls)
+        self.assertNotIn("taker-volume", urls)
+        self.assertEqual(pkg["lsRatio"], 2.35)
+        self.assertEqual(pkg["takerNetUsd"], "2.0万 U")  # (60000-40000)/1e4
+
+    def test_binance_ls_ratio_missing_keeps_na(self):
+        # 注入函数返回 None（取不到）→ 保持 "N/A"，不编造
+        self.lsr_result = None
+        self.taker_result = None
+        pkg = self._binance()
+        self.assertEqual(pkg["lsRatio"], "N/A")
+        self.assertEqual(pkg["takerNetUsd"], "N/A")
+
+    def test_binance_fetcher_failure_is_isolated(self):
+        self.lsr_result = OSError("lsr down")
+        self.taker_result = OSError("taker down")
+        pkg = self._binance()
+        self.assertEqual(sorted(f[0] for f in self.failures),
+                         ["binance_ls_ratio", "binance_taker_volume"])
+        self.assertEqual(pkg["lsRatio"], "N/A")
+        self.assertEqual(pkg["takerNetUsd"], "N/A")
+        self.assertTrue(pkg["recent_15m"])               # K线不受影响
 
 
 class DataQualityTests(_Base, unittest.TestCase):
@@ -528,11 +646,11 @@ class InjectionTests(_Base, unittest.TestCase):
         seen = {"candles": [], "indicator": []}
         orig = self._fetch_candles
 
-        def spy_candles(inst_id, bar="15m", limit=45):
+        def spy_candles(inst_id, bar="15m", limit=45, venue=None):
             seen["candles"].append(bar)
-            return orig(inst_id, bar=bar, limit=limit)
+            return orig(inst_id, bar=bar, limit=limit, venue=venue)
 
-        def spy_indicator(inst_id, name, bar="1H"):
+        def spy_indicator(inst_id, name, bar="1H", venue=None):
             seen["indicator"].append((inst_id, name, bar))
             return self.indicator_result
 

@@ -610,3 +610,59 @@ def fetch_open_interest(inst_id: str, timeout: float = 3.5, venue: Optional[str]
     if data and data.get("data"):
         return data["data"][0]
     return None
+
+
+def fetch_long_short_ratio(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[float]:
+    """当前多空比（全局账户多空比，5m 粒度）。
+
+    venue="binance" 走币安公开数据门户 `/futures/data/globalLongShortAccountRatio`
+    （返回 `longShortRatio` 数值）；其余走 OKX Rubik `long-short-account-ratio`。
+    两侧语义一致（全局账户多空比），直接返回 float；取不到返回 None（fail-soft）。
+    """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            return _binance_exchange().long_short_ratio(inst_id)
+        except Exception as exc:
+            logger.debug("Binance long/short ratio failed for %s: %s", inst_id, exc)
+            return None
+    # OKX Rubik：返回 [[ts, longShortRatio], ...]，取最新一条的数值
+    base = inst_id.split("-")[0] if "-" in inst_id else inst_id
+    data = _public_get(
+        "/api/v5/rubik/stat/contracts/long-short-account-ratio",
+        params={"ccy": base, "period": "5m"}, timeout=timeout)
+    rows = data.get("data") if data else None
+    if rows and isinstance(rows[0], (list, tuple)) and len(rows[0]) > 1:
+        try:
+            return float(rows[0][1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def fetch_taker_volume(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[Any]:
+    """主动买卖量（taker buy/sell）。
+
+    venue="binance" 走币安 `/futures/data/takerlongshortRatio`，返回单点
+    ``{"buyVol": str, "sellVol": str}``（已按标记价换算 USDT notional）；
+    其余走 OKX Rubik `taker-volume`，返回 ``[[ts, sellVol, buyVol], ...]`` 序列
+    （newest-first，索引 1=卖、索引 2=买）。
+
+    ⚠️ 两侧返回**形状不同**：币安是单点 dict、OKX 是序列。调用方需按 venue 区分，
+    不得假设统一形状。取不到返回 None（fail-soft）。
+    """
+    v = _normalize_venue(venue)
+    if v == "binance":
+        try:
+            return _binance_exchange().taker_volume(inst_id)
+        except Exception as exc:
+            logger.debug("Binance taker volume failed for %s: %s", inst_id, exc)
+            return None
+    base = inst_id.split("-")[0] if "-" in inst_id else inst_id
+    data = _public_get(
+        "/api/v5/rubik/stat/taker-volume",
+        params={"ccy": base, "instType": "CONTRACTS", "period": "5m"}, timeout=timeout)
+    rows = data.get("data") if data else None
+    if rows and isinstance(rows, list) and rows:
+        return rows
+    return None

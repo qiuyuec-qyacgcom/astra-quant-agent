@@ -287,7 +287,16 @@ def update_factor_library(venue: Optional[str] = None) -> Dict[str, Any]:
     """
     # 标的池按 venue 加载（venue=None 时跟随 active venue；不再用模块级缓存，避免切换不刷新）
     target_instruments = load_instruments(venue=venue)
-    v = venue
+    # 决策链 venue 接线：venue=None 时必须解析出**实际生效场所**并透传给因子取数
+    # 与分所快照路径 —— 否则切到币安时「标的池跟随了币安、但因子与快照仍写 OKX」，
+    # 产生跨所污染（旧 bug：v 直接取 venue=None，`_snapshot_file(None)` 恒写 OKX 快照）。
+    if venue is None:
+        from instrument_pool import active_pool_venue
+        v = active_pool_venue()
+    else:
+        v = venue
+    if v not in ("binance", "okx"):
+        v = None  # 非法值回退默认 OKX 路径
 
     # 1. Smart Money Pool：通过 OKX Rubik 官方公开统计端点采集（币安无对等端点→空池）
     #    取数不可用时保持空池 → 优雅缺失化 available=False

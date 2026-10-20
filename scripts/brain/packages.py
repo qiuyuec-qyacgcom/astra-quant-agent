@@ -66,19 +66,30 @@ QUANT_FACTOR_TIERS = (
 )
 
 
-def _factor_snapshot_path() -> str:
+def _factor_snapshot_path(venue: str | None = None) -> str:
+    """因子快照路径，按 venue 分所（与 `factor_library.py::_snapshot_file` 同款）。
+
+    `venue="binance"` → `factor_library_snapshot_binance.json`；否则（OKX/None）
+    → `factor_library_snapshot.json`（向后兼容）。
+    """
     data_dir = os.environ.get("ASTRA_DATA_DIR") or str(_PROJECT_ROOT / "data")
+    v = (str(venue or "").strip().lower()) if venue else ""
+    if v == "binance":
+        return os.path.join(data_dir, "factor_library_snapshot_binance.json")
     return os.path.join(data_dir, "factor_library_snapshot.json")
 
 
-def load_quant_factor_tiers(inst_id: str, *, path: str = None) -> Dict[str, Any]:
+def load_quant_factor_tiers(inst_id: str, *, path: str = None, venue: str | None = None) -> Dict[str, Any]:
     """按 `instId` 从因子引擎快照里取出各梯队因子块。
 
     **失败语义**：文件缺失/损坏/该标的缺席 ⇒ 返回空 dict（提示词侧据此
     显示"因子快照缺失"，**绝不编造中性因子**）。本函数**永不抛异常** ——
     它在每分钟一轮的主脑循环里，抛一次就毁掉整轮决策。
+
+    `venue="binance"` 时读分所快照 `factor_library_snapshot_binance.json`
+    （决策链 venue 接线，避免币安模式下混入 OKX 口径因子）。
     """
-    target = path or _factor_snapshot_path()
+    target = path or _factor_snapshot_path(venue=venue)
     try:
         with open(target, "r", encoding="utf-8") as f:
             snap = json.load(f)
@@ -99,12 +110,30 @@ def load_quant_factor_tiers(inst_id: str, *, path: str = None) -> Dict[str, Any]
 
 def fetch_single_instrument_package(item: Dict[str, Any], *,
                                    fetch_candles,
-                                   fetch_single_indicator) -> Dict[str, Any]:
-    """装配单标的数据包；两个行情函数由门面在**调用时**注入（理由见模块 docstring）。"""
+                                   fetch_single_indicator,
+                                   fetch_ticker=None,
+                                   fetch_funding_rate=None,
+                                   fetch_open_interest=None,
+                                   fetch_long_short_ratio=None,
+                                   fetch_taker_volume=None,
+                                   venue: str | None = None) -> Dict[str, Any]:
+    """装配单标的数据包；行情函数由门面在**调用时**注入（理由见模块 docstring）。
+
+    `fetch_ticker`/`fetch_funding_rate`/`fetch_open_interest`/`fetch_long_short_ratio`/
+    `fetch_taker_volume` 默认 None（向后兼容老调用方只注入两个行情函数）：None 时
+    对应字段取不到数据、fail-soft 保持缺省（price=0 / fundingRate=0 / oiUsd="N/A" /
+    lsRatio="N/A" / takerNetUsd="N/A"），不抛异常。
+
+    `venue="binance"` 时 K线/实时价/资金费率/OI/多空比/主动买卖量走币安公开行情
+    （`long_short_ratio`/`taker_volume` 已由币安数据门户 `/futures/data/*` 提供等价
+    口径）；币安真正缺失的是聪明钱（精英账户比/持仓比/大户均仓）与 Rubik 专有序列
+    （OI 历史/清算脉冲），这些保持 fail-closed 缺失。
+    """
     inst_id = item["instId"]
     name = item["name"]
     ccy = item.get("ccy", "")
     headers = {"User-Agent": "Mozilla/5.0"}
+    is_binance = (str(venue or "").strip().lower()) == "binance"
 
     pkg = {
         "instId": inst_id,
@@ -144,14 +173,12 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         "data_quality": "invalid"
     }
 
-    # 1. Ticker
+    # 1. Ticker（决策链 venue 接线：统一走注入的 fetch_ticker，不再硬编码 OKX URL）
     t_okx0 = time.time()
     try:
-        req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-            if d.get("code") == "0" and d.get("data"):
-                t = d["data"][0]
+        if fetch_ticker is not None:
+            t = fetch_ticker(inst_id, venue=venue)
+            if isinstance(t, dict) and t.get("last") is not None:
                 pkg["price"] = float(t.get("last", 0))
                 pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
                 pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
@@ -164,7 +191,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
     # 2. 15M Candles (recent 24, about 6 hours) & Technical Indicators Calculation
     try:
-        d = {"data": fetch_candles(inst_id, bar="15m", limit=24)}
+        d = {"data": fetch_candles(inst_id, bar="15m", limit=24, venue=venue)}
         if d["data"]:
             raw_candles = d["data"]
             pkg["recent_15m"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_candles[:12]]
@@ -230,7 +257,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
     # 3. 1H Candles (recent 24, about 24 hours) & 1H ATR / 1H RSI
     try:
-        d = {"data": fetch_candles(inst_id, bar="1H", limit=24)}
+        d = {"data": fetch_candles(inst_id, bar="1H", limit=24, venue=venue)}
         if d["data"]:
             raw_1h = d["data"]
             pkg["recent_1h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_1h[:12]]
@@ -273,7 +300,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
     # 4. 4H Candles (recent 16, about 64 hours) & 4H Macro Structure
     try:
-        d = {"data": fetch_candles(inst_id, bar="4H", limit=16)}
+        d = {"data": fetch_candles(inst_id, bar="4H", limit=16, venue=venue)}
         if d["data"]:
             raw_4h = d["data"]
             pkg["recent_4h"] = [[float(c[1]), float(c[2]), float(c[3]), float(c[4]), round(float(c[5]), 1)] for c in raw_4h[:8]]
@@ -292,52 +319,75 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
-    # 5. Funding Rate & OI
+    # 5. Funding Rate & OI（决策链 venue 接线：统一走注入函数，不再硬编码 OKX URL）
     if item["type"] == "crypto":
         try:
-            req = urllib.request.Request(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-                if d.get("code") == "0" and d.get("data"):
-                    pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
+            if fetch_funding_rate is not None:
+                fr = fetch_funding_rate(inst_id, venue=venue)
+                if fr is not None:
+                    # fetch_funding_rate 返回值已是 ×100 的百分比（OKX/币安两侧一致），不再二次 ×100
+                    pkg["fundingRate"] = round(float(fr), 4)
         except Exception as exc:
             note_failure("okx_funding_rate", exc)
 
         try:
-            req = urllib.request.Request(f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-                if d.get("code") == "0" and d.get("data"):
-                    usd = float(d["data"][0].get("oiUsd", 0) or 0)
-                    pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
+            if fetch_open_interest is not None:
+                oi = fetch_open_interest(inst_id, venue=venue)
+                if isinstance(oi, dict):
+                    usd = float(oi.get("oiUsd", 0) or 0)
+                    if usd > 0:
+                        pkg["oiUsd"] = f"{round(usd / 1e8, 2)}亿 U" if usd > 1e8 else f"{round(usd / 1e4, 1)}万 U"
         except Exception as exc:
             note_failure("okx_open_interest", exc)
 
+        # lsRatio / takerNetUsd：决策链 venue 接线——币安走注入函数（数据门户等价口径），
+        # OKX 走 Rubik urllib。注入函数为 None 时保持 "N/A"（fail-soft）。
         if ccy:
-            try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        pkg["lsRatio"] = float(d["data"][0][1])
-            except Exception as exc:
-                note_failure("okx_ls_ratio", exc)
+            # lsRatio：币安 → fetch_long_short_ratio；OKX → Rubik urllib
+            if is_binance and fetch_long_short_ratio is not None:
+                try:
+                    _lsr = fetch_long_short_ratio(inst_id, venue=venue)
+                    if _lsr is not None:
+                        pkg["lsRatio"] = float(_lsr)
+                except Exception as exc:
+                    note_failure("binance_ls_ratio", exc)
+            elif not is_binance:
+                try:
+                    req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        d = json.loads(resp.read().decode("utf-8"))
+                        if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
+                            pkg["lsRatio"] = float(d["data"][0][1])
+                except Exception as exc:
+                    note_failure("okx_ls_ratio", exc)
 
-            try:
-                req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    d = json.loads(resp.read().decode("utf-8"))
-                    if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                        b_vol = float(d["data"][0][1])
-                        s_vol = float(d["data"][0][2])
+            # takerNetUsd：币安 → fetch_taker_volume（单点 dict）；OKX → Rubik 序列
+            if is_binance and fetch_taker_volume is not None:
+                try:
+                    _tv = fetch_taker_volume(inst_id, venue=venue)
+                    if isinstance(_tv, dict):
+                        b_vol = float(_tv.get("buyVol") or 0)
+                        s_vol = float(_tv.get("sellVol") or 0)
                         net_diff = b_vol - s_vol
                         pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
-            except Exception as exc:
-                note_failure("okx_taker_volume", exc)
+                except Exception as exc:
+                    note_failure("binance_taker_volume", exc)
+            elif not is_binance:
+                try:
+                    req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        d = json.loads(resp.read().decode("utf-8"))
+                        if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
+                            b_vol = float(d["data"][0][1])
+                            s_vol = float(d["data"][0][2])
+                            net_diff = b_vol - s_vol
+                            pkg["takerNetUsd"] = f"{round(net_diff / 1e4, 1)}万 U"
+                except Exception as exc:
+                    note_failure("okx_taker_volume", exc)
 
-        # 6. OKX ADX Trend Strength Indicator (1H) via direct REST (zero Node CLI fork)
+        # 6. ADX Trend Strength Indicator (1H) via direct REST（决策链 venue 接线：透传 venue）
         try:
-            adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H")
+            adx_data = fetch_single_indicator(inst_id, "ADX", bar="1H", venue=venue)
             if adx_data and "adx" in adx_data:
                 pkg["adx_1h"] = float(adx_data.get("adx", 0.0) or 0.0)
         except Exception as exc:
@@ -354,7 +404,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     # 6. 已退役：微积分多周期引擎（2026-10 数理系统退场）。
     #    `pkg["calculus"]` 只保留**显式不可用**的默认占位 —— 键位不动，
     #    供 calculus_snapshot.json / 台账兜底读取链使用；**不再计算任何东西**。
-    pkg["quant_factors"] = load_quant_factor_tiers(inst_id)
+    pkg["quant_factors"] = load_quant_factor_tiers(inst_id, venue=venue)
     pkg["data_quality"] = "valid" if required_market_data else "invalid"
 
     # 标的体制状态（综合 4H 宏观、1H 结构与 1H ADX 趋势强度）

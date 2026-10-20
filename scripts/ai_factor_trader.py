@@ -336,9 +336,13 @@ def is_tradfi_market_liquid(asset_type: str) -> bool:
 # （2026-09-10）：V5 直签唯一通道见 scripts/okx_rest.py；subprocess 仅保留本地
 # python 脚本调度用途。禁止复活任何 shell=True 的交易所调用。
 
-def fetch_candles_direct(inst_id: str, bar: str = "15m", limit: int = 45):
-    """Direct fetch from OKX Official Market REST API with Keep-Alive connection pooling."""
-    return fetch_candles(inst_id, bar=bar, limit=limit)
+def fetch_candles_direct(inst_id: str, bar: str = "15m", limit: int = 45, venue: str | None = None):
+    """Direct fetch from OKX Official Market REST API with Keep-Alive connection pooling.
+
+    `venue="binance"` 时透传给 `market_data_service.fetch_candles` 走币安公开行情
+    （决策链 venue 接线：主脑切币安时，因子 K 线输入必须读币安而非 OKX）。
+    """
+    return fetch_candles(inst_id, bar=bar, limit=limit, venue=venue)
 
 class UnreadableTrackers(dict):
     """**读不出来**的持仓追踪状态（与"文件不存在/真的是空"区分，第一百三十七刀）。
@@ -1009,6 +1013,8 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
         fetch_candles_direct=fetch_candles_direct,
         instrument_profile=instrument_profile,
         load_adaptive_config=load_adaptive_config,
+        fetch_ticker=fetch_ticker,
+        venue=_active_venue(),
     )
 
 # =============================================================================

@@ -63,32 +63,12 @@ class MoveIsLosslessTest(unittest.TestCase):
     _LATENCY_PUBLISH_RE = re.compile(
         r'^pkg\["okx_latency_ms"\] = max\(1, int\(round\(\(time\.time\(\) - t_okx0\) \* 1000\)\)\)$')
 
-    #: 2026-10 **有意修正**：15M 量比原实现用 `vols[-1]` —— 那是 OKX 返回的
-    #: **未收盘**当前根，刚开盘时量≈0，实盘提示词里长期是 `15M量比=0.01x`
-    #: （模型读成"成交量枯竭"）。改为"最近一根**已收盘**的量 vs 它前面 5 根均量"。
-    #: 与上面两类一样，放行范围刻意收窄到**三行**，且另有正向用例
-    #: （`tests/ops/test_brain_packages.py::test_volume_ratio_ignores_the_still_forming_bar`）
-    #: 钉住新口径真的生效 —— 白名单不能用来掩盖搬运错误。
+    #: 2026-10 决策链 venue 接线重构时，下述「有意修正」已**固化进留档**
+    #: （`brain_package_pre_move.py` 已是新值），故本映射表清空 —— 留档即基线，
+    #: 不再需要旧→新的行替换。保留此空表作为「有意改动须先更新留档」的扩展点：
+    #: 未来若再有意修改函数体，应更新留档而非在此堆白名单（见
+    #: `test_body_prefix_is_line_identical_to_pre_move_source` 的 docstring）。
     _INTENTIONAL_EDITS = {
-        "                if len(vols) >= 6:":
-            "                if len(vols) >= 7:",
-        "                    avg_v5 = sum(vols[-6:-1]) / 5":
-            "                    avg_v5 = sum(vols[-7:-2]) / 5",
-        '                        pkg["vol_ratio"] = round(vols[-1] / avg_v5, 2)':
-            '                        pkg["vol_ratio"] = round(vols[-2] / avg_v5, 2)',
-        # 同一批：SmartMoney 缺省理由的**文案修订**（旧文案说"无等价接口"，
-        # 会让模型以为聪明钱完全不可观测；实际持仓方向的等价证据有 —— OKX 官方
-        # top-trader 的精英账户比/精英持仓比，已真实接入 T0 梯队）。
-        '            "reason": "OKX CLI 已移除，smartmoney 无公开 V5 等价接口（待接新数据源）",':
-            '            "reason": "Top100 加权多空比/净流无公开 V5 等价接口；持仓方向证据改用 OKX 官方 top-trader 的精英账户比/精英持仓比（见 T0 衍生品梯队）",',
-        # ★ 2026-10「不许假数据」：包初值 `vol_ratio = 1.0` 会被提示词渲染成
-        #   `15M量比=1.0x`，模型读作"量能正常"——那是**结论**，不是缺失。
-        #   改成 `None` ⇒ 提示词渲染 `--`（正向钉子：
-        #   `tests/llm/test_prompt_math_foundations.py::
-        #    MissingTierDataNeverRendersAsAPlausibleNumberTest` 与
-        #   `tests/ops/test_brain_packages.py::DefaultShapeTests`）。
-        '        "vol_ratio": 1.0,':
-            '        "vol_ratio": None,',
     }
 
     def _normalise(self, lines):
@@ -123,61 +103,62 @@ class MoveIsLosslessTest(unittest.TestCase):
     )
 
     def test_body_prefix_is_line_identical_to_pre_move_source(self):
-        """⭐ 核心不变量：**退役那一刀之前的每一行代码**都必须与搬走前逐字相同。
+        """⭐ 核心不变量：函数体（除签名/docstring 外）必须与留档逐字相同。
 
-        为什么只比"尾巴之前"：2026-10 用户决策让尾部那段微积分（try + 4 行写入）
-        整体退场，并由 `pkg["quant_factors"]` 一行接替。凡是退役动作**不该碰**的
-        部分，仍然必须逐行对得上 —— 否则"搬运时顺手改坏了别的逻辑"就没人看着。
-        退役本身由下一条反向断言单独钉住。
+        留档 `brain_package_pre_move.py` 是**最近一次有意重构**（2026-10 决策链
+        venue 接线：ticker/funding/OI/K线改走注入函数透传 venue）之后固化的基线。
+        凡是有意改动，必须先更新留档、并在这里留下文档化说明；否则"顺手改坏
+        因子计算逻辑（RSI/EMA/ATR/MACD/OBV/BB/VWAP）"就没人看着。
         """
         original = PRE_MOVE_SOURCE.read_text(encoding="utf-8").splitlines()
         original_body = [ln for ln in original
                          if not ln.startswith("def fetch_single_instrument_package")]
-        moved = _submodule_function_lines()[4:]
+        moved = _submodule_function_lines()
 
-        cut_a = next(i for i, ln in enumerate(original_body)
-                     if "calculate_multi_timeframe" in ln)
-        # 原实现那一行外面还包着一层 `try:` —— 它属于退役块，故一并排除，
-        # 否则前缀会多出一行（实测 210 vs 209 的差就是这一行）。
-        if original_body[cut_a - 1].strip() == "try:":
-            cut_a -= 1
-        # ⚠️ 切点必须**精确匹配那一行赋值**：早先按子串 "quant_factors" 找，
-        # 结果撞上了函数体里另一处提到 quant_factors 的说明文字，
-        # 前缀被截成 28 行，判据直接失效（实测 209 != 28）。
-        cut_b = next(i for i, ln in enumerate(moved)
-                     if ln.strip() == 'pkg["quant_factors"] = load_quant_factor_tiers(inst_id)')
+        # 剥离签名（def 起，到 `"""` 与函数体之间的所有行）与 docstring 尾部，
+        # 两侧对称对齐到「函数体第一行」（`inst_id = item["instId"]`）。
+        def _body_start(lines):
+            for i, ln in enumerate(lines):
+                if ln.strip() == 'inst_id = item["instId"]':
+                    return i
+            raise AssertionError("函数体起点 `inst_id = item[\"instId\"]` 未找到")
+
+        a_body = original_body[_body_start(original_body):]
+        b_body = moved[_body_start(moved):]
 
         def _code_lines(lines):
-            # 注释不参与比对：退役那一刀在尾部前插了说明注释（对称地两边都过滤）
+            # 注释不参与比对：留档与实现都允许注释演进（对称过滤）
             return [ln for ln in self._normalise(lines)
                     if ln.strip() and not ln.strip().startswith("#")]
 
-        a_norm = [self._INTENTIONAL_EDITS.get(ln, ln)
-                  for ln in _code_lines(original_body[:cut_a])]
-        b_norm = _code_lines(moved[:cut_b])
+        a_norm = [self._INTENTIONAL_EDITS.get(ln, ln) for ln in _code_lines(a_body)]
+        b_norm = _code_lines(b_body)
         self.assertGreater(len(a_norm), 200, "比对区间太短 ⇒ 这条用例在空转")
         self.assertEqual(len(a_norm), len(b_norm),
-                         "退役点之前的代码行数变了 —— 搬运过程中漏行或多行")
+                         "函数体代码行数变了 —— 有意改动未同步留档，或漏行/多行")
         for i, (a, b) in enumerate(zip(a_norm, b_norm)):
-            self.assertEqual(a, b, f"退役点之前第 {i + 1} 行不一致（搬运被改动）")
+            self.assertEqual(a, b, f"函数体第 {i + 1} 行不一致（有意改动须先更新留档）")
 
     def test_the_retired_calculus_tail_is_really_gone(self):
         """反向断言：搬运**之后**的退役动作必须真实发生（否则上面那条会空转）。"""
         src = "\n".join(_submodule_function_lines())
         self.assertNotIn("calculate_multi_timeframe", src)
         self.assertNotIn("calculus_engine", src)
-        self.assertIn('pkg["quant_factors"] = load_quant_factor_tiers(inst_id)', src)
+        # 决策链 venue 接线：`load_quant_factor_tiers` 现在透传 venue（分所因子快照）
+        self.assertIn('pkg["quant_factors"] = load_quant_factor_tiers(inst_id, venue=venue)', src)
 
     def test_failure_counters_are_actually_wired(self):
-        """正向断言：6 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""
+        """正向断言：8 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""
         src = "\n".join(_submodule_function_lines())
         kinds = sorted(re.findall(r'note_failure\("([a-z_0-9]+)", exc\)', src))
-        self.assertEqual(kinds, ["okx_adx_1h", "okx_funding_rate", "okx_ls_ratio",
+        self.assertEqual(kinds, ["binance_ls_ratio", "binance_taker_volume",
+                                 "okx_adx_1h", "okx_funding_rate", "okx_ls_ratio",
                                  "okx_open_interest", "okx_taker_volume", "okx_ticker"],
-                         "6 处取数失败的可观测性接线缺失或被改名")
-        # 6 处新接入 + 3 处搬运时就带 `as exc` 的（K线 15m/1H/4H）
-        # ——第 4 处（calculus）已随数理系统退场删除，故由 10 降为 9。
-        self.assertEqual(src.count("except Exception as exc:"), 9)
+                         "8 处取数失败的可观测性接线缺失或被改名")
+        # 8 处新接入 + 3 处搬运时就带 `as exc` 的（K线 15m/1H/4H）
+        # ——第 4 处（calculus）已随数理系统退场删除，故由 10 降为 9；
+        # 2026-10 决策链 venue 接线新增币安 lsRatio/taker 两处，故 9 升为 11。
+        self.assertEqual(src.count("except Exception as exc:"), 11)
 
     def test_okx_latency_instrumentation_is_actually_wired(self):
         """正向断言：v8.1.0 的 OKX 取数延时观测必须真的在算（防止上一条的
@@ -201,8 +182,15 @@ class MoveIsLosslessTest(unittest.TestCase):
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "fetch_single_instrument_package")
         kwonly = [a.arg for a in fn.args.kwonlyargs]
-        self.assertEqual(kwonly, ["fetch_candles", "fetch_single_indicator"],
-                         "两个行情函数必须走调用期注入")
+        # 决策链 venue 接线（2026-10）：在原有的两个行情函数注入之外，新增
+        # `fetch_ticker`/`fetch_funding_rate`/`fetch_open_interest`/`fetch_long_short_ratio`/
+        # `fetch_taker_volume`（默认 None，向后兼容）与 `venue`（默认 None）。
+        # 五者都走**调用期注入**，不是 import。
+        self.assertEqual(kwonly, ["fetch_candles", "fetch_single_indicator",
+                                  "fetch_ticker", "fetch_funding_rate",
+                                  "fetch_open_interest", "fetch_long_short_ratio",
+                                  "fetch_taker_volume", "venue"],
+                         "行情函数必须走调用期注入（含 venue 接线的五个新增依赖）")
         # 反向哨：子模块不得在 import 期绑定它们
         self.assertNotIn("from market_data_service import", SUBMODULE.read_text(encoding="utf-8"))
 
@@ -268,7 +256,7 @@ class FailSoftContractTest(unittest.TestCase):
         with patch.object(urllib.request, "urlopen", side_effect=OSError("offline")):
             brain_packages.fetch_single_instrument_package(
                 self.ITEM,
-                fetch_candles=lambda inst, bar=None, limit=None: seen.append(bar) or [],
+                fetch_candles=lambda inst, bar=None, limit=None, venue=None: seen.append(bar) or [],
                 fetch_single_indicator=lambda *a, **k: {},
             )
         self.assertEqual(sorted(set(seen)), ["15m", "1H", "4H"],
