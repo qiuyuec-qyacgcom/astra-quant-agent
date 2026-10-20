@@ -220,10 +220,14 @@ async function loadData() {
   loadError.value = '';
   memoryVersion.value = null;
   try {
-    const [libRes, memRes, reportRes] = await Promise.all([
+    const [libRes, memRes, reportRes, venueRes] = await Promise.all([
       api('/api/v1/prompt-library').catch(() => api('/api/v1/admin/prompt-library')),
       api('/api/v1/admin/memory'),
       api('/api/v1/cache/self-improvement').catch(() => null),
+      // 当前生效所以「账户与标的」页的单一事实源为准（pool-venues 实时读 preferred_venue），
+      // 不能用报告文件里的 active_venue——那是自进化 job 上次运行时的快照，切换所后尚未重跑，
+      // 会把 badge 覆盖回旧所。
+      api('/api/v1/admin/pool-venues').catch(() => null),
     ]);
     lib.value = libRes;
     selectedProfileId.value = libRes?.active_profile_id || 'stable';
@@ -231,7 +235,7 @@ async function loadData() {
     memoryVersion.value = memRes?.version || null;
     memoryStructured.value = memRes && 'legacy_read_only' in memRes ? !memRes.legacy_read_only : null;
     evolutionReport.value = reportRes || null;
-    activeVenue.value = (reportRes?.active_venue === 'binance' ? 'binance' : 'okx');
+    activeVenue.value = (venueRes?.active_venue === 'binance' ? 'binance' : 'okx');
     loadEvolutionConfig();
     syncWorkingModules();
   } catch (e: any) {
