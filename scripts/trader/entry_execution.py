@@ -29,8 +29,6 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from astra_backend import analysis_capture
-
 
 def submitted_bracket(venue_ctx: Any, px: float, tp_px: float,
                       sl_px: float) -> Tuple[float, float, float]:
@@ -160,7 +158,6 @@ def execute_entry_scan(*,
             _record_entry_diagnostic(f.get("name"), "omitted", 0.0, "本轮无有效新鲜 AI 决策")
             continue
 
-        analysis_capture.bind_decision(inst_id, ai_info)
         ai_decision = ai_info["decision"]
         ai_act = str(ai_decision.get("action", "WAIT")).upper()
         ai_conf = float(ai_decision.get("confidence", 0) or 0)

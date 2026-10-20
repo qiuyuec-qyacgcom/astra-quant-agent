@@ -36,8 +36,6 @@ import os
 import tempfile
 import time
 
-from astra_backend import analysis_capture
-
 
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions, *,
                                  ai_position_management_file, ai_tightens_stop,
@@ -118,11 +116,6 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
                 }
                 if record_trade is not None:
                     record_trade(trade_record, position=position)
-                else:
-                    analysis_capture.emit("position.exit_reason", {
-                        "reason": trade_record["action_type"], "confirmed": True,
-                        "execution": trade_record,
-                    }, **analysis_capture.position_meta(position))
                 tr = trackers.get(f"{inst_id}_{pos_side}")
                 if tr and isinstance(tr, dict):
                     try:

@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from astra_backend import analysis_capture
-
 
 def dispatch_llm_and_persist_decisions(*,
         AI_DECISION_CACHE_FILE,
@@ -154,7 +152,7 @@ def dispatch_llm_and_persist_decisions(*,
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
                 )
-                with analysis_capture.llm_request(req, thinking_timeout, urllib.request.urlopen, legacy_fallback=True) as resp:
+                with urllib.request.urlopen(req, timeout=thinking_timeout) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
                     content = res["choices"][0]["message"]["content"].strip()
                     raw_res = res
@@ -232,7 +230,6 @@ def dispatch_llm_and_persist_decisions(*,
             packages=packages, standard_cache=standard_cache,
         )
 
-        analysis_capture.emit("brain.result", history_record, "completed")
         history_list = []
         if os.path.exists(AI_DECISION_HISTORY_FILE):
             try:

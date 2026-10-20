@@ -299,10 +299,6 @@ app.include_router(dashboard_router)
 # 故静态目录直接挂到真正的应用对象上。
 from astra_backend.web_shell import mount_static_assets  # noqa: E402
 
-from astra_backend.analysis_routes import install_routes as install_analysis_routes
-
-install_analysis_routes(app, require_admin_header)
-
 mount_static_assets(app)
 
 

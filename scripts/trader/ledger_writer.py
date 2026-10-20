@@ -24,8 +24,6 @@ import json
 import os
 import time
 
-from astra_backend import analysis_capture
-
 
 def record_open_intent(inst_id: str, side: str, ts_ms: int = None, *,
                        OPEN_INTENT_FILE: str, OPEN_INTENT_TTL_MS: int,
@@ -69,10 +67,6 @@ def record_trade(trade_data, position=None, *, LEDGER_JSON_FILE: str, _atomic_wr
     # 非 dict 输入会在类型保护之前就抛 AttributeError。类型检查必须前置。
     if not isinstance(trade_data, dict):
         return
-    meta = analysis_capture.position_meta(position)
-    analysis_capture.emit("execution.trade_record", trade_data, **meta)
-    if trade_data.get("action") == "平仓":
-        analysis_capture.emit("position.exit_reason", {"reason": trade_data.get("action_type") or trade_data.get("remark"), "confirmed": True, "execution": trade_data}, **meta)
     # G10 场所标注：本链路全部为 OKX V5 直签执行，源头补 venue；
     # setdefault 不覆盖显式值，旧调用方无感。
     trade_data.setdefault("venue", "okx")

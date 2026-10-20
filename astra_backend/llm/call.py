@@ -36,8 +36,6 @@ from astra_backend.llm.transport import (
     build_request_spec,
 )
 
-from astra_backend import analysis_capture
-
 
 
 def _lookup_api_path(reload_config: Callable[[], Dict[str, Any]], base_url: str, model_id: str) -> str:
@@ -378,17 +376,6 @@ def execute_llm_request(get_active_runtime, resolve_runtime, on_failover,
                             "reasoning_effort": "none",
                         }
                         recovery_messages = _direct_answer_messages(messages)
-                        analysis_capture.emit(
-                            "llm.reasoning_finalizer",
-                            {
-                                "model": cand["model"],
-                                "attempt": attempt,
-                                "candidate_index": cand_idx,
-                                "timeout_seconds": recovery_timeout,
-                                "max_tokens": QWEN_DIRECT_RECOVERY_MAX_TOKENS,
-                            },
-                            "started",
-                        )
                         try:
                             content, reasoning, usage, latency = attempt_call(
                                 recovery_cand,
@@ -432,16 +419,6 @@ def execute_llm_request(get_active_runtime, resolve_runtime, on_failover,
                                 "attempted_models": attempted_models,
                                 "succeeded": True,
                             })
-                            analysis_capture.emit(
-                                "llm.reasoning_finalizer",
-                                {
-                                    "model": cand["model"],
-                                    "attempt": attempt,
-                                    "candidate_index": cand_idx,
-                                    "latency_ms": latency,
-                                },
-                                "completed",
-                            )
                             return content, reasoning, usage, latency
                         except _LLMHardError as recovery_exc:
                             recovery_error = str(recovery_exc)
@@ -459,16 +436,6 @@ def execute_llm_request(get_active_runtime, resolve_runtime, on_failover,
                             last_error = recovery_exc
                             all_timed_out = False
                         failures.append(f"模型 {cand['model']} 直接答案恢复失败：{recovery_error}")
-                        analysis_capture.emit(
-                            "llm.reasoning_finalizer",
-                            {
-                                "model": cand["model"],
-                                "attempt": attempt,
-                                "candidate_index": cand_idx,
-                                "error": recovery_error,
-                            },
-                            "failed",
-                        )
                     # A finalizer is the one allowed same-model recovery. Do
                     # not spend another full thinking attempt on this model.
                     break

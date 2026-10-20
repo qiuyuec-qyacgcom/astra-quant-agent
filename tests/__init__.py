@@ -70,14 +70,6 @@ os.environ.setdefault("ASTRA_EVOLUTION_MODEL_COOLDOWN_FILE",
 # （打三所接口 + 重写 data/trading_ledger.json）。仪表盘相关测试走真实 DATA_DIR，
 # 于是测试会打真网络并改写生产台账——同款隔离：默认禁用该触发点。生产不设此变量。
 os.environ.setdefault("ASTRA_LEDGER_SYNC_DISABLED", "1")
-# 复盘采集（astra_backend.analysis_capture）缺省是**开启**的：`enabled()` 在
-# `ASTRA_TESTING!=1`（或显式设了 `ASTRA_ANALYSIS_DB`）时返回 True，于是交易/大脑/自进化
-# 脚本里的 `@cycle`/`@observed`/`emit` 埋点会经 `Archive().event()` 连生产
-# `data/astra_quant.db`。这里默认把测试进程标为 testing（且不设 ASTRA_ANALYSIS_DB），
-# 使 `enabled()` 返回 False、埋点退化为 no-op（律①：测试不触生产文件/库）。
-# 需要真测采集的用例（tests/test_analysis_*.py 等）自己在 setUp 里再显式设
-# `ASTRA_ANALYSIS_DB=<临时库>` 即可重新开启（见那些文件的 patch.dict 用法）。
-os.environ.setdefault("ASTRA_TESTING", "1")
 
 import astra_backend.config as _config
 

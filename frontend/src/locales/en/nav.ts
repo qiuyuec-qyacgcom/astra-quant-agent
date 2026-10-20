@@ -25,7 +25,6 @@ export const enNav = {
     system: 'System',
   },
   admin: {
-    analysis: 'Trade analysis',
     overview: 'Overview',
     gateway: 'Gateway & Jobs',
     decisions: 'System Logs',

@@ -21,7 +21,7 @@ AstraQuant combines large language models (macro, technical, and microstructure 
 
 ## Capability Overview
 
-**AstraQuant豪华3000型** is an end-to-end autonomous crypto trading system — a complete loop from market-data cleaning, multi-model analysis, and deterministic risk control through to exchange-native execution, backed by backtesting, trade review, self-evolution, and observability. It is forked from [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent), preserving the upstream architecture and risk-control philosophy while merging high-value improvements from a family of community forks (see [About This Fork](#about-this-fork)).
+**AstraQuant豪华3000型** is an end-to-end autonomous crypto trading system — a complete loop from market-data cleaning, multi-model analysis, and deterministic risk control through to exchange-native execution, backed by backtesting, self-evolution, and observability. It is forked from [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent), preserving the upstream architecture and risk-control philosophy while merging high-value improvements from a family of community forks (see [About This Fork](#about-this-fork)).
 
 | Layer | Capability | Key implementation |
 |---|---|---|
@@ -101,7 +101,6 @@ AstraQuant consolidates the best improvements from a family of community forks w
 | Advantage | What it does | Source lineage |
 |---|---|---|
 | **Binance USDⓈ-M Trading** | `BinanceTradingAdapter` (`supports_orders=True`) wired into the order-submit path with coin-margin sizing (`margin×lev/price`) and protected OCO brackets; execution gate is fail-closed on `ASTRA_BINANCE_EXECUTION`. | cnlimiter |
-| **Trade Review & Analytics** | Full closed-loop review suite — 8 backend modules (`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`), 40 instrumentation points across 11 trading scripts, an `AnalysisPage.vue` frontend, and cross-platform file locks. Enabled by default; degrades to a no-op under `ASTRA_TESTING=1` without a DB. | LanQin996 |
 | **LLM Streaming Watchdogs + Qwen3 Recovery** | Response-start watchdog (45s) and reasoning-only watchdog (60s) switch to fallback models on stalls; Qwen3 direct-recovery (60s) retries failed structured-JSON requests with reasoning disabled. All tunable via `.env` (set `0` to disable). | LanQin996 |
 | **Causal Calculus Engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine (`scripts/calculus_engine.py` + offline `calculus_replay.py` CLI). Imported as a standalone math library — **not** wired into any decision or order path; returns `valid=False` on insufficient data (never fabricates conclusions). | cnlimiter |
 | **Market-Data Anti-Forgery** | `market_data_service.py` rate-limits (0.12s) with 3× exponential-backoff retry; `candle_data.py` exposes `closed_only` to return only confirmed closed candles — never synthesizes K-lines when the feed is unavailable. | LanQin996 |
@@ -283,7 +282,6 @@ This repository is a maintained fork of the original [`0xethanq/astra-quant-agen
 | Change | Description |
 |---|---|
 | **Binance USDⓈ-M trading** | Native `BinanceTradingAdapter` wired into the order-submit path with coin-margin sizing and protected OCO brackets; execution is fail-closed behind `ASTRA_BINANCE_EXECUTION`. |
-| **Trade review & analytics** | A full closed-loop review suite (8 backend modules, 40 instrumentation points, `AnalysisPage.vue`) that the upstream project lacked. |
 | **LLM streaming watchdogs** | Response-start (45s) and reasoning-only (60s) watchdogs plus Qwen3 direct-recovery, all `.env`-tunable. |
 | **Causal calculus engine** | A pure-stdlib causal-calculus / definite-integral / probability-theory engine, imported as a standalone math library (not wired into any decision path). |
 | **Market-data anti-forgery** | Rate-limited, backoff-retried market data that only ever returns confirmed closed candles. |

@@ -63,7 +63,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from astra_backend.file_locks import file_lock
-from astra_backend import analysis_capture
 
 _BJ = timezone(timedelta(hours=8))
 
@@ -379,7 +378,6 @@ def reset_role_template(role_id: str) -> Dict[str, Any]:
     return _core_reset_role_template(load_council_config, save_council_config, role_id)
 
 
-@analysis_capture.observed("council.proposal")
 def _call_single_trader(
     role_id: str,
     role_spec: Dict[str, Any],
@@ -395,7 +393,6 @@ def _call_single_trader(
     return _core__call_single_trader(resolve_seat_model, role_id, role_spec, market_prompt, master_constitutional_rules, timeout, runtime_context)
 
 
-@analysis_capture.observed("council.critique")
 def _call_single_trader_critique(
     role_id: str,
     role_spec: Dict[str, Any],
