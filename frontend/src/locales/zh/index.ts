@@ -5,6 +5,7 @@ import { zhDash } from './dash';
 import { zhAdmin } from './admin';
 import { zhDocs } from './docs';
 import { zhLanding } from './landing';
+import { analysis } from './analysis';
 
 export const zhCN = {
   ...zhCommon,
@@ -14,4 +15,5 @@ export const zhCN = {
   admin: zhAdmin,
   docs: zhDocs,
   landing: zhLanding,
+  analysis,
 };

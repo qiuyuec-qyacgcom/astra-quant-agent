@@ -474,9 +474,10 @@ class InjectionContractTest(unittest.TestCase):
         `OKX 51023: Position doesn't exist.`）。测试不得触网/触所，
         故两个缝一起 patch，并断言"读到的是临时文件里的指令"。
 
-        ⚠️ 门面壳会注入**真实** `record_trade` ⇒ `CLOSE_MARKET` 成功路径会经
-        `ledger_writer.record_trade` 写**生产** `data/trading_ledger.json`（律①违规）。
-        故此处同时 patch `aft.record_trade` 成记录桩，既验证"文件路径缝"又不落生产台账。
+        ⚠️ 复盘埋点闭环（analysis_capture 移植）后，门面壳会注入**真实**
+        `record_trade` ⇒ `CLOSE_MARKET` 成功路径会经 `ledger_writer.record_trade`
+        写**生产** `data/trading_ledger.json`（律①违规）。故此处同时 patch
+        `aft.record_trade` 成记录桩，既验证"文件路径缝"又不落生产台账。
         """
         h = _Harness({"instructions": [{"instId": "BTC-USDT-SWAP", "action": "CLOSE_MARKET",
                                         "confidence": 99, "reason": "r"}]},

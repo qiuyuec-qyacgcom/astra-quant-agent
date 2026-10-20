@@ -18,6 +18,7 @@ import hashlib
 from typing import Dict, Any, List, Optional, Tuple
 
 from pathlib import Path
+from astra_backend import analysis_capture
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
@@ -746,6 +747,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         observability_brief=observability_brief    )
     effective_evolution_system = effective_evolution_system.rstrip() + host_constitution
     effective_evolution_user = effective_evolution_user.rstrip() + host_constitution
+    analysis_capture.emit("prompt.rendered", {"profile": profile, "variables": runtime_context, "system": effective_evolution_system, "user": effective_evolution_user})
     return effective_evolution_system, effective_evolution_user, now_bj_str, snapshot_audit
 
 
@@ -1055,6 +1057,7 @@ def derive_deterministic_insights(closed_trades: List[Dict[str, Any]],
     return insights
 
 
+@analysis_capture.cycle("self_evolution")
 @single_evolution_cycle
 def run_self_evolution(force: bool = False):
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))

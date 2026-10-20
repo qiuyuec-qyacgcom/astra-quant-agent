@@ -21,7 +21,7 @@ AstraQuant 将大语言模型多维度研判（宏观趋势、技术形态、盘
 
 ## 核心能力概览
 
-AstraQuant豪华3000型 是一套**端到端自主量化交易系统**，从行情清洗、多模型研判、物理风控到交易所执行形成完整闭环，并配套回测验证、自进化与可观测性工程底座。它由原项目 [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent) fork 而来，在保留上游架构与确定性风控理念的同时，合并了社区 fork 家族的高价值改进（详见[关于本 Fork](#关于本-fork)）。
+AstraQuant豪华3000型 是一套**端到端自主量化交易系统**，从行情清洗、多模型研判、物理风控到交易所执行形成完整闭环，并配套回测验证、复盘分析、自进化与可观测性工程底座。它由原项目 [`0xethanq/astra-quant-agent`](https://github.com/0xethanq/astra-quant-agent) fork 而来，在保留上游架构与确定性风控理念的同时，合并了社区 fork 家族的高价值改进（详见[关于本 Fork](#关于本-fork)）。
 
 | 层级 | 能力 | 关键实现 |
 |---|---|---|
@@ -29,7 +29,7 @@ AstraQuant豪华3000型 是一套**端到端自主量化交易系统**，从行�
 | **📊 因子层** | 高频衍生品微结构 | CVD 订单流、L2 盘口失衡 (OBI)、资金费率、期权 IV 偏度、VWAP 筹码中枢等 6 类非滞后因子 |
 | **🛡️ 风控层** | 确定性物理闸门 | 一票否决式仓位钳制、R:R ≥ 2.0 下限、日内熔断、动态杠杆 2–5x、100% 云端 OCO 止损覆盖 |
 | **⚡ 执行层** | 交易所原生下单 | OKX 与币安 USDⓈ-M 永续被动 Maker 限价单 + 双腿云端保护单，币安执行 fail-closed 开闸 |
-| **🔁 闭环层** | 自进化·回测 | LLM 经验自进化中枢、多资产回测引擎（Sharpe / Sortino / Calmar / 回撤 / 胜率） |
+| **🔁 闭环层** | 复盘·自进化·回测 | 40+ 埋点闭环复盘、LLM 经验自进化中枢、多资产回测引擎（Sharpe / Sortino / Calmar / 回撤 / 胜率） |
 | **🧰 工程层** | 可靠性治理 | LLM 流式看门狗、行情防伪造、实盘切换前只读体检、SQLite 连接治理、Prometheus/Grafana 可观测 |
 
 **安全第一原则**：系统出厂默认 **模拟盘 (`demo`)** 模式，实盘执行被物理阻断，直到配置交易所凭证并通过只读余额快照校验；每一笔成交都在交易所侧原子挂载原生条件止损单，防范断网与单点故障。
@@ -101,6 +101,7 @@ AstraQuant 从社区 fork 家族中**精选合并**了高价值改进，同时�
 | 优势 | 说明 | 来源 |
 |---|---|---|
 | **币安 USDⓈ-M 交易** | `BinanceTradingAdapter`（`supports_orders=True`）已接入下单主路径，含币本位换算（`margin×lev/price`）与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 | cnlimiter |
+| **交易复盘分析** | 完整闭环复盘套件——8 个后端模块（`analysis_capture/store/metrics/service/routes/export/export_jobs/sync`）+ 11 个交易脚本 40 处埋点 + `AnalysisPage.vue` 前端 + 跨平台文件锁；默认开启，`ASTRA_TESTING=1`（无 DB）时退化为 no-op。 | LanQin996 |
 | **LLM 流式看门狗 + Qwen3 直恢复** | 响应头看门狗（45s）与仅思考看门狗（60s）在卡死时切换备用模型；Qwen3 直恢复（60s）对结构化 JSON 请求失败用关闭思考的直答重试。均经 `.env` 调参（设 0 关闭）。 | LanQin996 |
 | **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎（`scripts/calculus_engine.py` + 离线 `calculus_replay.py` CLI）。作为**独立数理库**引入，未接入任何决策/下单链路；缺数据返回 `valid=False`（绝不伪造结论）。 | cnlimiter |
 | **行情防伪造** | `market_data_service.py` 限速 0.12s + 3 次指数退避重试；`candle_data.py` 提供 `closed_only` 只返回已收盘 K 线——行情不可用时绝不编造。 | LanQin996 |
@@ -282,6 +283,7 @@ cd frontend && npm run build && npx vue-tsc --noEmit && node --test tests/*.test
 | 改动 | 说明 |
 |---|---|
 | **币安 USDⓈ-M 交易** | 原生 `BinanceTradingAdapter` 接入下单主路径，含币本位换算与双腿保护单；执行开闸由 `ASTRA_BINANCE_EXECUTION` fail-closed 判定。 |
+| **交易复盘分析** | 完整闭环复盘套件（8 个后端模块、40 处埋点、`AnalysisPage.vue` 前端），原项目缺失。 |
 | **LLM 流式看门狗** | 响应头看门狗（45s）与仅思考看门狗（60s）加 Qwen3 直恢复，均经 `.env` 调参。 |
 | **因果演算引擎** | 纯标准库的因果演算/定积分/概率论引擎，作为独立数理库引入（未接入任何决策链路）。 |
 | **行情防伪造** | 限速 + 指数退避重试的行情服务，只返回已收盘确认 K 线。 |

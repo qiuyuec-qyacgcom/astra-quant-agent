@@ -81,6 +81,7 @@ export const adminGroups: { key: string; labelKey: string; items: NavItem[] }[] 
         alias: 'decisions logs errors audit 系统日志 运行日志 报错 异常 决策 审计 流水',
         component: 'DecisionsPage',
       },
+      { key: 'admin-analysis', labelKey: 'nav.admin.analysis', path: '/admin/analysis', icon: ReceiptText, alias: 'analysis review 复盘 分析 导出', component: 'AnalysisPage' },
     ],
   },
   {

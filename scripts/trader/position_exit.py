@@ -28,6 +28,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from astra_backend import analysis_capture
+
 try:                                    # 与 scale_out.py 同源；独立运行时兜底
     from scripts.risk_constants import SCALE_OUT_RATIO
 except Exception:                       # pragma: no cover
@@ -203,6 +205,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
 
     t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
     t["lowWaterMark"] = min(t.get("lowWaterMark", cur_px), cur_px)
+    analysis_capture.emit("position.sample", {"position": curr_pos, "tracker": dict(t), "sampling_note": "巡检采样，非逐笔极值"})
     # Peak Profit Tracking
     if is_long:
         t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
