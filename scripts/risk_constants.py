@@ -203,6 +203,19 @@ def effective_risk_per_trade(pool_risk_usd: float = 0.0, usdt_available: float =
     return min(caps) if caps else 0.0
 
 
+def risk_base_balance(detail: dict) -> float:
+    """OKX balance detail → 风险基准余额（账户权益 eq）。
+
+    交易周期对账阶段（cycle_stages.fetch_positions_and_reconcile）取到 USDT 的
+    balance detail 后，用这里的 `eq`（权益）作为账户快照的 equity 基准，
+    与 dashboard_payload/collect.py 的 total_eq 口径保持一致。
+    """
+    try:
+        return float(detail.get("eq", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ── 单一实例（审计批6）─────────────────────────────────────────────────
 # 本文件既能被 `import risk_constants`（scripts/ 在 sys.path 上，交易脚本走这条）
 # 也能被 `import scripts.risk_constants`（仓库根在 sys.path 上，后端/测试走这条）导入。
