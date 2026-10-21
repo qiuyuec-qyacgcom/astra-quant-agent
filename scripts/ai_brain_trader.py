@@ -24,12 +24,10 @@ import scripts.okx_rest as okx_rest
 # 风控提示词与执行层共用单一事实源，防止「提示词口径 vs 代码口径」漂移
 from risk_constants import (
     DAILY_LOSS_EQUITY_RATIO,
-    MAX_CONCURRENT_POSITIONS_CAP,
     MAX_DAILY_LOSS_USDT,
     MAX_LEVERAGE,
     MIN_LEVERAGE,
     MAX_MARGIN_EQUITY_RATIO,
-    MAX_SAME_DIRECTION_POSITIONS,
     MAX_SCALE_IN_COUNT,
     MAX_SINGLE_ASSET_MARGIN,
     MIN_ENTRY_CONFIDENCE,
@@ -542,6 +540,10 @@ def build_risk_budget_text(usdt_available: float = None) -> str:
         _risk_1r_note = f"min({rc.MAX_RISK_PER_TRADE_USDT:g} 绝对封顶, 可用余额 {rc.RISK_PER_TRADE_EQUITY_RATIO:.0%})"
     else:
         _risk_1r_note = f"可用余额 {rc.RISK_PER_TRADE_EQUITY_RATIO:.0%} (纯按比例动态推导，不设绝对金额硬顶)"
+    # 并发/同向持仓上限必须与执行层同源：用 effective_max_positions() 的钳制结果，
+    # 而非原始 env 值（rc.MAX_CONCURRENT_POSITIONS_CAP / rc.MAX_SAME_DIRECTION_POSITIONS）。
+    # 否则「总仓 3 + 同向 5」时提示词会打印 5，而执行层按 3 拦 —— 提示词口径漂移。
+    _max_total, _max_same = rc.effective_max_positions(len(TARGET_INSTRUMENTS))
     text = (
         f"【本周期风险预算｜按实际可用余额 {_eq:.2f} USDT 与后台风控配置自适应推导，严禁套用任何固定绝对金额】:\n"
         f"- 常规单笔保证金: {_m_lo} ~ {_m_hi} USDT (可用余额 3%~{_regular_hi_ratio:.0%})\n"
@@ -549,10 +551,8 @@ def build_risk_budget_text(usdt_available: float = None) -> str:
         f"- 单标的累计保证金上限(含金字塔加仓): {_asset_cap} USDT ({_asset_cap_note}，执行层已按同一 min() 硬夹)\n"
         f"- 单笔最大可承受亏损: 以 1.0R 为基准 ({_risk_1r_note}，执行层已按同一 min() 硬夹)\n"
         f"- 当日累计亏损熔断线: -{_daily_stop} USDT ({_daily_stop_note}，执行层已按同一 min() 硬夹)\n"
-        f"- 全系统同向持仓上限: {rc.MAX_SAME_DIRECTION_POSITIONS} 笔 (多/空各自封顶，执行层硬拦截)\n"
-        f"- 全系统并发持仓上限: "
-        + (f"{rc.MAX_CONCURRENT_POSITIONS_CAP} 笔 (执行层硬拦截)\n" if rc.MAX_CONCURRENT_POSITIONS_CAP > 0
-           else "未单独设限 (0=不额外收紧；实际受标的池容量与同向上限约束)\n")
+        f"- 全系统同向持仓上限: {_max_same} 笔 (多/空各自封顶，执行层硬拦截)\n"
+        f"- 全系统并发持仓上限: {_max_total} 笔 (执行层硬拦截)\n"
         + (
             f"- 组合风险总预算: {rc.PORTFOLIO_RISK_BUDGET_USDT:.2f} USDT (执行层按总名义敞口强制)\n"
             if rc.PORTFOLIO_RISK_BUDGET_USDT > 0 else

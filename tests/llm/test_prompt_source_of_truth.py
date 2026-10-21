@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import unittest
 from pathlib import Path
@@ -206,6 +207,39 @@ class PromptMatchesExecutorConstantsTests(unittest.TestCase):
         effective = abt.get_effective_system_prompt(pl.active_profile())
         offenders = re.findall(r"\b\d{3,}(?:\.\d+)?\s*(?:USDT|U\b)", effective)
         self.assertEqual(offenders, [], f"提示词出现绝对金额: {offenders}")
+
+    def test_prompt_reports_clamped_position_caps(self):
+        """提示词的并发/同向上限必须用 effective_max_positions 钳制后的值，
+        而不是原始 env 值 —— 「总仓 3 + 同向 5」时必须显示 3，绝不显示 5。
+        否则模型按 5 仓规划，执行层按 3 拦（口径漂移，直接产生会被拒的决策）。"""
+        import importlib
+        import scripts.risk_constants as rc
+        import scripts.ai_brain_trader as abt
+
+        _saved = (os.environ.get("ASTRA_MAX_CONCURRENT_POSITIONS"), os.environ.get("ASTRA_MAX_SAME_DIRECTION_POSITIONS"))
+        try:
+            os.environ["ASTRA_MAX_CONCURRENT_POSITIONS"] = "3"
+            os.environ["ASTRA_MAX_SAME_DIRECTION_POSITIONS"] = "5"
+            importlib.reload(rc)
+            # 让 ai_brain_trader 内部 `import scripts.risk_constants as rc` 拿到 reload 后的对象
+            importlib.reload(abt)
+            text = abt.build_risk_budget_text(1000.0)
+        finally:
+            if _saved[0] is None:
+                os.environ.pop("ASTRA_MAX_CONCURRENT_POSITIONS", None)
+            else:
+                os.environ["ASTRA_MAX_CONCURRENT_POSITIONS"] = _saved[0]
+            if _saved[1] is None:
+                os.environ.pop("ASTRA_MAX_SAME_DIRECTION_POSITIONS", None)
+            else:
+                os.environ["ASTRA_MAX_SAME_DIRECTION_POSITIONS"] = _saved[1]
+            importlib.reload(rc)
+            importlib.reload(abt)
+
+        # 同向与并发上限都必须钳制到 3（总仓上限），绝不出现原始同向值 5
+        self.assertIn("全系统同向持仓上限: 3 笔", text, "同向上限未钳制到总仓 3")
+        self.assertIn("全系统并发持仓上限: 3 笔", text, "并发上限未显示为 3")
+        self.assertNotIn("5 笔", text, "提示词泄露了未钳制的同向原始值 5")
 
 
 if __name__ == "__main__":
