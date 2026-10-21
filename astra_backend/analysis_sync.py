@@ -301,6 +301,12 @@ def sync_archive(positions: list[dict] | None = None, max_pages: int = 2, accoun
     stage = time.perf_counter()
     result = reconcile(archive,account,positions)
     timings["reconcile_seconds"] = time.perf_counter() - stage
+    # 复盘归档入口：清理超期 position.sample 并回收孤儿 blob，防止数据逐日膨胀。
+    try:
+        prune = archive.prune_events()
+        timings["prune_events_deleted"] = prune.get("deleted", 0)
+    except Exception as exc:
+        timings["prune_events_error"] = str(exc)
     timings["total_seconds"] = time.perf_counter() - started
     emit("archive.sync",{"trades":len(result), "timings":timings},"completed",account=account)
     print("[analysis_archive] " + json.dumps({"trades":len(result), "timings":timings}))

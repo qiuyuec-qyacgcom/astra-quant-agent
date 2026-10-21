@@ -21,7 +21,7 @@ class ArchiveJobTests(unittest.TestCase):
 
     def test_success_passes_current_positions(self):
         self.assertEqual(main(), 0)
-        self.sync.assert_called_once_with(positions=[])
+        self.sync.assert_called_once_with(positions=[], venue="okx")
 
     def test_contention_skips_without_exchange_request(self):
         self.lock.side_effect = LockContended('fixture')

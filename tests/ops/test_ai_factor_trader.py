@@ -98,7 +98,7 @@ class ThinShellInjectionTests(unittest.TestCase):
     def test_fetch_candles_direct_delegates_to_module_global(self):
         seen = []
         with patch.object(aft, "fetch_candles",
-                          lambda inst, bar="15m", limit=45: seen.append((inst, bar, limit))
+                          lambda inst, bar="15m", limit=45, venue=None: seen.append((inst, bar, limit))
                           or {"candles": True}):
             result = aft.fetch_candles_direct("BTC-USDT-SWAP", bar="1H", limit=7)
         self.assertEqual(result, {"candles": True})
@@ -138,12 +138,14 @@ class ThinShellInjectionTests(unittest.TestCase):
         seen = {}
 
         def fake(item, positions, usdt, *, news_sentiment_file, fetch_candles_direct,
-                 instrument_profile, load_adaptive_config):
+                 instrument_profile, load_adaptive_config, fetch_ticker, venue):
             seen.update(item=item, positions=positions, usdt=usdt,
                         news=news_sentiment_file,
                         candles=fetch_candles_direct,
                         profile=instrument_profile,
-                        adaptive=load_adaptive_config)
+                        adaptive=load_adaptive_config,
+                        ticker=fetch_ticker,
+                        venue=venue)
             return {"ok": True}
 
         with patch.object(aft, "_fetch_single_instrument_data", fake):
@@ -156,6 +158,7 @@ class ThinShellInjectionTests(unittest.TestCase):
         self.assertIs(seen["candles"], aft.fetch_candles_direct)
         self.assertIs(seen["profile"], aft.instrument_profile)
         self.assertIs(seen["adaptive"], aft.load_adaptive_config)
+        self.assertIs(seen["ticker"], aft.fetch_ticker)
 
 
 class InstrumentProfileTests(unittest.TestCase):

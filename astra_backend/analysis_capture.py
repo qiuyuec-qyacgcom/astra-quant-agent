@@ -120,7 +120,11 @@ def emit(kind: str, body=None, status: str = "observed", **meta) -> str:
         ctx = context()
         ctx.update({k:v for k,v in meta.items() if v is not None})
         if isinstance(body, dict):
-            body = {**body, "capture_span_id": ctx.get("span_id"), "request_id": ctx.get("request_id")}
+            # 逐次去重才需要把本次调用独有的 span/request 写进正文；对按生命周期
+            # 覆盖（replace）的事件（如 position.sample），这两者只会让 blob hash
+            # 每周期变化，导致去重完全失效、正文无限膨胀，故不注入。
+            if not meta.get("replace"):
+                body = {**body, "capture_span_id": ctx.get("span_id"), "request_id": ctx.get("request_id")}
         account = ctx.pop("account",None) or identity()
         last_exc = None
         for attempt in range(3):
@@ -319,8 +323,12 @@ def position_meta(position: dict | None = None) -> dict:
 
 def observe_position(row: dict, tracker: dict | None = None):
     tracker = tracker or {}
+    # 每个持仓生命周期的巡检采样只需保留最新一条：highWaterMark/lowWaterMark 在
+    # tracker 里滚动累积（max/min），最新一条即蕴含全部 MFE/MAE 极值信息。用稳定
+    # id + replace 覆盖旧 sample，避免 uuid4 随机 id 导致去重失效、DB 每周期膨胀。
     emit("position.sample",{"position":row,"tracker":tracker,
          "sampling_note":"巡检采样，非逐笔行情极值"},
+         id="sample_"+lifecycle_id(row), replace=True,
          trade_id=lifecycle_id(row),inst=row.get("instId"),side=row.get("posSide") or row.get("side"))
 
 def recover_legacy():

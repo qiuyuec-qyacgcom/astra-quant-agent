@@ -57,7 +57,7 @@ def _run_factors(news_file: str):
     return factors_mod.fetch_single_instrument_data(
         _item(), [], 1000.0,
         news_sentiment_file=news_file,
-        fetch_candles_direct=lambda inst_id, bar, limit: _candles(max(limit, 40)),
+        fetch_candles_direct=lambda inst_id, bar, limit, venue=None: _candles(max(limit, 40)),
         instrument_profile=lambda f, t: {"sl_atr_mult": 1.3, "tp_atr_mult": 2.0},
         load_adaptive_config=lambda: {"position_size_multipliers": {}},
     )

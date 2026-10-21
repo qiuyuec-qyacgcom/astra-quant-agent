@@ -205,7 +205,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
 
     t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)
     t["lowWaterMark"] = min(t.get("lowWaterMark", cur_px), cur_px)
-    analysis_capture.emit("position.sample", {"position": curr_pos, "tracker": dict(t), "sampling_note": "巡检采样，非逐笔极值"})
+    analysis_capture.observe_position(curr_pos, dict(t))
     # Peak Profit Tracking
     if is_long:
         t["highWaterMark"] = max(t.get("highWaterMark", cur_px), cur_px)

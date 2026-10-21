@@ -171,5 +171,71 @@ class CaptureReplayTests(unittest.TestCase):
         self.assertNotEqual(body["risk"]["ASTRA_MAX_LEVERAGE"]["configured"], None)
         self.assertFalse(fault_path.exists())
 
+
+class PositionSampleRetentionTests(unittest.TestCase):
+    """observe_position 按生命周期去重 + 时间窗口清理，防止交易复盘数据膨胀。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "analysis.db"
+        self.env = patch.dict(os.environ, {"ASTRA_TESTING": "1", "ASTRA_ANALYSIS_DB": str(self.path)})
+        self.env.start()
+        self.archive = Archive(self.path)
+        self.account = "okx:live:retention"
+        self.scope = capture.scope(account=self.account, cycle_id="cycle-retention")
+        self.scope.__enter__()
+
+    def tearDown(self):
+        self.scope.__exit__(None, None, None)
+        self.env.stop()
+        self.temp.cleanup()
+
+    def _row(self, i=1, **overrides):
+        row = {"instId": "BTC-USDT-SWAP", "posId": str(i), "posSide": "long",
+               "cTime": "1788825600000", "pos": "1", "avgPx": "100"}
+        row.update(overrides)
+        return row
+
+    def test_observe_position_keeps_only_latest_sample_per_lifecycle(self):
+        row = self._row()
+        # 直接通过 emit 校验稳定 id + replace 语义
+        capture.observe_position(row, {"highWaterMark": 110, "lowWaterMark": 90})
+        capture.observe_position(row, {"highWaterMark": 115, "lowWaterMark": 85})
+        events = self.archive.events(self.account)
+        samples = [e for e in events if e["kind"] == "position.sample"]
+        self.assertEqual(len(samples), 1, "同一生命周期只应保留最新一条 sample")
+        with self.archive.connect() as con:
+            body = self.archive.read_blob(con, samples[0]["body_hash"])
+        self.assertEqual(body["tracker"]["highWaterMark"], 115)
+        self.assertEqual(body["tracker"]["lowWaterMark"], 85)
+        # 正确绑定 trade_id（修复 MFE/MAE 关联 bug）
+        self.assertTrue(samples[0]["trade_id"])
+        self.assertNotIn("capture_span_id", body, "position.sample 不应注入逐次 span，避免 blob hash 漂移")
+
+    def test_prune_events_removes_expired_samples_and_orphan_blobs(self):
+        row = self._row()
+        capture.observe_position(row, {"highWaterMark": 110, "lowWaterMark": 90})
+        # 手动把该 sample 的 occurred_ms 调到 30 天前，使其落入清理窗口
+        with self.archive.connect(True) as con:
+            con.execute("UPDATE analysis_events SET occurred_ms=occurred_ms-30*24*3600*1000 WHERE kind='position.sample'")
+        before_blobs = self._blob_count()
+        result = self.archive.prune_events(keep_days=7, vacuum=False)
+        self.assertGreaterEqual(result["deleted"], 1)
+        self.assertEqual(len([e for e in self.archive.events(self.account) if e["kind"] == "position.sample"]), 0)
+        # 孤儿 blob 被回收
+        self.assertLess(self._blob_count(), before_blobs)
+
+    def test_prune_events_keeps_recent_samples(self):
+        row = self._row()
+        capture.observe_position(row, {"highWaterMark": 110, "lowWaterMark": 90})
+        result = self.archive.prune_events(keep_days=7, vacuum=False)
+        self.assertEqual(result["deleted"], 0, "窗口内的 sample 不应被清理")
+        self.assertEqual(len([e for e in self.archive.events(self.account) if e["kind"] == "position.sample"]), 1)
+
+    def _blob_count(self):
+        with self.archive.connect() as con:
+            return con.execute("SELECT COUNT(*) FROM analysis_blobs").fetchone()[0]
+
+
 if __name__=="__main__":
     unittest.main()

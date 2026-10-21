@@ -196,12 +196,61 @@ class Archive:
     def event(self, account: str, kind: str, body: Any, status: str = "observed", **meta) -> str:
         event_id = str(meta.get("id") or uuid.uuid4().hex)
         observed = now_ms()
+        # replace=True：同一稳定 id 的事件按「最新覆盖」语义写入，旧 blob 由
+        # prune_events 统一回收。仅对按生命周期去重的事件（position.sample）使用。
+        replace = bool(meta.get("replace"))
         with self.connect(True) as con:
-            con.execute("INSERT OR IGNORE INTO analysis_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (event_id,account,int(meta.get("occurred_ms") or observed),observed,kind,status,
+            row = (event_id,account,int(meta.get("occurred_ms") or observed),observed,kind,status,
                  *[str(meta.get(k) or "") for k in ("cycle_id","decision_id","order_id","trade_id","inst","side","config_id")],
-                 self.blob(con,body)))
+                 self.blob(con,body))
+            if replace:
+                con.execute("""INSERT INTO analysis_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET occurred_ms=excluded.occurred_ms,observed_ms=excluded.observed_ms,
+                    kind=excluded.kind,status=excluded.status,cycle_id=excluded.cycle_id,decision_id=excluded.decision_id,
+                    order_id=excluded.order_id,trade_id=excluded.trade_id,inst=excluded.inst,side=excluded.side,
+                    config_id=excluded.config_id,body_hash=excluded.body_hash""", row)
+            else:
+                con.execute("INSERT OR IGNORE INTO analysis_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
         return event_id
+
+    def prune_events(self, keep_days: int | None = None, vacuum: bool = True) -> dict:
+        """删除超过保留期的 position.sample 事件，并回收失去引用的孤儿 blob。
+
+        设计约束（每条都有实测理由，勿放宽）：
+
+        - 只动 `position.sample`：它是唯一按「持仓数 × 周期数」线性膨胀的事件；
+          其它事件（llm.* / order.* / decision.*）每个决策周期有界，不构成膨胀主因；
+        - 时间基准用 `occurred_ms`：position.sample 未显式传 occurred_ms，等于 observed_ms；
+        - 删除事件后回收不再被任何 events/raw/trades/configs 引用的孤儿 blob
+          （replace 覆盖也会产生孤儿 blob，这里一并处理）；
+        - 只有真删了行才 VACUUM；VACUUM 失败不算错误，返回 vacuumed=False；
+        - 保留天数默认 7 天，可用 ASTRA_ANALYSIS_KEEP_DAYS 覆盖（每次调用读取）。
+        """
+        days = keep_days if keep_days is not None else int(os.getenv("ASTRA_ANALYSIS_KEEP_DAYS", "7"))
+        if days < 1:
+            raise ValueError("keep_days 必须 >= 1：0 或负数会清空全部历史")
+        cutoff = now_ms() - days * 24 * 3600 * 1000
+        deleted = 0
+        with self.connect(True) as con:
+            cur = con.execute(
+                "DELETE FROM analysis_events WHERE kind='position.sample' AND occurred_ms < ?", (cutoff,))
+            deleted = cur.rowcount or 0
+            # 回收孤儿 blob：任何不再被 events/raw/trades/configs 引用的正文。
+            con.execute("""DELETE FROM analysis_blobs WHERE hash NOT IN (
+                SELECT body_hash FROM analysis_events
+                UNION SELECT body_hash FROM analysis_raw
+                UNION SELECT body_hash FROM analysis_trades
+                UNION SELECT body_hash FROM analysis_configs
+            )""")
+        vacuumed = False
+        if deleted and vacuum:
+            try:
+                with self.connect(True) as con:
+                    con.execute("VACUUM")
+                vacuumed = True
+            except sqlite3.Error:
+                vacuumed = False
+        return {"deleted": deleted, "vacuumed": vacuumed, "keep_days": days, "cutoff_ms": cutoff}
 
     def raw(self, account: str, source: str, rows: list[dict]) -> None:
         with self.connect(True) as con:

@@ -68,7 +68,7 @@ class _Base(unittest.TestCase):
         return fetch_single_instrument_data(
             item, list(positions), 1000.0,
             news_sentiment_file=news_file or self.tmp.name,
-            fetch_candles_direct=lambda inst, bar, n: books.get(bar, []),
+            fetch_candles_direct=lambda inst, bar, n, venue=None: books.get(bar, []),
             instrument_profile=lambda f, asset_type: {"sl_atr_mult": 1.3},
             load_adaptive_config=lambda: (adaptive or {}))
 
@@ -152,7 +152,7 @@ class FifteenMinuteDepthSupportsEma55Test(_Base):
     def test_requested_15m_depth_is_at_least_55(self):
         asked = {}
 
-        def spy(inst, bar, n):
+        def spy(inst, bar, n, venue=None):
             asked[bar] = n
             return _rising(n) if bar == "15m" else _rising(n)
 

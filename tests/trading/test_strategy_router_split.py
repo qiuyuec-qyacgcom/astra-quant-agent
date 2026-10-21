@@ -141,18 +141,29 @@ class StrategyRouterSplitTest(unittest.TestCase):
     def test_old_module_path_still_importable(self):
         """外部 `from astra_backend.routers.strategy import router` 必须照旧可用。
 
-        ⚠️ FastAPI ≥0.110 的 `include_router` 是**立即展开**的：聚合器的 `routes`
-        里直接放展开后的 `APIRoute`（数量 = 实际路由条数，而非 `len(INCLUDE_ORDER)`
-        个惰性句柄）。旧版本才是 `_IncludedRouter` 句柄 —— 本仓已是新版，
-        故此处只断言"路由已展开且可挂载"，实际条数由
-        `test_live_openapi_route_surface_unchanged` 从 OpenAPI 规格校验。
+        FastAPI ≥0.110 的 `include_router` 是**立即展开**的，但当前 0.141 仍用
+        惰性 `_IncludedRouter`（`path=None`，真实路由在 `original_router.routes`）。
+        故此处递归展开内层路由收集真实路径，断言"路由已展开且可挂载"，实际条数
+        由 `test_live_openapi_route_surface_unchanged` 从 OpenAPI 规格校验。
         """
         from fastapi.routing import APIRoute
         from astra_backend.routers.strategy import router
+
+        def _flatten(routes):
+            out = []
+            for r in routes:
+                original = getattr(r, "original_router", None)
+                if original is not None:
+                    out += _flatten(getattr(original, "routes", []))
+                elif isinstance(r, APIRoute):
+                    out.append(r)
+            return out
+
         self.assertTrue(hasattr(router, "routes"))
-        self.assertGreater(len(router.routes), 0, "聚合器应已展开至少一条路由")
-        self.assertTrue(all(isinstance(r, APIRoute) for r in router.routes),
-                        "FastAPI 新版应已把 include_router 立即展开为 APIRoute")
+        flattened = _flatten(router.routes)
+        self.assertGreater(len(flattened), 0, "聚合器应已展开至少一条路由")
+        self.assertTrue(all(isinstance(r, APIRoute) for r in flattened),
+                        "递归展开后应全部为 APIRoute")
 
     def test_judgment_actually_notices_a_change(self):
         src = (PKG / "council.py").read_text(encoding="utf-8")
