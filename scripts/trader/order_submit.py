@@ -390,7 +390,12 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         except (TypeError, ValueError):
             _want_lever = 0.0
     if _want_lever > 0:
-        _want_lever = max(1.0, min(_want_lever, float(MAX_LEVERAGE or 20.0)))
+        # 审计 P2-8（2026-10-22 补漏）：此前只夹上限 `max(1.0, min(_, MAX_LEVERAGE))`，
+        # 下限兜底到 1.0 —— `MIN_LEVERAGE` 参数形同虚设，导致后台设「最小杠杆 9x」
+        # 时落档仍可能按低于下限的值（如 7x）发单。这里与决策层（decisions.py）和
+        # 执行层（leverage.py）同口径，上下限都夹，`MIN_LEVERAGE` 缺省/为 0 时兜底 1x。
+        _want_lever = min(max(_want_lever, float(MIN_LEVERAGE or 1.0) or 1.0),
+                          float(MAX_LEVERAGE or 20.0))
         # 审计⑤(2026-10-17)：int() 对浮点杠杆向下截断（3.5x→3x），导致实际档位与
         # 张数/保证金折算脱节。OKX 杠杆为整数档，改用 round() 四舍五入取最接近档位。
         _lever_bucket = int(round(_want_lever))

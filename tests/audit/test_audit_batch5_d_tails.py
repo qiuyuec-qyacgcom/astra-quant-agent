@@ -249,6 +249,28 @@ class TestLeverageLanding(unittest.TestCase):
         self.assertIn('"leverage": ai_lever,', trader_src.split("def run_trading_cycle")[1]
                       if "def run_trading_cycle" in trader_src else trader_src)
 
+    def test_landing_clamps_lower_bound(self):
+        """发单落档必须夹下限 MIN_LEVERAGE（2026-10-22 补漏）。
+
+        根因：`order_submit.py` 的落档夹取曾是 `max(1.0, min(_, MAX_LEVERAGE))`，
+        下限兜底到 1.0 —— `MIN_LEVERAGE` 参数形同虚设，导致后台设「最小杠杆 9x」
+        时仍可能按低于下限的值（如 7x）发单。这里钉死实现体源码必须同时引用
+        `MIN_LEVERAGE` 与 `MAX_LEVERAGE` 做双向夹取（`min(max(_, MIN), MAX)`）。
+        """
+        import ast as _ast
+        from tests.source_scan import find_function_node
+        _node, _path = find_function_node(
+            "scripts/ai_factor_trader.py", "submit_protected_limit_order",
+            pkg_name="trader")
+        self.assertEqual(_path.name, "order_submit.py")
+        submit_src = _ast.get_source_segment(_path.read_text(encoding="utf-8"), _node)
+        self.assertIsNotNone(submit_src)
+        # 下限与上限都必须出现在同一段落档夹取里（不再只兜底到 1.0）
+        self.assertIn("MIN_LEVERAGE", submit_src,
+                      "发单落档必须引用 MIN_LEVERAGE 做下限钳制")
+        self.assertIn("MAX_LEVERAGE", submit_src,
+                      "发单落档必须引用 MAX_LEVERAGE 做上限钳制")
+
     def test_three_venues_expose_set_leverage(self):
         from astra_backend.exchanges.okx import OKXAdapter
         import scripts.okx_rest as okx_rest
