@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from fastapi import Body, Header, HTTPException
 from astra_backend.config import refresh_settings
@@ -108,8 +109,15 @@ def run_gateway_job(
     # 落盘（面板「产物时效」正常），但「最近执行时间」列读的是 job_runs 的 started_at，
     # 于是永远显示「尚未调度」。这里补上与自动调度 `GatewayScheduler._execute` 同源的
     # begin_job/finish_job 回写，让手动激活与定时调度在可观测性口径上一致。
+    #
+    # 审计(2026-10-22·第二次)：上述只补了 `job_runs`（Worker 与遥测页读它），
+    # 但「网关与调度」页的调度表读的是 `runtime_state.job.last.{name}`
+    # （`scheduler_snapshot` 的 `last_scheduled_at`），而自动调度 `tick()` 在
+    # submit 前会 `set_state` 写这一处 —— 手动运行漏写，导致该页依旧「尚未调度」。
+    # 这里与 `tick()` 同口径补写 `set_state`，两处存储都回写，两页口径一致。
     store = GatewayStore(GATEWAY_DB_PATH)
     run_id = store.begin_job(job_id)
+    store.set_state(f"job.last.{job_id}", datetime.now(timezone(timedelta(hours=8))).isoformat())
 
     cmd = [sys.executable, str(script_path), *job_cfg["args"]]
     # 会话级标志（`ASTRA_SESSION_FORCE`）只属于「立即运行 trader」这一个显式意图，

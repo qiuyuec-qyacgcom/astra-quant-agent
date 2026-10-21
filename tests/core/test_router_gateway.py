@@ -277,6 +277,24 @@ class GatewayOpsTests(_GatewayBase):
         self.store.begin_job.assert_called_once_with("self_improvement")
         self.store.finish_job.assert_called_once_with(4242, 0, "ok")
 
+    def test_manual_run_also_writes_runtime_state_for_scheduler_table(self):
+        """★ 手动「立即运行」必须**同时**写 runtime_state（与 tick() 同口径）。
+
+        2026-10-22（第二次修复）：上一版只补了 job_runs（Worker 与遥测页读它），
+        但「网关与调度」页调度表读的是 `runtime_state.job.last.{name}`
+        （scheduler_snapshot 的 last_scheduled_at）。自动调度 tick() 在 submit 前
+        会 set_state 写这一处，手动运行漏写 ⇒ 该页依旧「尚未调度」。
+        此测试钉住 set_state 回写，两处存储、两页口径一致。
+        """
+        self._script("self_improvement_engine.py")
+        self.store.begin_job.return_value = 4242
+        proc = mock.Mock(returncode=0, stdout="ok", stderr="")
+        self._start(mock.patch.object(GO.subprocess, "run", return_value=proc))
+        GO.run_gateway_job("self_improvement", {}, x_astra_admin_token="tok")
+        self.store.set_state.assert_called_once_with(
+            "job.last.self_improvement", mock.ANY)
+
+
     def test_manual_run_writes_job_runs_on_failure(self):
         self._script("news_sentiment_harvester.py")
         self.store.begin_job.return_value = 9
