@@ -104,6 +104,13 @@ def run_gateway_job(
     if not script_path.exists():
         raise HTTPException(status_code=500, detail=f"任务脚本不存在：{script_path}")
 
+    # 审计(2026-10-22)：手动「立即运行」此前**不写 job_runs 表** —— 脚本产物正常
+    # 落盘（面板「产物时效」正常），但「最近执行时间」列读的是 job_runs 的 started_at，
+    # 于是永远显示「尚未调度」。这里补上与自动调度 `GatewayScheduler._execute` 同源的
+    # begin_job/finish_job 回写，让手动激活与定时调度在可观测性口径上一致。
+    store = GatewayStore(GATEWAY_DB_PATH)
+    run_id = store.begin_job(job_id)
+
     cmd = [sys.executable, str(script_path), *job_cfg["args"]]
     # 会话级标志（`ASTRA_SESSION_FORCE`）只属于「立即运行 trader」这一个显式意图，
     # 不应通过 `.env` 全局注入、再被 `os.environ` 继承泄漏给所有网关子进程。
@@ -121,6 +128,8 @@ def run_gateway_job(
             env=child_env,
         )
     except subprocess.TimeoutExpired:
+        # 与调度器超时口径一致（return_code=124），避免留下 running 僵尸行。
+        store.finish_job(run_id, 124, f"timeout after {job_cfg['timeout']}s (manual run)")
         audit_record(
             f"gateway.job.{job_id}.run",
             "timeout",
@@ -131,6 +140,8 @@ def run_gateway_job(
             detail=f"任务执行超时（限时 {job_cfg['timeout']} 秒）",
         )
 
+    detail = (result.stderr if result.returncode else result.stdout)[-2000:]
+    store.finish_job(run_id, result.returncode, detail)
     audit_record(
         f"gateway.job.{job_id}.run",
         "success" if result.returncode == 0 else "failed",

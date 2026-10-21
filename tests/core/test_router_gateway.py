@@ -262,6 +262,45 @@ class GatewayOpsTests(_GatewayBase):
         self.assertEqual(out["output"], "ok-output")
         self.assertEqual(self.audits[-1][0][1], "success")
 
+    def test_manual_run_writes_job_runs_for_observability(self):
+        """★ 手动「立即运行」必须写 job_runs（与自动调度 _execute 同口径）。
+
+        2026-10-22 修复：旧实现直接 subprocess.run、不写 job_runs ⇒ 脚本产物正常
+        （面板「产物时效」正常），但「最近执行时间」列读 job_runs.started_at，
+        永远显示「尚未调度」。此测试钉住 begin_job/finish_job 的成对回写。
+        """
+        self._script("self_improvement_engine.py")
+        self.store.begin_job.return_value = 4242
+        proc = mock.Mock(returncode=0, stdout="ok", stderr="")
+        self._start(mock.patch.object(GO.subprocess, "run", return_value=proc))
+        GO.run_gateway_job("self_improvement", {}, x_astra_admin_token="tok")
+        self.store.begin_job.assert_called_once_with("self_improvement")
+        self.store.finish_job.assert_called_once_with(4242, 0, "ok")
+
+    def test_manual_run_writes_job_runs_on_failure(self):
+        self._script("news_sentiment_harvester.py")
+        self.store.begin_job.return_value = 9
+        proc = mock.Mock(returncode=2, stdout="", stderr="boom")
+        self._start(mock.patch.object(GO.subprocess, "run", return_value=proc))
+        with self.assertRaises(HTTPException) as ctx:
+            GO.run_gateway_job("news", {}, x_astra_admin_token="tok")
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.store.begin_job.assert_called_once_with("news")
+        self.store.finish_job.assert_called_once_with(9, 2, "boom")
+
+    def test_manual_run_writes_job_runs_on_timeout(self):
+        self._script("news_sentiment_harvester.py")
+        self.store.begin_job.return_value = 7
+        self._start(mock.patch.object(
+            GO.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(cmd="x", timeout=120)))
+        with self.assertRaises(HTTPException) as ctx:
+            GO.run_gateway_job("news", {}, x_astra_admin_token="tok")
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.store.begin_job.assert_called_once_with("news")
+        # 超时与调度器口径一致：return_code=124，避免留下 running 僵尸行。
+        self.store.finish_job.assert_called_once_with(7, 124, mock.ANY)
+
 
 class TradingSessionEndpointTests(_GatewayBase):
     """交易时段端点（2026-09-30）：**校验口径 == 运行口径**，非法输入绝不落盘。
