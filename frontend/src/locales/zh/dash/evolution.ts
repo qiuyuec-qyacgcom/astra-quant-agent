@@ -22,7 +22,7 @@ export const zhEvolution = {
     desc: '本轮"改或不改"的完整推演',
   },
   insights: {
-    title: '交易复盘归因',
+    title: '交易归因',
     desc: '对代表性平仓的痛点切片',
     empty: '暂无归因切片',
   },

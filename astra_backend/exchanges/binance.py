@@ -1234,7 +1234,7 @@ class BinanceExchange:
             "uTime": str(cycle[-1].get("time") or ""),
             # 币安 `_closed_cycle` 每次产出的是一个**完整开→平周期**（running 归零才
             # 关闭 cycle），等价于 OKX 的 type=2「最终平仓」。此前误标 type=1 会让
-            # 复盘 normalize_position 判成 partial 而漏掉整条平仓记录。
+            # 台账 normalize_position 判成 partial 而漏掉整条平仓记录。
             "type": "2",
             "pnlRatio": None,
             "posId": str(cycle[0].get("orderId") or ""),
@@ -2417,7 +2417,7 @@ class BinanceTradingAdapter(BinancePublicAdapter):
     def positions_history(self, limit: int = 100) -> list[dict[str, Any]]:
         """币安平仓历史 → OKX 同构（桥接内部 ``BinanceExchange.positions_history``）。
 
-        主脑台账同步（``sync_full_ledger`` / ``analysis_sync``）用它与 ``okx_rest.
+        主脑台账同步（``sync_full_ledger``）用它与 ``okx_rest.
         positions_history`` 同构的平仓周期枚举来折算 ``venue=binance`` 的 closed 行；
         本方法补上 ``BinanceTradingAdapter`` 这一支，避免调用方直接依赖
         ``adapter.exchange.positions_history`` 的内部实现路径。

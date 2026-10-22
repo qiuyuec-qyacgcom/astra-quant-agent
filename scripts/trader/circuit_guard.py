@@ -41,7 +41,6 @@ import os
 import time
 from typing import Tuple
 
-from astra_backend import analysis_capture
 
 
 def check_black_swan_sentinel(*, fetch_candles_direct, news_sentiment_file: str) -> Tuple[bool, str]:
@@ -152,8 +151,7 @@ def is_circuit_breaker_active(usdt_available: float = None, *, circuit_breaker_f
             today_pnl = ledger_daily_closed_pnl(ledger, _mode, today_str)
             _loss_cap = effective_daily_loss_limit(usdt_available)
             if today_pnl < -_loss_cap:
-                analysis_capture.emit("execution.gate", {"rule": "daily_loss", "realized_pnl_used": today_pnl, "loss_limit": _loss_cap, "risk_base_equity": usdt_available, "date": today_str}, "rejected" if today_pnl < -_loss_cap else "passed")
-                return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按可用余额自适应)"
+                            return True, f"今日累计回撤 ({today_pnl:.2f}U) 触及单日最大风控熔断限额 ({_loss_cap}U｜按可用余额自适应)"
         except Exception as e:
             return True, f"日亏损风控数据读取失败，安全暂停开仓: {e}"
 

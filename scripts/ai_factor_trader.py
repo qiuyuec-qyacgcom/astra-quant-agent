@@ -36,7 +36,6 @@ except Exception:
     __version__ = "7.6.0"
 
 from astra_backend.time_utils import beijing_day
-from astra_backend import analysis_capture
 
 # 结构优化阶段4·B3：纯信号逻辑已搬入 scripts/trader/signals.py，re-export 保持门面表面不变
 from scripts.trader.signals import clamp, evaluate_asset_signal as _evaluate_asset_signal  # noqa: F401
@@ -601,7 +600,6 @@ def check_black_swan_sentinel() -> Tuple[bool, str]:
         news_sentiment_file=NEWS_SENTIMENT_FILE)
 
 
-@analysis_capture.observed("execution.circuit")
 def is_circuit_breaker_active(usdt_available: float = None):
     """壳（第八十一刀搬至 `scripts/trader/circuit_guard.py`，同上注入形状）。"""
     # 注意：行情/情绪文件的注入**不在这里** —— 基线 breaker 经由门面全局
@@ -622,7 +620,6 @@ def query_positions() -> Tuple[bool, List[Dict[str, Any]], str]:
     return _venue_query_positions(okx_rest=okx_rest, binance_rest=_binance_adapter(),
                                   active_venue=_active_venue())
 
-@analysis_capture.observed("position.close")
 def close_position_confirmed(inst_id: str, pos_side: str, before_size: float, venue: str = "okx") -> Tuple[bool, str]:
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
     return _venue_query_close_confirmed(
@@ -821,7 +818,6 @@ def reconcile_reservation_ledger(real_pos_dict: Dict[str, Any],
     )
 
 
-@analysis_capture.observed("order.submit")
 def _binance_adapter():
     """惰性获取币安交易适配器（未配置/未开闸时不实例化，避免无谓出网）。
 
@@ -889,7 +885,6 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str) -> float:
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
     return _cloud_protection_coverage(orders, pos_side, _float_or_zero=_float_or_zero)
 
-@analysis_capture.observed("position.protection")
 def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, tp_px: float, sl_px: float,
                                     tp1_px=None, scale_out_ratio: float = 0.5,
                                     leg_min_sz: float = 0.0,
@@ -1246,7 +1241,6 @@ def _format_entry_diagnostics(diag) -> str:
 # Master Portfolio Execution Loop
 # =============================================================================
 @single_trader_cycle
-@analysis_capture.cycle("trader")
 def execute_portfolio():
     # 0. 本轮执行场所（切换按钮 → preferred_venue 联动执行面）。
     active_venue = _active_venue()
@@ -1320,10 +1314,6 @@ def execute_portfolio():
     if _phase1 is None:
         return None
     (active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available) = _phase1
-
-    analysis_capture.emit("account.snapshot", {"balance": account_snapshot.get("balance"), "equity": account_snapshot.get("equity"), "cross_venue_position_count": 0, "positions": all_positions, "pending_instruments": sorted(pending_inst_ids), "available": usdt_available, "cooldowns": load_stop_cooldowns()})
-    for observed_pos in all_positions:
-        analysis_capture.observe_position(observed_pos)
 
     # 2. Parallel fetch for the configured crypto universe
     all_factors, executed_actions, trackers = fetch_universe_and_manage_positions(

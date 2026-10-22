@@ -37,7 +37,6 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from astra_backend import analysis_capture
 
 
 def validate_and_filter_decision(p: Dict[str, Any], d_item: Dict[str, Any], active_inst_ids: set,
@@ -151,11 +150,9 @@ def assemble_decision_cache(
 
     for p in packages:
         inst_id = p["instId"]
-        analysis_capture.bind_decision(inst_id)
         d_item = decisions_dict.get(inst_id, {})
         if not isinstance(d_item, dict):
             d_item = {}
-        analysis_capture.emit("decision.proposed", {"proposal": d_item, "market": p, "policy_snapshot": policy_snapshot}, "proposed" if d_item.get("action") in ("BUY_LONG", "SELL_SHORT") else "wait")
         # Smooth field alias normalization (support both standard contract and council desk outputs)
         entry = safe_float(d_item.get("entry_price") or d_item.get("limit_price"))
         take_profit = safe_float(d_item.get("take_profit_price") or d_item.get("take_profit"))
@@ -189,8 +186,6 @@ def assemble_decision_cache(
         final_action, rejection_reason, rr = validate(
             p, normalized_d_item, active_inst_ids, active_position_sides,
         )
-        analysis_capture.emit("decision.filtered", {"original": d_item, "normalized": normalized_d_item, "action": final_action, "reason": rejection_reason, "rr": rr}, "passed" if final_action != "WAIT" else "rejected" if rejection_reason else "wait")
-
         final_entry = normalized_d_item.get("entry_price", entry)
         final_leverage = normalized_d_item.get("leverage", ai_leverage)
         final_margin = normalized_d_item.get("margin_usdt", ai_margin)
@@ -198,7 +193,6 @@ def assemble_decision_cache(
         final_sl = normalized_d_item.get("stop_loss_price", stop_loss)
 
         standard_cache[inst_id] = {
-            "analysis": analysis_capture.decision_meta(inst_id),
             "instId": inst_id,
             "name": p["name"],
             "timestamp": int(time.time()),

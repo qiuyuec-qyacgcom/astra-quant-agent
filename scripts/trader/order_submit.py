@@ -27,7 +27,6 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional, Tuple
 
-from astra_backend import analysis_capture
 
 
 def _shared_venue_entry_gate(*, venue: str, asset: str, action: str,
@@ -329,7 +328,6 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     is_valid, reason, _ = validate_quote_geometry_and_rr(
         action_type, effective_px, effective_tp, effective_sl,
         confidence=_ai_conf, min_rr_floor=(1.2 if _ai_conf >= _min_entry_conf else 0.0))
-    analysis_capture.emit("execution.gate", {"rule": "final_quote_geometry_rr", "passed": is_valid, "reason": reason, "effective": {"price": effective_px, "tp": effective_tp, "sl": effective_sl, "size": size}}, "passed" if is_valid else "rejected")
     if not is_valid:
         print(f"[Order Rejected] 最终有效开仓报价未通过核心安全复验: {reason} (px={effective_px}, tp={effective_tp}, sl={effective_sl})")
         release_signal_reservation(_reservation, "核心安全复验拒绝")
@@ -497,7 +495,6 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     if not order_id:
         release_signal_reservation(_reservation, "交易所未返回可核验订单号")
         return False, "exchange accepted response without a verifiable order id"
-    analysis_capture.emit("order.submitted", {"confidence": analysis_capture.context().get("proposal", {}).get("confidence"), "policy_version": analysis_capture.context().get("policy_version"), "decision_config_id": analysis_capture.context().get("decision_config_id"), "venue": target_venue, "effective": {"price": effective_px, "tp": effective_tp, "sl": effective_sl, "size": size}, "requested": {"price": price, "tp": tp_px, "sl": sl_px}, "exchange": rows}, "accepted", order_id=str(order_id), inst=inst_id, side=pos_side)
     record_open_intent(inst_id, side)
     confirm_signal_reservation(_reservation)
     return True, str(order_id)

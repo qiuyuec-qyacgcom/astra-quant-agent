@@ -21,12 +21,8 @@ import unittest
 
 from scripts.trader.position_exit import manage_position_tp_and_trailing
 
-# 本文件测的是「退出链的失败/锁利分支」，不测复盘采集。复盘采集（analysis_capture）
-# 默认在测试进程里是**开启**的（`enabled()` 仅在 `ASTRA_TESTING=1` 且无
-# `ASTRA_ANALYSIS_DB` 时才关闭），而 `position_exit` 新增的 `emit("position.sample")`
-# 会经 `Archive().event()` 连生产 `data/astra_quant.db`，触发测试沙箱的
-# `sqlite3.connect` 硬闸。故在此显式关掉采集（律①：测试不触生产文件/库）。
-os.environ.setdefault("ASTRA_TESTING", "1")
+# 本文件测的是「退出链的失败/锁利分支」，不涉及真实交易所或生产数据文件。
+
 
 HOUR = 3600
 PROFILES = {"crypto": {"sl_atr_mult": 1.0, "tp_atr_mult": 2.0, "min_profit_ratio": 0.01}}

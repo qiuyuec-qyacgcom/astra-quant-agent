@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 from astra_backend.math_utils import safe_float as _shared_safe_float
-from astra_backend import analysis_capture
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
@@ -724,7 +723,6 @@ def _pending_order_margin_usdt(o: Dict[str, Any]) -> Optional[float]:
     return round(sz * ct * px / lev, 2)
 
 
-@analysis_capture.cycle("trading_brain")
 def fetch_pending_orders_list() -> Optional[List[Dict[str, Any]]]:
     """拉取交易所当前全部 SWAP 挂单（V5 直签 REST，US-003）。
 
@@ -904,8 +902,6 @@ def execute_batch_ai_brain_cycle(
     profile = active_profile()
     # 审计 P1-3：覆盖层由 get_effective_system_prompt 在布局**之后**追加（此前被布局丢弃）
     effective_system_prompt = get_effective_system_prompt(profile=profile, context=runtime_context)
-
-    analysis_capture.emit("prompt.rendered", {"profile": profile, "variables": runtime_context, "system": effective_system_prompt, "user": prompt, "packages": packages, "positions": positions_context, "pending_orders": pending_orders_list})
 
     # Save Realtime Prompt Snapshot for Web Transparent Inspection
     write_prompt_snapshot(

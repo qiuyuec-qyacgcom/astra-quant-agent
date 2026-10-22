@@ -88,7 +88,6 @@
 | `self_improvement_engine.py` | 782 | LLM 原生自省与策略演化引擎 |
 | `local_lock.py` | 114 | `file_lock` 的**本地兜底**实现（跨主机锁的降级路径） |
 | `file_lock.py` | 73 | 跨平台非阻塞 `flock` 周期守卫（POSIX 直用 `fcntl`，Windows 经 `fcntl_compat` 降级），供 AI 大脑 / 因子交易 / 自进化等单飞守护进程入口共用 |
-| `sync_analysis_archive.py` | 39 | **只读**独立复盘归档作业：拉取 OKX 历史回填复盘库，**绝不下发交易订单** |
 | `qq_notifier.py` | 157 | 通知发布器，桥接 AstraQuant 网关 |
 | `db_manager.py` | 282 | SQLite 连接/建表管理 |
 | `debug_aggregate_orders.py` | 54 | **调试脚本**：聚合挂单排查 |

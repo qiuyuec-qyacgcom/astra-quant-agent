@@ -36,7 +36,6 @@ const routes: RouteRecordRaw[] = [
       // ── 系统日志（第一公民：运行日志 + 报错排查 + AI 决策 + 操作审计）────────
       { path: 'decisions', name: 'admin-decisions', component: () => import('../views/admin/DecisionsPage.vue') },
       { path: 'logs', redirect: '/admin/decisions' },
-      { path: 'analysis', name: 'admin-analysis', component: () => import('../views/admin/AnalysisPage.vue') },
       { path: 'promptlib', name: 'admin-promptlib', component: () => import('../views/admin/PromptStudioPage.vue') },
       { path: 'evolution', name: 'admin-evolution', component: () => import('../views/admin/EvolutionPage.vue') },
       // ── 风险管理（风控参数配置与熔断）───────────────────────────────────────

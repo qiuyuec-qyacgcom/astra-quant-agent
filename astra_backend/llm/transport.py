@@ -22,7 +22,6 @@ from astra_backend.llm.capabilities import _detect_reasoning_type
 from astra_backend.llm.providers import _join_api_path
 
 import http.client
-from astra_backend import analysis_capture
 
 
 
@@ -452,11 +451,6 @@ def _attempt_llm_call(
         else:
             detail = "读取响应体超时"
         elapsed = time.perf_counter() - t0
-        analysis_capture.emit("llm.error", {
-            "attempt": attempt, "candidate_index": candidate_index,
-            "model": cand["model"], "timeout_seconds": effective_timeout,
-            "elapsed_seconds": round(elapsed, 3), **progress, "error": str(exc),
-        }, "timeout")
         return _LLMTransientError(
             f"LLM 请求超时（模型 {cand['model']}，本模型预算 {effective_timeout:.0f}s，"
             f"已等待 {elapsed:.1f}s）：{detail}", timed_out=True,
@@ -480,28 +474,15 @@ def _attempt_llm_call(
                     transport_timeout = min(remaining, response_start_timeout)
                     if transport_timeout < remaining:
                         progress["response_start_watchdog_seconds"] = transport_timeout
-                resp_handle = analysis_capture.llm_request(
-                    req, transport_timeout, urllib.request.urlopen,
-                    attempt=attempt, candidate_index=candidate_index, fallback=adaptation > 0,
-                    adaptation=adaptation, api_format=target_format,
-                )
+                resp_handle = urllib.request.urlopen(req, timeout=transport_timeout)
             except urllib.error.HTTPError as exc:
                 try:
                     progress["stage"] = "error_body"
                     err_b = b"".join(_response_chunks(exc, deadline, progress)).decode("utf-8", errors="replace")
                 finally:
                     exc.close()
-                analysis_capture.emit("llm.error", {
-                    "attempt": attempt, "candidate_index": candidate_index,
-                    "http_status": exc.code, "body": err_b,
-                }, "failed")
                 adapted = _adapt_chat_payload(payload, err_b) if exc.code == 400 and target_format == "openai_chat" else None
                 if adapted is not None and json.dumps(adapted, sort_keys=True) not in seen_payloads:
-                    analysis_capture.emit("llm.parameter_adaptation", {
-                        "model": cand["model"], "attempt": attempt, "candidate_index": candidate_index,
-                        "removed_parameters": sorted(set(payload) - set(adapted)),
-                        "added_parameters": sorted(set(adapted) - set(payload)),
-                    })
                     payload = adapted
                     adaptation += 1
                     continue
@@ -514,7 +495,6 @@ def _attempt_llm_call(
                 progress["stage"] = "response_body"
                 res_json = _read_llm_response(resp, target_format, deadline, progress, effective_timeout, reasoning_only_timeout)
             latency_ms = int((time.perf_counter() - t0) * 1000)
-            analysis_capture.emit("llm.response", {"response": res_json, "latency_ms": latency_ms}, "received")
             content, reasoning, usage = _parse_llm_response(target_format, res_json)
             content = _validate_llm_answer(res_json, content, reasoning, response_format, cand["model"])
             return content, reasoning, usage, latency_ms

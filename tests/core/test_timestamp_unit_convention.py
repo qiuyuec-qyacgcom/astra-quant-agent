@@ -94,9 +94,7 @@ def _copies_from_ms(node: ast.AST) -> bool:
 #:
 #: ⚠️ 白名单只认**这些函数的名字**（精确匹配），不认任意调用 —— 这样既放过
 #: 语义正确的抽象，又不会让"真的写了秒"的普通调用蒙混过关。
-#: `row_ms` 是复盘归档 `analysis_sync.py` 内部的"取一行时间戳并归一成毫秒"助手，
-#: 与 `now_ms`/`timestamp_ms` 同源（函数名 `_ms` 后缀即单位契约）。
-KNOWN_MS_FUNCTIONS = {"now_ms", "timestamp_ms", "row_ms"}
+KNOWN_MS_FUNCTIONS = {"now_ms", "timestamp_ms"}
 
 
 def _calls_known_ms_function(node: ast.AST) -> bool:
@@ -104,8 +102,8 @@ def _calls_known_ms_function(node: ast.AST) -> bool:
 
     两种形态都要认：
     - 直接调用 `now_ms()`（`ast.Call` 且 `func` 是 `Name`）；
-    - 作为函数引用传给高阶函数 `map(row_ms, head)`（`row_ms` 是裸 `ast.Name`，
-      由 `map` 负责调用 —— 单位仍由 `row_ms` 的名字保证）。
+    - 作为函数引用传给高阶函数（如 `map(timestamp_ms, rows)`，裸 `ast.Name`，
+      由高阶函数负责调用 —— 单位仍由函数名保证）。
     """
     return any(
         (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
