@@ -225,6 +225,9 @@ export interface PortfolioRiskRow {
   reference_cap_usdt?: number | null
   reserved_usdt?: number | null
   available_usdt?: number | null
+  /** 风控页配置的最小/最大盈亏比（R:R）；null/缺失 = 未知（试算台回退 2.0） */
+  min_rr?: number | null
+  max_rr?: number | null
   updated_utc?: string
 }
 

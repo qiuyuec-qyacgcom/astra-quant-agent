@@ -18,8 +18,10 @@ export function computeRiskReward(input: {
   activePosition: any
   /** 可用权益：未持仓时按「可用余额 × 20%」估算单笔保证金（与执行层同口径） */
   availEq: number
+  /** 风控页配置的最小盈亏比；缺省 2.0（保持旧行为） */
+  minRr?: number
 }) {
-  const { entry, sl, tp, side, atr, activePosition, availEq } = input
+  const { entry, sl, tp, side, atr, activePosition, availEq, minRr } = input
 
 
   let riskDist = 0
@@ -54,7 +56,10 @@ export function computeRiskReward(input: {
   const rrRatio = riskDist > 0 ? rewardDist / riskDist : (isLockProfit ? 99.9 : 0)
   const atrMultiple = atr > 0 ? riskDist / atr : 0
 
-  const isRrCompliant = rrRatio >= 2.0
+  const minRrSafe = typeof minRr === 'number' && Number.isFinite(minRr) && minRr > 0 ? minRr : 2.0
+  // 与执行层/展示同口径：按两位小数比较，2.00 不得被二进制误差判成不足。
+  const rrGate = Number(rrRatio.toFixed(2))
+  const isRrCompliant = rrGate >= Number(minRrSafe.toFixed(2))
   const isAtrOptimal = atrMultiple >= 1.8 && atrMultiple <= 2.2
 
   const hasRealPosition = !!activePosition
@@ -79,6 +84,7 @@ export function computeRiskReward(input: {
     riskPct,
     rewardPct,
     rrRatio,
+    minRr: minRrSafe,
     atrMultiple,
     isRrCompliant,
     isAtrOptimal,

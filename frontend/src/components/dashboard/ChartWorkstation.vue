@@ -471,6 +471,12 @@ function resetSimulation() {
   updatePriceLines()
 }
 
+// 风控页配置的 R:R 底线（/api/all → portfolio_risk.min_rr）；未知时回退 2.0
+const minRiskReward = computed(() => {
+  const raw = Number(store.data?.portfolio_risk?.min_rr)
+  return Number.isFinite(raw) && raw > 0 ? raw : 2.0
+})
+
 // 真实数学风控测算模型
 const riskRewardMetrics = computed(() => computeRiskReward({
   entry: effectiveEntry.value,
@@ -481,6 +487,7 @@ const riskRewardMetrics = computed(() => computeRiskReward({
   activePosition: activePosition.value,
   // 可用权益在**调用点**读取：仍在 computed 求值期间发生，响应式追踪不变
   availEq: Number(store.account?.avail_eq || store.account?.total_eq || 0),
+  minRr: minRiskReward.value,
 }))
 
 // 价格精度自适应
@@ -1249,7 +1256,7 @@ onUnmounted(() => {
             <span class="num text-lg font-bold" :style="{ color: riskRewardMetrics.isRrCompliant ? 'var(--up)' : 'var(--warn)' }">
               {{ riskRewardMetrics.rrRatio.toFixed(2) }} : 1
             </span>
-            <span class="t-faint">{{ t('dash.matrix.chart.sim.rrMin') }}</span>
+            <span class="t-faint">{{ t('dash.matrix.chart.sim.rrMin', undefined, { rr: riskRewardMetrics.minRr.toFixed(1) }) }}</span>
           </div>
         </div>
 

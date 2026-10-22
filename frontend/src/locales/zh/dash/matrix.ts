@@ -143,7 +143,7 @@ export const zhMatrix = {
       spec: '假设测算',
       rrOk: '期望盈亏比',
       rrLow: '盈亏比不足',
-      rrMin: '底线 2.0R',
+      rrMin: '底线 {rr}R',
       atr: '止损呼吸空间',
       atrOk: '防插针区间',
       atrDev: '偏离 1.8~2.2x',

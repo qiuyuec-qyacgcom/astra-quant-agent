@@ -64,22 +64,29 @@ def validate_quote_geometry_and_rr(
     if not math.isfinite(rr):
         return False, "核心风控拦截：盈亏比计算异常", 0.0
 
+    # 判定值必须与展示值一致：二进制浮点会把算术上正好 2.00 的报价算成
+    # 1.9999999999999998，直接用原始 float 比较就会出现
+    # 「当前 R:R = 2.00:1，底线 2.0:1，但盈亏比不足」的自相矛盾拒单。
+    # 两侧统一按展示精度（2 位小数）归一后再比较，让门禁与提示文案不可能打架。
+    rr_gate = round(rr, 2)
+    floor_gate = round(float(MIN_RISK_REWARD_RATIO or 0.0), 2)
+
     # 绝对系统安全底线：任何情况下盈亏比不得低于 1.2:1（防手续费与滑点倒挂）
     ABS_MIN_RR = 1.2
-    effective_floor = max(ABS_MIN_RR, float(min_rr_floor or 0.0))
+    effective_floor = max(ABS_MIN_RR, round(float(min_rr_floor or 0.0), 2))
 
-    if rr < MIN_RISK_REWARD_RATIO:
+    if rr_gate < floor_gate:
         conf_val = float(confidence or 0.0)
         # 高置信度动态正期望放行：置信度 >= 80% 且期望收益率 E = P*RR - (1-P)*1.0 >= +0.30R，且必须满足绝对安全底线 (>= 1.2R)
-        if conf_val >= 80.0 and rr >= effective_floor:
+        if conf_val >= 80.0 and rr_gate >= effective_floor:
             p_win = conf_val / 100.0
             expected_val = p_win * rr - (1.0 - p_win) * 1.0
             if expected_val >= 0.30:
                 pass  # 动态正期望放行
             else:
-                return False, f"核心风控拦截：盈亏比不足 {MIN_RISK_REWARD_RATIO:.1f} (当前 R:R = {rr:.2f}:1，底线 {MIN_RISK_REWARD_RATIO:.1f}:1)", rr
+                return False, f"核心风控拦截：盈亏比不足 {floor_gate:.2f} (当前 R:R = {rr_gate:.2f}:1，底线 {floor_gate:.2f}:1)", rr
         else:
-            return False, f"核心风控拦截：盈亏比不足 {MIN_RISK_REWARD_RATIO:.1f} (当前 R:R = {rr:.2f}:1，底线 {MIN_RISK_REWARD_RATIO:.1f}:1)", rr
+            return False, f"核心风控拦截：盈亏比不足 {floor_gate:.2f} (当前 R:R = {rr_gate:.2f}:1，底线 {floor_gate:.2f}:1)", rr
 
     if enforce_max_rr:
         _cur_max_rr = float(MAX_RISK_REWARD_RATIO or 0.0)

@@ -83,6 +83,20 @@ class DashboardMarketPayloadTailsTests(unittest.TestCase):
             self.assertEqual(res["status"], "unavailable")
             self.assertIsNone(res["budget_mode"])
             self.assertIn("mgr crash", res.get("error", ""))
+            self.assertIn("min_rr", res, "降级载荷也必须带 R:R 口径，试算台不能回退假 2.0")
+
+    def test_load_portfolio_risk_data_exposes_configured_rr_limits(self):
+        from scripts import risk_constants
+        with patch.dict(os.environ, {"ASTRA_PORTFOLIO_RISK_BUDGET_USDT": "0"}):
+            res = _load_portfolio_risk_data()
+        self.assertEqual(res["min_rr"], round(float(risk_constants.MIN_RISK_REWARD_RATIO), 2))
+        self.assertEqual(res["max_rr"], round(float(risk_constants.MAX_RISK_REWARD_RATIO), 2))
+
+    def test_min_rr_follows_the_risk_management_setting(self):
+        with patch("scripts.risk_constants.MIN_RISK_REWARD_RATIO", 1.8):
+            res = _load_portfolio_risk_data()
+        self.assertEqual(res["min_rr"], 1.8,
+                         "风控页改成 1.8 后，看板必须读到 1.8 而不是写死 2.0")
 
     # -------------------------------------------------------------------------
     # 4. 多所组合资产聚合 (_load_multi_venue_portfolio)

@@ -140,7 +140,7 @@ export const enMatrix = {
       spec: 'Hypothetical',
       rrOk: 'Expected R:R',
       rrLow: 'R:R too low',
-      rrMin: 'floor 2.0R',
+      rrMin: 'floor {rr}R',
       atr: 'SL breathing room',
       atrOk: 'wick buffer',
       atrDev: 'off 1.8~2.2x',

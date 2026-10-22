@@ -47,6 +47,29 @@ class DynamicExpectationGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertAlmostEqual(rr, 1.0)
 
+    def test_displayed_two_point_zero_is_not_rejected_by_binary_float_noise(self):
+        # (1.5-1.1)/(1.1-0.9) = 1.999999999999999 in binary, but the operator
+        # sees 2.00. The gate must judge the displayed value, not the raw float.
+        ok, reason, rr = validate_quote_geometry_and_rr("BUY_LONG", 1.1, 1.5, 0.9)
+        self.assertTrue(ok, f"显示 2.00 却被拒: {reason}")
+        self.assertAlmostEqual(rr, 2.0, places=6)
+
+    def test_a_genuinely_sub_floor_ratio_is_still_rejected(self):
+        ok, reason, _ = validate_quote_geometry_and_rr("BUY_LONG", 1.1, 1.498, 0.9)
+        self.assertFalse(ok)
+        self.assertIn("盈亏比不足", reason)
+
+    def test_the_gate_uses_the_admin_configured_floor(self):
+        # The floor comes from the risk-management page (ASTRA_MIN_RISK_REWARD).
+        from unittest.mock import patch
+        import scripts.order_risk as risk
+        with patch.object(risk, "MIN_RISK_REWARD_RATIO", 2.5):
+            ok, reason, rr = risk.validate_quote_geometry_and_rr(
+                "BUY_LONG", 100.0, 124.0, 90.0)
+        self.assertFalse(ok)
+        self.assertIn("2.50", reason, "提示里的底线必须等于后台配置值")
+        self.assertLess(rr, 2.5)
+
     def test_geometry_is_action_specific(self):
         # 买多：止损必须在入场之下；方向写反必须被拒（交易所 51001 族）
         ok, reason, _ = validate_quote_geometry_and_rr("BUY_LONG", 100.0, 130.0, 110.0)

@@ -78,6 +78,21 @@ def _global_env_axis() -> str:
         return "demo"
 
 
+def _risk_reward_limits() -> tuple[float | None, float | None]:
+    """风控页配置的 R:R 底线/上限（单一事实源）→ 看板试算台口径。
+
+    读 `scripts.risk_constants` 而不是硬编码 2.0：后台风控页保存后
+    `risk_config.reload_risk_constants()` 会原地更新这些模块常量，下一次
+    看板轮询即可看到新值。
+    """
+    try:
+        from scripts.risk_constants import MAX_RISK_REWARD_RATIO, MIN_RISK_REWARD_RATIO
+        return (round(float(MIN_RISK_REWARD_RATIO or 0.0), 2),
+                round(float(MAX_RISK_REWARD_RATIO or 0.0), 2))
+    except Exception:
+        return None, None
+
+
 def _load_portfolio_risk_data() -> dict:
     """透传组合风险预留层状态给前台三所面板（零网络，纯本地只读）。
 
@@ -90,6 +105,7 @@ def _load_portfolio_risk_data() -> dict:
       = 无上限模式 → 诚实 None（前端显「—」），绝不编 10000 假预算；
     - 读层异常不再裸吞成 {}：返回 status=unavailable + 空值结构，error 留痕。
     """
+    min_rr, max_rr = _risk_reward_limits()
     try:
         budget_raw = str(os.environ.get("ASTRA_PORTFOLIO_RISK_BUDGET_USDT") or "").strip()
         try:
@@ -133,6 +149,8 @@ def _load_portfolio_risk_data() -> dict:
             "available_usdt": avail,
             "utilization_pct": utilization,
             "by_venue": {str(k): round(float(v), 4) for k, v in by_venue.items()},
+            "min_rr": min_rr,
+            "max_rr": max_rr,
             "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     except Exception as exc:
@@ -142,6 +160,7 @@ def _load_portfolio_risk_data() -> dict:
             "budget_mode": None,
             "total_budget_usdt": None, "reference_cap_usdt": None, "reserved_usdt": None,
             "available_usdt": None, "utilization_pct": None, "by_venue": {},
+            "min_rr": min_rr, "max_rr": max_rr,
             "error": str(exc)[:160],
         }
 
