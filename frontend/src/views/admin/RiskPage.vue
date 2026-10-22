@@ -23,7 +23,7 @@ import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
 const toast = useToast();
 const { ask } = useConfirm();
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { useI18n } from '../../composables/useI18n';
 const { t } = useI18n();
 
@@ -319,30 +319,6 @@ async function resetAll() {
 }
 
 onMounted(loadData)
-
-// 权益实时刷新：日亏熔断线/单标的累计封顶等「引擎此刻的口径」依赖 OKX 可用余额，
-// 余额会随行情/开平仓实时变化，仅靠进页时加载一次会冻结在旧快照。这里每 30 秒
-// 静默重拉一次，让派生口径随线上余额同步跳动。
-// ⚠️ 安全护栏：仅当「无未保存改动 + 无保存/重置动作 + 无正在进行的请求」时才刷新，
-//    否则 loadData 的 syncFromServer 会覆盖用户正在编辑的表单值。
-const AUTO_REFRESH_MS = 30_000
-let _autoRefreshTimer: ReturnType<typeof setInterval> | null = null
-
-function autoRefresh() {
-  if (dirtyKeys.value.length > 0 || busy.value !== '' || loading.value) return
-  loadData()
-}
-
-onMounted(() => {
-  _autoRefreshTimer = setInterval(autoRefresh, AUTO_REFRESH_MS)
-})
-
-onUnmounted(() => {
-  if (_autoRefreshTimer !== null) {
-    clearInterval(_autoRefreshTimer)
-    _autoRefreshTimer = null
-  }
-})
 </script>
 
 <template>
