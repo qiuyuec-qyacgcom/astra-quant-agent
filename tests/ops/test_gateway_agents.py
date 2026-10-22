@@ -213,6 +213,65 @@ class LatestRunTests(_Base):
         self.assertEqual(self._agent(payload, "factor_engine")["last_run_status"], "success")
 
 
+class LatestRunMappingTests(_Base):
+    """预折叠映射（`GatewayStore.latest_job_runs()` 的产物）必须同样可用。
+
+    背景：`admin_agents` 原先喂的是全局 `job_runs(100)`。`factor_library` 每 60s
+    一条，100 条只覆盖约 1.5 小时；每 6 小时才跑一次的自进化作业几乎永远不在窗口内，
+    于是真实复盘完成后「最近执行时间」仍显示「尚未调度」。
+    """
+
+    def test_a_prefolded_mapping_is_accepted(self):
+        self._artifact("ai_brain_decisions.json", age_seconds=5)
+        runs = {"trader": {"job_name": "trader", "status": "success",
+                           "started_at": "2026-10-22 20:00:00"}}
+        row = self._agent(AG.agent_statuses(runs), "trading_brain")
+        self.assertEqual(row["last_run_status"], "success")
+        self.assertEqual(row["last_run_at"], "2026-10-22 20:00:00")
+
+    def test_a_six_hour_job_stays_visible(self):
+        runs = {"self_improvement": {"job_name": "self_improvement", "status": "success",
+                                     "started_at": "2026-10-22 14:00:00"}}
+        row = self._agent(AG.agent_statuses(runs), "self_improvement")
+        self.assertEqual(row["last_run_status"], "success")
+        self.assertEqual(row["last_run_at"], "2026-10-22 14:00:00",
+                         "低频作业的真实运行时间不得被折算成「尚未调度」")
+
+    def test_a_non_row_mapping_value_is_ignored(self):
+        row = self._agent(AG.agent_statuses({"trader": None}), "trading_brain")
+        self.assertEqual(row["last_run_status"], "not-run")
+
+
+class LatestJobRunsWindowTests(_Base):
+    """真实 SQLite：低频作业不得被高频作业挤出全局窗口。"""
+
+    def test_self_improvement_survives_a_flood_of_factor_runs(self):
+        from astra_gateway.store import GatewayStore
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        store = GatewayStore(Path(tmp.name) / "gw.db")
+
+        first = store.begin_job("self_improvement")
+        store.finish_job(first, 1, "旧的一次失败")
+        second = store.begin_job("self_improvement")
+        store.finish_job(second, 0, "ok")
+        for _ in range(150):
+            factor_id = store.begin_job("factor_library")
+            store.finish_job(factor_id, 0, "ok")
+
+        window = {run["job_name"] for run in store.job_runs(100)}
+        self.assertNotIn("self_improvement", window,
+                         "前提：全局 100 条窗口已被高频作业挤满（复现原缺陷）")
+
+        latest = store.latest_job_runs(["self_improvement", "factor_library"])
+        self.assertEqual(latest["self_improvement"]["status"], "success")
+        self.assertEqual(latest["factor_library"]["status"], "success")
+        row = self._agent(AG.agent_statuses(latest), "self_improvement")
+        self.assertEqual(row["last_run_status"], "success")
+        self.assertTrue(row["last_run_at"])
+
+
 class RealRootContractTests(_Base):
     def test_the_real_registry_root_is_the_repo_root(self):
         """反证：临时 ROOT 只是测试脚手架，真登记表的 ROOT 仍是仓库根。"""

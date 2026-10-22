@@ -1,6 +1,7 @@
 """Read-only registry of ASTRA managed agents and workers."""
 from __future__ import annotations
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,25 @@ AGENTS = (
 )
 
 
-def agent_statuses(job_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def agent_statuses(
+    job_runs: Sequence[dict[str, Any]] | Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fold run history into the roster.
+
+    Accepts either the legacy newest-first list (first row per job wins) or a
+    pre-folded ``{job_name: latest_row}`` mapping from
+    ``GatewayStore.latest_job_runs()``. The mapping form exists because a
+    global "last N rows" tail drops low-frequency jobs behind the 60s factor
+    job — self_improvement runs 4x/day and was almost never in the window.
+    """
     latest_by_job: dict[str, dict[str, Any]] = {}
-    for run in job_runs:
-        latest_by_job.setdefault(str(run.get("job_name")), run)
+    if isinstance(job_runs, Mapping):
+        latest_by_job = {
+            str(name): run for name, run in job_runs.items() if isinstance(run, Mapping)
+        }
+    else:
+        for run in job_runs:
+            latest_by_job.setdefault(str(run.get("job_name")), run)
     result = []
     for agent in AGENTS:
         output = ROOT / "data" / agent["output"] if agent["output"] else None

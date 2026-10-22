@@ -573,7 +573,7 @@ class UpdateAdminConfigTests(_Base):
 class AdminOpsRoutesTests(_Base):
     def test_agents_route_reads_gateway_store(self):
         store = mock.Mock()
-        store.job_runs.return_value = [{"id": 1}]
+        store.latest_job_runs.return_value = {"trader": {"id": 1}}
         store.model_stats.return_value = {"x": 1}
         store.model_calls.return_value = [{"id": 2}]
         self._start(mock.patch.object(A, "GatewayStore", return_value=store))
@@ -582,7 +582,10 @@ class AdminOpsRoutesTests(_Base):
         out = A.admin_agents(x_astra_admin_token="tok")
         self.assertEqual(out["agents"], ["a"])
         self.assertEqual(out["model_stats"], {"x": 1})
-        store.job_runs.assert_called_once_with(100)
+        # 必须按作业名取最新一条，而不是全局最近 100 条 —— 后者会被 60s 一次的
+        # factor_library 挤满，每 6 小时一次的自进化作业永远不在窗口内。
+        store.latest_job_runs.assert_called_once()
+        self.assertIn("self_improvement", store.latest_job_runs.call_args[0][0])
         store.model_calls.assert_called_once_with(50)
 
     def test_plugins_are_builtin_only(self):

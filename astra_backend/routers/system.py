@@ -22,7 +22,7 @@ from astra_backend.llm_manager import get_active_llm_runtime, init_llm_providers
 from astra_gateway import __version__ as GATEWAY_VERSION
 from astra_gateway.publisher import DB_PATH as GATEWAY_DB_PATH
 from astra_gateway.plugins import plugin_statuses
-from astra_gateway.agents import agent_statuses
+from astra_gateway.agents import AGENTS, agent_statuses
 from astra_gateway.secrets import save_secrets, status as secret_store_status
 from astra_gateway.pidfile import process_running, read_pid
 from astra_gateway.store import GatewayStore
@@ -435,8 +435,12 @@ def admin_agents(x_astra_admin_token: str | None = Header(default=None)) -> dict
     refresh_settings()
     require_admin_header(x_astra_admin_token)
     store = GatewayStore(GATEWAY_DB_PATH)
+    # 每个作业各取最新一条：全局 job_runs(100) 会被 60s 一次的 factor_library
+    # 挤满（100 条≈1.5 小时），每 6 小时一次的自进化作业几乎永远不在窗口内，
+    # 「最近执行时间」就会在真实复盘之后仍显示「尚未调度」。
+    latest_runs = store.latest_job_runs([agent["job"] for agent in AGENTS])
     return {
-        "agents": agent_statuses(store.job_runs(100)),
+        "agents": agent_statuses(latest_runs),
         "model_stats": store.model_stats(),
         "model_calls": store.model_calls(50),
         "prompt_policy": "交易主脑和自进化均由 Python 直接构造并传输提示词；Gateway 只记录无内容遥测。",

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Iterable
 
 from astra_gateway.events import GatewayEvent
 
@@ -270,6 +270,33 @@ class GatewayStore:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (max(1, min(limit, 200)),)).fetchall()
         return [dict(row) for row in rows]
+
+    def latest_job_runs(self, job_names: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Return the newest run row **per job_name**.
+
+        The Worker & Telemetry roster needs one row per managed job. Taking the
+        global `job_runs(100)` tail loses low-frequency jobs behind the 60s
+        `factor_library` job: 100 rows cover only ~1.5 hours, while
+        `self_improvement` runs every 6 hours, so its row was almost never in
+        the window and the page showed 「尚未调度」 right after a real review.
+
+        Unknown/absent jobs are simply missing from the mapping; callers keep
+        their own "not-run" fallback.
+        """
+        names = [str(name) for name in (job_names or []) if str(name)]
+        where = ""
+        params: tuple[Any, ...] = ()
+        if names:
+            placeholders = ",".join("?" for _ in names)
+            where = f"WHERE job_name IN ({placeholders})"
+            params = tuple(names)
+        query = (
+            "SELECT * FROM job_runs "
+            f"WHERE id IN (SELECT MAX(id) FROM job_runs {where} GROUP BY job_name)"
+        )
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return {str(row["job_name"]): dict(row) for row in rows}
 
     def record_model_call(self, record: dict[str, Any]) -> int:
         columns = (
