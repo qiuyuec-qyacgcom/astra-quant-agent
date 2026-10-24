@@ -42,6 +42,51 @@ from risk_constants import (
     effective_daily_loss_limit,
     effective_single_asset_margin,    MAX_TOTAL_EXPOSURE_USDT,
 )
+
+# ── 风控单一事实源 · 调用期同步（2026-10 审计）────────────────────────────
+# 门面在 import 期从 risk_constants 绑了下面这组常量，再作为 kwarg 透传给
+# `brain/prompt.py`（提示词注入）与 `brain/decisions.py`（杠杆钳制的真消费方）。
+# 后台「风控管理页」保存后只 `importlib.reload(risk_constants)`：重载换掉的是
+# risk_constants 模块对象里的属性，**门面这份 import 期副本不会跟着变**——
+#   · 交易子进程每个巡检周期重新 import 本文件 ⇒ 天然刷新（旧文档承诺的路径）；
+#   · 长驻进程（backend / gateway / 测试）⇒ 继续用陈旧值，改页不生效。
+# 因此在两个消费函数开跑前，把单一事实源的最新值同步进门面全局：本文件所有
+# 下游数据（杠杆钳制区间、提示词注入值）从此跟随风控管理页当前值，无需重启。
+#
+# 补丁缝优先：全局若被显式改过（与 import 期快照不同，且不是本函数自己同步
+# 写进去的值 —— 如 `patch.object(abt, "MAX_LEVERAGE", …)`），同步跳过它，
+# 既有补丁语义（test_leverage_range_and_council「模型给 3 被下限抬到 5」）继续成立。
+_RISK_FACADE_CONSTANTS = (
+    "MAX_LEVERAGE", "MIN_LEVERAGE",
+    "MAX_SCALE_IN_COUNT", "MIN_SCALE_IN_CONFIDENCE",
+    "MAX_MARGIN_EQUITY_RATIO",
+)
+_RISK_FACADE_IMPORT_SNAPSHOT = {_n: globals()[_n] for _n in _RISK_FACADE_CONSTANTS}
+# 本函数上次同步写进去的值：没有它，"自己同步写的值"会被永久误判成显式补丁，
+# 于是同步一次之后再也不会刷新（测试进程内尤其致命）。
+_RISK_FACADE_LAST_SYNC = {}
+
+
+def _sync_facade_risk_constants() -> None:
+    """把后台风控管理页的最新值同步进本门面全局（显式补丁改过的项跳过）。"""
+    try:
+        import scripts.risk_constants as _rc
+    except Exception:
+        try:
+            import risk_constants as _rc  # flat import：scripts/ 自己在 sys.path 上
+        except Exception:
+            return
+    _g = globals()
+    for _name, _imported in _RISK_FACADE_IMPORT_SNAPSHOT.items():
+        _current = _g.get(_name)
+        if _current != _imported and _current != _RISK_FACADE_LAST_SYNC.get(_name, _imported):
+            continue  # 调用方/测试显式改过 ⇒ 尊重补丁，不覆盖
+        _live = getattr(_rc, _name, None)
+        if _live is not None:
+            _g[_name] = _live
+        _RISK_FACADE_LAST_SYNC[_name] = _g.get(_name)
+
+
 import json
 import time
 import datetime
@@ -613,12 +658,14 @@ def construct_full_market_prompt(
     """把本轮全市场数据渲染成用户提示词。实现见 scripts/brain/prompt.py。
 
     15 项依赖在**调用时**从门面全局取名 —— 其中风控常量必须与执行层同源
-    （`risk_constants` 改参后由门面重载刷新），文件路径与 `safe_float` 则是
-    既有测试缝。理由逐一列在 scripts/brain/prompt.py 的 docstring。
+    （`risk_constants` 改参后由 `_sync_facade_risk_constants()` 在调用前刷新），
+    文件路径与 `safe_float` 则是既有测试缝。理由逐一列在 scripts/brain/prompt.py 的 docstring。
 
     注：不要把默认值写成同名形参（`safe_float=None` 之类）—— 那会让函数体里的
     裸名解析到形参、静默关掉这些缝。
     """
+    # 后台风控管理页改值后，import 期绑定的常量副本不会自己刷新 ⇒ 开跑前同步
+    _sync_facade_risk_constants()
     return _construct_full_market_prompt_impl(
         packages, pos_summary, active_positions_detail, pending_orders_detail,
         current_time_str, usdt_available, runtime_context_out, policy_snapshot,
@@ -674,6 +721,9 @@ def assemble_decision_cache(
     注：不要把默认值写成同名形参 —— 那会让函数体里的裸名解析到形参、
     静默关掉补丁缝。
     """
+    # 后台风控管理页改值后，import 期绑定的常量副本不会自己刷新 ⇒ 开跑前同步
+    # （杠杆钳制区间 [MIN, MAX] 是这里最直接的消费方）
+    _sync_facade_risk_constants()
     return _assemble_decision_cache_impl(
         packages, decisions_dict, active_inst_ids, active_position_sides,
         time_str, macro_summary,

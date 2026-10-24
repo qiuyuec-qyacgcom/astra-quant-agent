@@ -1,6 +1,7 @@
 """Shared deterministic safety checks for trade quotes and risk gates.
 No state, no price repair. The R:R floor comes from the single source of truth
-in scripts/risk_constants.py (configurable via the admin risk-control page / .env).
+in scripts/risk_constants.py (configurable via the admin risk-control page / .env)
+and is re-read at call time, so a backend hot-reload propagates without restart.
 """
 from __future__ import annotations
 
@@ -11,6 +12,42 @@ try:
     from scripts.risk_constants import MIN_RISK_REWARD_RATIO, MAX_RISK_REWARD_RATIO
 except ImportError:  # flat import when scripts/ itself is on sys.path
     from risk_constants import MIN_RISK_REWARD_RATIO, MAX_RISK_REWARD_RATIO
+
+# ── R:R 上下限 · 调用期同步（2026-10 审计）────────────────────────────────
+# 上面的模块级绑定是 import 期快照：后台「风控管理页」保存后只
+# `importlib.reload(risk_constants)`，换不掉本模块这两个名字。交易子进程每个
+# 巡检周期重新 import ⇒ 天然刷新；但 backend 是长驻进程，手动下单/平仓意图
+# 经 binance 适配器走到这里时会继续用陈旧底线（改了页不生效，直到重启）。
+# 因而每次校验前把单一事实源的最新值同步进来 —— 与 ai_brain_trader 门面同一手法。
+#
+# 测试补丁缝优先：名字被显式改过（`patch.object(order_risk, "MIN_RISK_REWARD_RATIO", …)`）
+# 且不是本函数自己同步写进去的值时，同步跳过它 —— 且**不把补丁值记进
+# LAST_SYNC**，否则补丁内的第二次调用会被误判成"自己同步的值"而遭覆盖。
+_RR_BOUNDS_IMPORT_SNAPSHOT = {"min": MIN_RISK_REWARD_RATIO, "max": MAX_RISK_REWARD_RATIO}
+_RR_BOUNDS_LAST_SYNC = {}
+
+
+def _sync_rr_bounds() -> None:
+    """把后台风控管理页的最新 R:R 上下限同步进模块全局（显式补丁改过的项跳过）。"""
+    try:
+        from scripts.risk_constants import (
+            MAX_RISK_REWARD_RATIO as _live_max,
+            MIN_RISK_REWARD_RATIO as _live_min,
+        )
+    except ImportError:  # flat import when scripts/ itself is on sys.path
+        from risk_constants import (
+            MAX_RISK_REWARD_RATIO as _live_max,
+            MIN_RISK_REWARD_RATIO as _live_min,
+        )
+    _g = globals()
+    for _key, _name, _live in (("min", "MIN_RISK_REWARD_RATIO", _live_min),
+                               ("max", "MAX_RISK_REWARD_RATIO", _live_max)):
+        _snapshot = _RR_BOUNDS_IMPORT_SNAPSHOT[_key]
+        _current = _g.get(_name)
+        if _current != _snapshot and _current != _RR_BOUNDS_LAST_SYNC.get(_key, _snapshot):
+            continue  # 调用方/测试显式改过 ⇒ 尊重补丁，不覆盖也不记录
+        _g[_name] = _live
+        _RR_BOUNDS_LAST_SYNC[_key] = _live
 
 
 def validate_quote_geometry_and_rr(
@@ -29,6 +66,8 @@ def validate_quote_geometry_and_rr(
     E = P*RR - (1-P)*1.0 >= +0.30R.
     Returns (is_valid, failure_reason, rr_ratio).
     """
+    # 后台风控管理页改值后，import 期绑定的上下限副本不会自己刷新 ⇒ 校验前同步
+    _sync_rr_bounds()
     raw_act = str(action or "").upper()
     if raw_act not in {"BUY_LONG", "SELL_SHORT"}:
         return False, f"不支持的开仓方向: {action}", 0.0
