@@ -223,11 +223,11 @@ def _diagnose_binance(env: str, is_sandbox: bool, ak: str, sk: str,
     """币安 USDⓈ-M HMAC-SHA256 凭证鉴权探测。
 
     base_url 按档位选 demo-fapi（模拟）/ fapi（实盘）；鉴权端点用
-    ``GET /fapi/v1/account``（账户信息，最轻的需签名只读端点）。签名规范：
-    ``signature = HMAC_SHA256(secret, queryString)``，头带 ``X-MBX-APIKEY``。
+    ``GET /fapi/v3/account``（账户信息，最轻的需签名只读端点；v1 已废弃）。
+    签名规范：``signature = HMAC_SHA256(secret, queryString)``，头带 ``X-MBX-APIKEY``。
     """
     base_url = BINANCE_DEMO_BASE_URL if is_sandbox else BINANCE_LIVE_BASE_URL
-    path = "/fapi/v1/account"
+    path = "/fapi/v3/account"
     ts = int(time.time() * 1000)
     unsigned = urlencode({"timestamp": ts, "recvWindow": 5000})
     signature = hmac.new(sk.encode("utf-8"), unsigned.encode("utf-8"), hashlib.sha256).hexdigest()

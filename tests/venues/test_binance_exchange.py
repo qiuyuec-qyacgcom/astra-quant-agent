@@ -215,8 +215,8 @@ def install_defaults(session: FakeSession, *, hedge: bool = True, positions=None
 
     session.on("GET", "/fapi/v1/exchangeInfo", exchange_info)
     session.on("GET", "/fapi/v1/positionSide/dual", dual)
-    session.on("GET", "/fapi/v2/positionRisk", risk)
-    session.on("GET", "/fapi/v2/account", ACCOUNT)
+    session.on("GET", "/fapi/v3/positionRisk", risk)
+    session.on("GET", "/fapi/v3/account", ACCOUNT)
     session.on("GET", "/fapi/v1/openAlgoOrders", open_algos)
     session.on("GET", "/fapi/v1/order", get_order)
     session.on("GET", "/fapi/v1/algoOrder", get_algo)
@@ -254,7 +254,7 @@ class BinanceExchangeTests(unittest.TestCase):
         frozen = 1591702613.943
         with patch("astra_backend.exchanges.binance.time.time", return_value=frozen):
             self._exchange().balance()
-        call = _calls(self.session, "GET", "/fapi/v2/account")[0]
+        call = _calls(self.session, "GET", "/fapi/v3/account")[0]
         self.assertTrue(call["url"].startswith(DEMO_HOST))
         self.assertFalse(call["allow_redirects"])
         self.assertEqual(call["headers"].get("X-MBX-APIKEY"), "testkey")
@@ -268,7 +268,7 @@ class BinanceExchangeTests(unittest.TestCase):
         install_defaults(live_session, hedge=True)
         with patch("astra_backend.exchanges.binance.time.time", return_value=frozen):
             BinanceExchange(FakeEnv(mode="live"), session=live_session).balance()
-        live_call = _calls(live_session, "GET", "/fapi/v2/account")[0]
+        live_call = _calls(live_session, "GET", "/fapi/v3/account")[0]
         self.assertTrue(live_call["url"].startswith(LIVE_HOST))
         self.assertNotIn("demo-fapi", live_call["url"])
         self.assertEqual(live_call["headers"].get("X-MBX-APIKEY"), "testkey")
@@ -282,7 +282,7 @@ class BinanceExchangeTests(unittest.TestCase):
         time_calls = _calls(self.session, "GET", "/fapi/v1/time")
         self.assertEqual(len(time_calls), 1)
         self.assertNotIn("signature", time_calls[0]["query"])
-        account = _calls(self.session, "GET", "/fapi/v2/account")[0]
+        account = _calls(self.session, "GET", "/fapi/v3/account")[0]
         self.assertEqual(account["query"].get("timestamp"), str(int(frozen * 1000) - 2500))
 
     def test_time_offset_uses_request_midpoint_not_pre_request_clock(self):
@@ -302,7 +302,7 @@ class BinanceExchangeTests(unittest.TestCase):
             exchange._sync_time_offset(force=True)
             self.assertEqual(exchange._time_offset_ms, 0)
             exchange.balance()
-        account = _calls(self.session, "GET", "/fapi/v2/account")[0]
+        account = _calls(self.session, "GET", "/fapi/v3/account")[0]
         self.assertEqual(account["query"].get("timestamp"), str(1_700_000_002_000))
 
 
@@ -317,19 +317,19 @@ class BinanceExchangeTests(unittest.TestCase):
                 return {"code": -1021, "msg": "Timestamp for this request was 1000ms ahead of the server's time."}
             return ACCOUNT
 
-        self.session.on("GET", "/fapi/v2/account", account)
+        self.session.on("GET", "/fapi/v3/account", account)
         self.session.on("GET", "/fapi/v1/time", {"serverTime": int(frozen * 1000) - 1500})
         with patch("astra_backend.exchanges.binance.time.time", return_value=frozen):
             rows = self._exchange().balance()
         self.assertEqual(state["n"], 2)
         self.assertTrue(isinstance(rows, list) and rows)
 
-        stamps = [call["query"].get("timestamp") for call in _calls(self.session, "GET", "/fapi/v2/account")]
+        stamps = [call["query"].get("timestamp") for call in _calls(self.session, "GET", "/fapi/v3/account")]
         self.assertEqual(stamps[-1], str(int(frozen * 1000) - 1500))
 
 
     def test_redirects_and_secrets_are_not_leaked(self):
-        self.session.on("GET", "/fapi/v2/account", lambda _c: FakeResponse({}, 302))
+        self.session.on("GET", "/fapi/v3/account", lambda _c: FakeResponse({}, 302))
         with self.assertRaisesRegex(RuntimeError, "redirect"):
             self._exchange().balance()
         self.assertFalse(self.session.calls[0]["allow_redirects"])
@@ -338,7 +338,7 @@ class BinanceExchangeTests(unittest.TestCase):
             raise TimeoutError("upstream signature=deadbeef X-MBX-APIKEY: testkey secret=testsecret")
 
         leaking = FakeSession()
-        leaking.on("GET", "/fapi/v2/account", boom)
+        leaking.on("GET", "/fapi/v3/account", boom)
         with self.assertRaises(RuntimeError) as raised:
             BinanceExchange(self.env, session=leaking).balance()
         message = str(raised.exception)
@@ -588,7 +588,7 @@ class BinanceExchangeTests(unittest.TestCase):
         snapshot = ex.balance()
         self.assertEqual(snapshot[0]["details"][0]["ccy"], "USDT")
         self.assertEqual(snapshot[0]["totalEq"], "1000")
-        self.session.on("GET", "/fapi/v2/account", lambda _c: FakeResponse({"code": -1001, "msg": "failed"}))
+        self.session.on("GET", "/fapi/v3/account", lambda _c: FakeResponse({"code": -1001, "msg": "failed"}))
         with self.assertRaises(RuntimeError):
             ex.balance()
 
@@ -823,7 +823,7 @@ class BinanceExchangeTests(unittest.TestCase):
                 return []
             return [dict(LONG_POS)]
 
-        self.session.on("GET", "/fapi/v2/positionRisk", risk)
+        self.session.on("GET", "/fapi/v3/positionRisk", risk)
         self.session.on("GET", "/fapi/v1/income", [{"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "8", "asset": "USDT", "time": 2, "tranId": 1}])
         self.session.on("GET", "/fapi/v1/userTrades", [
             {"symbol": "BTCUSDT", "id": 1, "orderId": 8, "side": "BUY", "positionSide": "LONG", "price": "50000", "qty": "0.001", "realizedPnl": "0", "commission": "0", "commissionAsset": "USDT", "time": 1},

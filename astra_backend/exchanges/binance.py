@@ -867,7 +867,7 @@ class BinanceExchange:
         return {"buyVol": _text(_decimal(buy) * price), "sellVol": _text(_decimal(sell) * price)}
 
     def balance(self) -> list[dict[str, Any]]:
-        row = self._private("GET", "/fapi/v2/account")
+        row = self._private("GET", "/fapi/v3/account")
         if not isinstance(row, dict):
             raise RuntimeError("Binance account snapshot is unavailable")
         details = []
@@ -887,7 +887,7 @@ class BinanceExchange:
 
     def positions(self, inst_id: str | None = None) -> list[dict[str, Any]]:
         params = {"symbol": _to_symbol(inst_id)} if inst_id else None
-        rows = self._private("GET", "/fapi/v2/positionRisk", params)
+        rows = self._private("GET", "/fapi/v3/positionRisk", params)
         if not isinstance(rows, list):
             raise RuntimeError("Binance positions are unavailable")
         hedge = self._hedge_mode()
