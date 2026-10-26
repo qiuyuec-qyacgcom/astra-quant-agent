@@ -2076,8 +2076,14 @@ class BinanceEnvironment:
         return bool(self.api_key and self.secret_key)
 
 
-def make_binance_env(values: dict[str, str] | None = None) -> BinanceEnvironment:
-    """(可选 values) → 币安账户环境。values 缺失时从密钥库 + 进程环境读取。"""
+def make_binance_env(values: dict[str, str] | None = None, environment: str | None = None) -> BinanceEnvironment:
+    """(可选 values / 显式档位) → 币安账户环境。values 缺失时从密钥库 + 进程环境读取。
+
+    `environment` 显式指定档位（demo/live），缺省时按 ASTRA_BINANCE_ENV →
+    ASTRA_OKX_ENV（跟随统一档位）→ demo 回退。凭证档优先级与
+    ``registry.venue_credentials`` 一致：live 走 LIVE→通用，demo 额外尝试
+    TESTNET/SANDBOX 别名——保证诊断、持仓快照、交易主循环读到同一套凭证。
+    """
     import os
     env: dict[str, str] = {}
     try:
@@ -2091,14 +2097,21 @@ def make_binance_env(values: dict[str, str] | None = None) -> BinanceEnvironment
     for key, value in os.environ.items():
         env.setdefault(key, value)
 
-    # 档位：ASTRA_BINANCE_ENV 显式指定优先；否则回退读全站统一档位 ASTRA_OKX_ENV
-    # （「跟随统一档位」），最后再回退 demo（与 OKX 对齐）。
-    mode = str(env.get("ASTRA_BINANCE_ENV") or env.get("ASTRA_OKX_ENV") or "demo").strip().lower()
+    # 档位：显式 environment 优先；否则 ASTRA_BINANCE_ENV → ASTRA_OKX_ENV
+    # （「跟随统一档位」）→ demo（与 OKX 对齐）。
+    mode = str(environment or env.get("ASTRA_BINANCE_ENV") or env.get("ASTRA_OKX_ENV") or "demo").strip().lower()
     if mode not in {"demo", "live"}:
         mode = "demo"
-    prefix = f"BINANCE_{mode.upper()}"
-    api_key = str(env.get(f"{prefix}_API_KEY") or env.get("BINANCE_API_KEY") or "").strip()
-    secret_key = str(env.get(f"{prefix}_SECRET_KEY") or env.get("BINANCE_SECRET_KEY") or "").strip()
+    tiers = (["BINANCE_DEMO", "BINANCE_TESTNET", "BINANCE_SANDBOX", "BINANCE"]
+             if mode == "demo" else ["BINANCE_LIVE", "BINANCE"])
+    api_key = ""
+    secret_key = ""
+    for tier in tiers:
+        ak = str(env.get(f"{tier}_API_KEY") or "").strip()
+        sk = str(env.get(f"{tier}_SECRET_KEY") or "").strip()
+        if ak and sk:
+            api_key, secret_key = ak, sk
+            break
     return BinanceEnvironment(mode=mode, api_key=api_key, secret_key=secret_key)
 
 
@@ -2301,7 +2314,10 @@ class BinanceTradingAdapter(BinancePublicAdapter):
 
     def __init__(self, session=None, environment=None, **kw):
         super().__init__(session=session, environment=environment)
-        env = make_binance_env()
+        # 尊重 get_adapter 传入的档位：旧实现丢弃 environment 改用 make_binance_env()
+        # 重新推档，导致诊断（venue_credentials 按 env.mode 读）与持仓快照（本处读
+        # 错误档位）凭证不一致 → 快照误报「credentials are not configured」。
+        env = make_binance_env(environment=environment)
         self._ex = BinanceExchange(env, session=session)
 
     @property
