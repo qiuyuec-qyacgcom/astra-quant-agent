@@ -121,7 +121,7 @@ class SubmitProtectedLimitOrderTests(unittest.TestCase):
         with patch.object(_aft, "fetch_ticker", return_value={"last": "100.0"}) as tick:
             ok, order_id = aft.submit_protected_limit_order("BTC-USDT-SWAP", "buy", "long", 1, 110.0, 140.0, 95.0)
         self.assertTrue(ok)
-        tick.assert_called_once_with("BTC-USDT-SWAP")
+        tick.assert_called_once_with("BTC-USDT-SWAP", venue="okx")
         kwargs = mock_rest.place_order.call_args.kwargs
         self.assertAlmostEqual(float(kwargs.get("px")), 100.0, delta=0.5)
         mock_rest.place_order.assert_called_once()

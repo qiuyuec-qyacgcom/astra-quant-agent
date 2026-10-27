@@ -73,8 +73,9 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
 
     headers = {"User-Agent": _UA, "Accept": "application/json"}
     if venue == "binance":
-        # 币安 USDⓈ-M：公共 exchangeInfo（零凭证）。目录键归一成本仓 instId 形态
-        # （BTCUSDT → BTC-USDT-SWAP），与 OKX 侧同一套查找口径。
+        # 币安 USDⓈ-M：公共 exchangeInfo（零凭证）。目录键 = **币安原生符号**
+        # （BTCUSDT / DOGEUSDT），与下单侧 `native_symbol_pure` 翻译结果一致——
+        # 旧实现把键归一成 `-USDT-SWAP` 形态，导致 `DOGEUSDT` 查不到被误判「已下架」。
         req = Request(base_url + "/fapi/v1/exchangeInfo", headers=headers, method="GET")
         with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -85,9 +86,8 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
             raw = str(sym.get("symbol") or "").strip().upper()
             if not raw.endswith("USDT"):
                 continue
-            inst_id = f"{raw[:-4]}-USDT-SWAP"
             status = str(sym.get("status") or "").strip().upper()
-            _directory[inst_id] = {"state": "live" if status == "TRADING" else status.lower()}
+            _directory[raw] = {"state": "live" if status == "TRADING" else status.lower()}
         return _directory
     if venue != "okx":
         raise ExchangeCapabilityError(f"listing gate 未支持的 venue={venue!r}")
@@ -151,7 +151,7 @@ def ensure_contract_listed(venue: str, environment: str,
 
     state = info.get("state", "")
     if state != "live":
-        return ListingCheck(ok=False, reason=f"合约已下架：OKX state={state}",
+        return ListingCheck(ok=False, reason=f"合约已下架：{vkey} state={state}",
                             checked_at=checked_at, source=source)
 
     return ListingCheck(ok=True, reason=None, checked_at=checked_at, source=source)

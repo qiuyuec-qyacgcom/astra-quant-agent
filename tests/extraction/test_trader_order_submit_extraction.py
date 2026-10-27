@@ -166,7 +166,7 @@ class OrderSubmitVerbatimTest(unittest.TestCase):
                         {"ASTRA_MAX_PRICE_CROSS_PCT": "0.005", "ASTRA_ORDER_MODE": "limit"},
                         clear=False), \
              patch.object(aft, "current_environment", self._stub_env), \
-             patch.object(aft, "fetch_ticker", lambda inst: {"last": 100.0}), \
+             patch.object(aft, "fetch_ticker", lambda inst, **kw: {"last": 100.0}), \
              patch.object(aft, "venue_registry", bad_registry):
             ok, msg = aft.submit_protected_limit_order(
                 # 几何合法（R:R=(125-105)/(105-100)=4.0 过闸）但穿价 5% > 0.5%
@@ -186,7 +186,7 @@ class OrderSubmitVerbatimTest(unittest.TestCase):
                         {"ASTRA_MAX_PRICE_CROSS_PCT": "0.005", "ASTRA_ORDER_MODE": "limit"},
                         clear=False), \
              patch.object(aft, "current_environment", self._stub_env), \
-             patch.object(aft, "fetch_ticker", lambda inst: {"last": 100.0}), \
+             patch.object(aft, "fetch_ticker", lambda inst, **kw: {"last": 100.0}), \
              patch.object(aft, "venue_registry", bad_registry), \
              patch.object(aft, "okx_rest", okx):
             ok, msg = aft.submit_protected_limit_order(

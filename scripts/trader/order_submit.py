@@ -181,6 +181,7 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         venue_ctx.setdefault("target_venue", target_venue)
         venue_ctx.setdefault("venue", target_venue)
     else:
+        target_venue = "okx"
         print(f"[US-003 决策面] warn {inst_id} 提交未携带 venue_ctx——"
               f"未经选所路由/预算预留，仅限非 AI 信号通用路径")
 
@@ -210,7 +211,9 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     _tick_last_raw = None
     _anchor_last = 0.0
     try:
-        _tick_last_raw = (fetch_ticker(inst_id) or {}).get("last")
+        # 双所改造：现价锚定按目标所取——旧实现 `fetch_ticker(inst_id)` 恒走 OKX，
+        # 币安独有标的（OKX 无此币）会拿不到现价 → 市价单被「现价不可用」误拒。
+        _tick_last_raw = (fetch_ticker(inst_id, venue=target_venue) or {}).get("last")
         if _tick_last_raw:
             _anchor_last = float(_tick_last_raw)
     except Exception as _ae:

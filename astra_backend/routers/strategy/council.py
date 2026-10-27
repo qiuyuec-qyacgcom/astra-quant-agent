@@ -206,6 +206,24 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_astra_session: str 
             if not pending:
                 lines.append("- （当前无挂单）")
 
+        # 交易预算/本金基线（双所按所独立）：CIO 需要可动用本金才能定仓位，缺失即「预算不可判定」。
+        try:
+            from astra_backend.account_baseline import load_account_baseline
+            _baseline_raw = load_account_baseline(venue)
+            _baseline = _baseline_raw if isinstance(_baseline_raw, dict) else {}
+            _capital = _baseline.get("initial_capital")
+            _by_venue = _baseline.get("capital_by_venue") if isinstance(_baseline.get("capital_by_venue"), dict) else {}
+            if venue in _by_venue and _by_venue.get(venue) not in (None, ""):
+                _capital = _by_venue.get(venue)
+            if _capital not in (None, ""):
+                lines.append(f"【交易预算/本金基线】: {_capital} USDT")
+            else:
+                context_meta["missing"].append("预算快照")
+                lines.append("【交易预算/本金基线】: —（预算快照不可用）")
+        except Exception:
+            context_meta["missing"].append("预算快照")
+            lines.append("【交易预算/本金基线】: —（预算快照不可用）")
+
         lines.append("")
         lines.append(f"======================= 【市场全要素动力学与微结构实时快照 ({len(instruments)} 大主力标的)】 =======================")
         if not instruments:
@@ -214,11 +232,16 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_astra_session: str 
             momentum = item.get("trend_momentum") if isinstance(item.get("trend_momentum"), dict) else {}
             vol = item.get("volatility_channel") if isinstance(item.get("volatility_channel"), dict) else {}
             flow = item.get("volume_money_flow") if isinstance(item.get("volume_money_flow"), dict) else {}
+            micro = item.get("microstructure") if isinstance(item.get("microstructure"), dict) else {}
+            vp = item.get("volume_profile") if isinstance(item.get("volume_profile"), dict) else {}
             smart = item.get("smart_money_derivatives") if isinstance(item.get("smart_money_derivatives"), dict) else {}
             lines.append(
                 f"- {item.get('instId', '—')}: 现价 ${item.get('price', '—')} ({item.get('chg24h', '—')}%), "
+                f"α={item.get('composite_alpha_score', '—')}, "
+                f"MACD柱={momentum.get('macd_hist', '—')}/加速={momentum.get('macd_accel', '—')}, "
                 f"ADX={momentum.get('adx_1h', '—')}, RSI={momentum.get('rsi_14', '—')}, 趋势={momentum.get('trend_regime', '—')}, "
-                f"1H ATR={vol.get('atr_1h', '—')}, CMF={flow.get('cmf_1h', '—')}, "
+                f"1H ATR={vol.get('atr_1h', '—')}, CMF={flow.get('cmf_1h', '—')}, CVD5m={flow.get('cvd_5m_usd', '—')}, "
+                f"OBI={micro.get('obi_pct', '—')}, VWAP24h={vp.get('vwap_24h', '—')}, "
                 f"聪明钱多头={smart.get('weighted_long_pct', '—')}%"
             )
         context_meta["factor_time"] = snap_ts or None

@@ -78,7 +78,7 @@ class Rig:
             MAX_LEVERAGE=20, MIN_LEVERAGE=1, canonical_base=lambda i: i.split("-")[0],
             current_environment=lambda: SimpleNamespace(
                 simulated=self.simulated, mode="demo" if self.simulated else "live"),
-            fetch_ticker=lambda i: {"last": self.ticker},
+            fetch_ticker=lambda i, **kw: {"last": self.ticker},
             okx_rest=self.okx,
             # 2026-09-28：OKX 边界从**保证金**换算张数（与币安/Gate 同口径）
             quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
@@ -167,7 +167,7 @@ class PriceAnchorGateTest(unittest.TestCase):
                 route_and_reserve_signal=lambda *a, **k: rig.routing,
                 MAX_LEVERAGE=20, MIN_LEVERAGE=1, canonical_base=lambda i: i.split("-")[0],
                 current_environment=lambda: SimpleNamespace(simulated=False, mode="live"),
-                fetch_ticker=lambda i: {"last": "100000"}, okx_rest=rig.okx,
+                fetch_ticker=lambda i, **kw: {"last": "100000"}, okx_rest=rig.okx,
                 quantize_size=lambda raw, step: (float(int(raw / (step or 1)) * (step or 1))
                                                  if raw > 0 else 0.0),
                 venue_registry=_Reg())
