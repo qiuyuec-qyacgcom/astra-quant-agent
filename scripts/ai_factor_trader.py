@@ -1303,7 +1303,8 @@ def execute_portfolio():
         datetime=datetime,
         load_trackers=load_trackers,
         os=os,
-        reconcile_pending_orders=reconcile_pending_orders    )
+        reconcile_pending_orders=reconcile_pending_orders,
+        active_venue=active_venue)
     if _preflight is None:
         return None
     entries_blocked, timestamp_full = _preflight

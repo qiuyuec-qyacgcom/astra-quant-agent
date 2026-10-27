@@ -165,31 +165,42 @@ def preflight_reconcile_and_housekeeping(*,
         datetime,
         load_trackers,
         os,
-        reconcile_pending_orders):
+        reconcile_pending_orders,
+        active_venue: str = "okx"):
     """相位 0/0a：引擎就绪闸 + 挂单对账 + 陈旧单回收 + 舆情采集。
 
     段内 `return None` 语义 = **本周期中止** ⇒ 调用点据此提前 `return None`。
+
+    双所改造（2026-10）：`active_venue` 由调用点透传。
+    - 币安档**不再要求 OKX 凭证**（旧实现无条件 `current_environment().configured`，
+      纯币安部署在跑到 AI 决策前就中止 ⇒ `ai_brain_decisions.json` 永不产出）；
+    - 币安档跳过 OKX 挂单对账/陈旧单回收（会拿 OKX 私有端点对账并触发 IP 限流）。
     """
     _engine_env = current_environment()
-    if not _engine_env.configured:
+    if str(active_venue).strip().lower() != "binance" and not _engine_env.configured:
         print(f"[Engine NOT READY] OKX {_engine_env.mode.upper()} API Key 未配置：V5 直签是唯一交易通道，本周期拒绝交易。")
         return None
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_dt = datetime.datetime.now(tz_bj)
     timestamp_full = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 0a. US-006 周期级挂单对账：重启/新周期接管或撤销存量挂单（在新增下单之前）
-    reconcile_ok, reconciled_kept_ord_ids = reconcile_pending_orders(trackers=load_trackers())
-    if not reconcile_ok:
-        # fail-closed：仅禁止本周期新增下单（不是清库），持仓管理照常执行
-        print("[挂单对账] fail-closed：本周期禁止新增下单（对账失败，不清库）")
-    entries_blocked = not reconcile_ok
+    if str(active_venue).strip().lower() == "binance":
+        # 币安档：OKX 挂单对账/陈旧单回收不适用（会拿 OKX 私有端点对账并触发 IP 限流）
+        entries_blocked = False
+        reconciled_kept_ord_ids = set()
+    else:
+        # 0a. US-006 周期级挂单对账：重启/新周期接管或撤销存量挂单（在新增下单之前）
+        reconcile_ok, reconciled_kept_ord_ids = reconcile_pending_orders(trackers=load_trackers())
+        if not reconcile_ok:
+            # fail-closed：仅禁止本周期新增下单（不是清库），持仓管理照常执行
+            print("[挂单对账] fail-closed：本周期禁止新增下单（对账失败，不清库）")
+        entries_blocked = not reconcile_ok
 
-    # 0. Clean Stale Open Orders & Harvest Real-time News Sentiment
-    orders_ok, orders_error = clean_stale_open_orders(keep_ord_ids=reconciled_kept_ord_ids)
-    if not orders_ok:
-        print(f"[Trader] Abort: unable to verify/cancel stale open orders: {orders_error}")
-        return None
+        # 0. Clean Stale Open Orders & Harvest Real-time News Sentiment
+        orders_ok, orders_error = clean_stale_open_orders(keep_ord_ids=reconciled_kept_ord_ids)
+        if not orders_ok:
+            print(f"[Trader] Abort: unable to verify/cancel stale open orders: {orders_error}")
+            return None
     try:
         harvester_script = os.path.join(WORKSPACE_DIR, "scripts", "news_sentiment_harvester.py")
         if os.path.exists(harvester_script):
