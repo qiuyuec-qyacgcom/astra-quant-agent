@@ -15,6 +15,10 @@ const { t } = useI18n();
 
 const account = computed(() => store.data?.account || ({} as any));
 const today = computed(() => (store.data as any)?.today_stats || {});
+// 生效所（/api/all 的 active_venue）：权益空态与 tip 按所分流，不再写死 OKX
+const isBinanceVenue = computed(
+  () => String((store.data as any)?.active_venue || 'okx').toLowerCase() === 'binance',
+);
 
 /* ── 账户总权益：OKX 单所快照 ────────────────────────────────────────────────
  * 系统已收口为 OKX 专用，`/api/all` 的 `account` 段就是 OKX 当前档（模拟盘 /
@@ -79,7 +83,9 @@ const ocoCoverage = computed(() => {
         <BaseStat
           :label="t('dash.matrix.kpi.equity')"
           :value="totalEquity"
-          :hint="totalEquityNum === null ? t('dash.matrix.kpi.equityEmpty') : t('dash.matrix.kpi.equityTip')"
+          :hint="totalEquityNum === null
+            ? t(isBinanceVenue ? 'dash.matrix.kpi.equityEmptyBinance' : 'dash.matrix.kpi.equityEmpty')
+            : t(isBinanceVenue ? 'dash.matrix.kpi.equityTipBinance' : 'dash.matrix.kpi.equityTip')"
         >
           <!-- 今日盈亏：总权益未知时这一行整块不渲染；今日盈亏本身在下方的「今日已实现」有专格。 -->
           <template v-if="totalEquityNum !== null" #extra>

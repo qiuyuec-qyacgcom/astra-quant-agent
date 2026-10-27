@@ -243,14 +243,26 @@ class BuildFactorsListTest(_Base):
         self.assertEqual(b["ETH-USDT-SWAP"]["score"], -2.5)
         self.assertEqual(b["ETH-USDT-SWAP"]["strategy_tag"], "🔴 建议做空")
 
-    def test_price_priority_state_then_lib(self):
+    def test_price_priority_lib_then_state(self):
+        """双所改造（2026-10）：price 优先**分所因子快照**（lib），state 只做兜底。
+
+        因子快照按生效所分文件；state（trading_state.json）是无 venue 维度的全局
+        单文件、切所后仍可能是旧所值，绝不能压过快照 —— 否则双所共用币切币安后
+        现价仍显示 OKX 的。
+        """
         out, _ = self._build(
             state={"instruments": [{"instId": "BTC-USDT-SWAP", "price": 111.0}]},
             lib={"instruments": [{"instId": "BTC-USDT-SWAP", "price": 222.0},
                                  {"instId": "ETH-USDT-SWAP", "price": 333.0}]})
         b = {r["instId"]: r for r in out}
-        self.assertEqual(b["BTC-USDT-SWAP"]["price"], 111.0, "state 优先")
+        self.assertEqual(b["BTC-USDT-SWAP"]["price"], 222.0, "lib（分所快照）优先")
         self.assertEqual(b["ETH-USDT-SWAP"]["price"], 333.0, "state 没有则用因子库")
+
+    def test_price_falls_back_to_state_when_lib_missing(self):
+        out, _ = self._build(
+            state={"instruments": [{"instId": "BTC-USDT-SWAP", "price": 111.0}]})
+        btc = next(r for r in out if r["instId"] == "BTC-USDT-SWAP")
+        self.assertEqual(btc["price"], 111.0, "lib 无 price 时回退 state")
 
     def test_placeholder_price_in_state_is_skipped(self):
         """⚠️ `state.price` 为 `"--"` 时必须**不能用**，要落到因子库。
@@ -264,14 +276,21 @@ class BuildFactorsListTest(_Base):
         btc = next(r for r in out if r["instId"] == "BTC-USDT-SWAP")
         self.assertEqual(btc["price"], 222.0, "'--' 是占位符，应被跳过")
 
-    def test_rsi_priority_and_zero_is_kept(self):
-        """⚠️ `rsi` 用 `is not None` 判定 —— 所以 **0 是合法值**，必须保留。"""
+    def test_rsi_priority_lib_then_state(self):
+        """双所改造（2026-10）：rsi 优先**分所因子快照**（lib），state 只做兜底。"""
         out, _ = self._build(
             state={"instruments": [{"instId": "BTC-USDT-SWAP", "rsi": 0.0}]},
             lib={"instruments": [{"instId": "BTC-USDT-SWAP",
                                   "trend_momentum": {"rsi_14": 88.0}}]})
         btc = next(r for r in out if r["instId"] == "BTC-USDT-SWAP")
-        self.assertEqual(btc["rsi"], 0.0, "RSI 0 是合法值（不是占位符），应保留")
+        self.assertEqual(btc["rsi"], 88.0, "lib（分所快照）优先")
+
+    def test_rsi_zero_in_state_is_kept_when_lib_missing(self):
+        """`rsi` 用 `is not None` 判定 —— lib 缺失时 state 的 **0 是合法值**，必须保留。"""
+        out, _ = self._build(
+            state={"instruments": [{"instId": "BTC-USDT-SWAP", "rsi": 0.0}]})
+        btc = next(r for r in out if r["instId"] == "BTC-USDT-SWAP")
+        self.assertEqual(btc["rsi"], 0.0, "lib 无 rsi 时回退 state，且 0 不被当占位符")
 
     def test_rsi_falls_back_to_lib(self):
         out, _ = self._build(lib={"instruments": [

@@ -1,9 +1,12 @@
 """`load_merged_instruments()`（两所标的池合并去重）的单元测试 —— 2026-10 双所矩阵展示。
 
 覆盖三条核心语义：
-1. 两所池合并（OKX 在前、币安在后，顺序即前端展示顺序）。
-2. 按 instId 去重，OKX 优先（币安重复 instId 丢弃）。
+1. 两所池合并（**生效所在前**、另一所在后，顺序即前端展示顺序）。
+2. 按 instId 去重，**生效所优先**（另一所重复 instId 丢弃）。
 3. 每条目带 `venue` 标记（小写 `"okx"`/`"binance"`）。
+
+双所共用币（两所同 instId，如 BTC/ETH/DOGE）跟随生效所：默认 OKX 优先（向后兼容），
+切换生效所=币安后改归币安，避免因子矩阵把共用币标成 OKX、读混两所数据。
 
 ⚠️ 不碰真实 `data/`：`load_instruments` 直接打桩，避免读生产池文件。
 """
@@ -76,6 +79,23 @@ class LoadMergedInstrumentsTests(unittest.TestCase):
         with patch.object(ip, "load_instruments", side_effect=_load):
             merged = ip.load_merged_instruments()
         self.assertEqual(len(merged), 2, "脏数据（小写+空白）的重复 BTC 仍应被去重")
+
+    def test_active_venue_wins_for_shared_instids(self):
+        """生效所=币安时，双所共用币（同 instId）归属币安，不再恒走 OKX。"""
+        def _load(venue=None):
+            v = ip.normalize_venue(venue)
+            return OKX_POOL if v == "okx" else BINANCE_POOL
+        with patch.object(ip, "load_instruments", side_effect=_load), \
+             patch.object(ip, "active_pool_venue", return_value="binance"):
+            merged = ip.load_merged_instruments()
+        by_id = {item["instId"]: item for item in merged}
+        self.assertEqual(by_id["BTC-USDT-SWAP"]["venue"], "binance",
+                         "生效所=币安时共用币归属币安")
+        self.assertEqual(by_id["BTC-USDT-SWAP"]["ctVal"], 1.0,
+                         "保留生效所（币安）条目，含其 ctVal")
+        # ETH 仅 OKX 有 → okx；SOL 仅币安有 → binance
+        self.assertEqual(by_id["ETH-USDT-SWAP"]["venue"], "okx")
+        self.assertEqual(by_id["SOL-USDT-SWAP"]["venue"], "binance")
 
 
 if __name__ == "__main__":

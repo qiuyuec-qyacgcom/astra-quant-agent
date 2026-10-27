@@ -3,14 +3,16 @@ export const enMatrix = {
   desc: 'Account, positions, orders and factor matrix on one screen.',
   kpi: {
     equity: 'Total equity',
-    // OKX account unreadable for the current tier: show "--", never fake it with 0
+    // Account unreadable for the current tier: show "--", never fake it with 0 (venue-aware)
     equityEmpty: 'No readable OKX account for the current tier',
+    equityEmptyBinance: 'No readable Binance account for the current tier',
     todayPnl: 'Realized today',
     floatPnl: 'Floating PnL',
     ls: 'Long / short',
     margin: 'Margin used',
     oco: 'Stop Protection',
     equityTip: 'OKX wallet balance + unrealized PnL of all positions',
+    equityTipBinance: 'Binance USDT margin balance + unrealized PnL of all positions',
     todayTip: 'Net realized PnL since 00:00 UTC+8',
     floatTip: 'Unrealized PnL at mark price',
     marginTip: 'Used margin / total equity',

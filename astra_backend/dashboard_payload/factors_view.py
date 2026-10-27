@@ -101,9 +101,13 @@ def build_factors_list(decisions_file, state_file, factor_file, positions, times
 
         chg_val = raw_t.get("chg24h") if raw_t.get("chg24h") is not None else lib_item.get("chg24h")
         raw_ticker_vol = raw_t.get("vol24h")
-        price_val = ins.get("price") if ins.get("price") not in (None, "--") else lib_item.get("price", "--")
+        # 双所改造（2026-10）：price/rsi 优先取**分所因子快照**（lib_item，已按生效所），
+        # `trading_state.json`（ins）是无 venue 维度的全局单文件、切所后仍是旧所值，
+        # 它绝不能优先覆盖分所快照——否则双所共用币在切币安后现价/RSI 仍是 OKX 的。
+        price_val = lib_item.get("price") if lib_item.get("price") not in (None, "--") else (ins.get("price") if ins.get("price") not in (None, "--") else "--")
         # ★「不许假数据」：缺 `rsi_14` 不给 50.0 兜底（那是"中性"这个结论），前端渲染 `--`
-        rsi_val = ins.get("rsi") if ins.get("rsi") is not None else lib_item.get("trend_momentum", {}).get("rsi_14")
+        _lib_rsi = lib_item.get("trend_momentum", {}).get("rsi_14")
+        rsi_val = _lib_rsi if _lib_rsi is not None else ins.get("rsi")
         adx_val = ai_info.get("adx_1h") if ai_info.get("adx_1h") not in (None, "--") else lib_item.get("trend_momentum", {}).get("adx_1h", "--")
         sm_val = ai_info.get("smart_money") or lib_item.get("smart_money_derivatives", {})
 

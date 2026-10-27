@@ -412,21 +412,28 @@ def load_instruments(venue: Any = None) -> list[dict[str, Any]]:
 
 
 def load_merged_instruments() -> list[dict[str, Any]]:
-    """合并 OKX + 币安两所标的池，按 instId 去重（OKX 优先），每项加 `venue` 标记。
+    """合并 OKX + 币安两所标的池，按 instId 去重（**生效所优先**），每项加 `venue` 标记。
 
     仅用于**展示层**（因子动能矩阵），不参与交易下单——交易/账户侧仍走
     `load_instruments()`（跟随 preferred_venue），两所 ctVal 语义（OKX 张数 vs
     币安币数）在展示层无意义，故合并条目不依赖 ctVal。
 
-    去重顺序即优先级：先放 OKX 全量，再放币安；后到的重复 instId 直接丢弃
-    （即「重复币种自动走 OKX」）。
+    去重顺序即优先级：**生效所排前**，另一所排后；后到的重复 instId 直接丢弃。
+    双所共用币（BTC/ETH/DOGE 等两所同 instId）因此**跟随生效所**——切到币安后
+    这些币归属币安、读币安因子，不再恒走 OKX（旧 bug：写死 OKX 优先，切币安后
+    共用币仍标成 OKX、数据与因子快照混所）。
 
     ⚠️ 副作用：内部会各调一次 `load_instruments(venue=...)`，从而**覆盖**模块级
     `_POOL_STATE`（最终停留在币安那次的 status）。本函数仅供展示层调用；若未来
     面板需要依赖 `pool_state()` 判断 OKX 池可信度，再改为「先保存后恢复」。
     """
+    try:
+        _active = active_pool_venue()
+    except Exception:
+        _active = "okx"
+    _order = ("binance", "okx") if _active == "binance" else ("okx", "binance")
     merged: dict[str, dict[str, Any]] = {}
-    for venue in ("okx", "binance"):
+    for venue in _order:
         try:
             pool = load_instruments(venue=venue)
         except Exception:
@@ -438,11 +445,11 @@ def load_merged_instruments() -> list[dict[str, Any]]:
             if not inst_id:
                 continue
             if inst_id in merged:
-                continue  # OKX 优先：币安重复 instId 丢弃
+                continue  # 生效所优先：重复 instId 丢弃
             entry = dict(item)
             entry["venue"] = venue
             merged[inst_id] = entry
-    # 保持两所读取顺序（OKX 在前，币安在后），顺序即前端展示顺序
+    # 保持读取顺序（生效所在前，另一所在后），顺序即前端展示顺序
     return list(merged.values())
 
 

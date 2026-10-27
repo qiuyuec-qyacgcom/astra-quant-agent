@@ -422,27 +422,25 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         env_values["ASTRA_OKX_EXECUTION"] = "1" if payload.okx_execution else "0"
     if payload.okx_environment is not None:
         env_values["ASTRA_OKX_ENV"] = "demo" if payload.okx_environment.lower() == "demo" else "live"
-    if payload.binance_execution is not None:
-        if (payload.confirmation or "").strip().upper() != "OBE":
-            raise HTTPException(status_code=400,
-                                detail="变更币安执行开关确认短语必须精确为：OBE")
-        # 双轴：沙盒档写 ASTRA_BINANCE_DEMO_EXECUTION，实盘档写 ASTRA_BINANCE_EXECUTION
-        _bin_mode = str(payload.okx_environment or "").strip().lower()
-        if _bin_mode not in {"demo", "live"}:
-            try:
-                from scripts.okx_runtime import current_environment
-                _bin_mode = str(current_environment().mode or "demo").strip().lower()
-            except Exception:
-                _bin_mode = "demo"
-        _bin_flag = ("ASTRA_BINANCE_DEMO_EXECUTION"
-                     if _bin_mode in {"demo", "sandbox", "testnet"} else "ASTRA_BINANCE_EXECUTION")
-        env_values[_bin_flag] = "1" if payload.binance_execution else "0"
     if env_values:
         fn_update_env(env_values)
     fn_refresh_settings()
     if payload.preferred_venue is not None:
         from astra_backend.exchanges import routing_policy
         routing_policy.save_preferred_venue(payload.preferred_venue)
+        # 2026-10（用户拍板）：**手动开闸已移除**——切到币安即自动开闸。
+        # 双轴：沙盒档写 ASTRA_BINANCE_DEMO_EXECUTION，实盘档写 ASTRA_BINANCE_EXECUTION。
+        if str(payload.preferred_venue).strip().lower() == "binance":
+            _pb_mode = str(payload.okx_environment or "").strip().lower()
+            if _pb_mode not in {"demo", "live"}:
+                try:
+                    from scripts.okx_runtime import current_environment
+                    _pb_mode = str(current_environment().mode or "demo").strip().lower()
+                except Exception:
+                    _pb_mode = "demo"
+            _pb_flag = ("ASTRA_BINANCE_DEMO_EXECUTION"
+                        if _pb_mode in {"demo", "sandbox", "testnet"} else "ASTRA_BINANCE_EXECUTION")
+            fn_update_env({_pb_flag: "1"})
     if payload.routing_mode is not None:
         from astra_backend.exchanges import routing_policy
         if not routing_policy.save_routing_mode(payload.routing_mode):

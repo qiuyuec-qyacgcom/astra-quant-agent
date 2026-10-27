@@ -442,6 +442,20 @@ def admin_set_venue_selection(
     if not routing_policy.save_preferred_venue(target):
         raise HTTPException(status_code=500, detail=f"写入首选交易所失败（{target}）")
 
+    # 2026-10（用户拍板）：切到币安即**自动开闸**，不再要求输入确认短语。
+    # 按当前统一档位落对应旗标：沙盒档 ASTRA_BINANCE_DEMO_EXECUTION / 实盘档
+    # ASTRA_BINANCE_EXECUTION。写 .env + 本进程 os.environ；交易子进程由网关
+    # `_job_env()` 每轮注入最新 .env，故无需重启即生效。
+    if target == "binance":
+        try:
+            from scripts.okx_runtime import current_environment
+            _bin_mode = str(current_environment().mode or "demo").strip().lower()
+        except Exception:
+            _bin_mode = "demo"
+        _bin_flag = ("ASTRA_BINANCE_DEMO_EXECUTION"
+                     if _bin_mode in {"demo", "sandbox", "testnet"} else "ASTRA_BINANCE_EXECUTION")
+        update_env({_bin_flag: "1"})
+
     # 切换后立刻把生效池扇出到下游（trading_state / 因子库 / 舆情 / 面板缓存），
     # 这一步才是"切换后自动使用切换后的标的池"的落地动作。
     sync_instruments_state(target)

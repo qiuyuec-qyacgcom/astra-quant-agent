@@ -5,14 +5,16 @@ export const zhMatrix = {
 
   kpi: {
     equity: '账户总权益',
-    // OKX 当前档位读不到账户时显示「--」，绝不以 0 冒充未知
+    // 当前档位读不到账户时显示「--」，绝不以 0 冒充未知（按生效所给文案）
     equityEmpty: '当前档位没有可读的 OKX 账户读数',
+    equityEmptyBinance: '当前档位没有可读的币安账户读数',
     todayPnl: '今日已实现',
     floatPnl: '持仓浮动盈亏',
     ls: '多空持仓比',
     margin: '保证金占用',
     oco: '止损保护',
     equityTip: 'OKX 钱包余额 + 全部持仓未实现盈亏',
+    equityTipBinance: '币安 USDT 保证金余额 + 全部持仓未实现盈亏',
     todayTip: '今日 00:00（UTC+8）以来平仓实现的净盈亏',
     floatTip: '在途持仓按标记价计算的未实现盈亏',
     marginTip: '已用保证金 / 账户总权益',

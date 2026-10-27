@@ -18,6 +18,22 @@ SCRIPTS = ROOT / "scripts"
 BJ_TZ = timezone(timedelta(hours=8))
 
 
+def _job_env() -> dict[str, str] | None:
+    """子进程环境 = 进程 env + **最新** `.env`/加密凭据（`.env` 优先）。
+
+    为什么需要它（2026-10 实测）：后台 UI 保存执行开闸/凭证后只更新了**后端进程**
+    的 `os.environ`；网关 worker 与它拉起的 trader 子进程继承的是 worker 启动时的
+    旧 env，而 `config.load_dotenv` 用的是 `setdefault`（旧值不会被覆盖）⇒ 不重启
+    就永远读到旧开闸状态。这里在每次 spawn 前用最新 `.env` 覆盖，让开闸/凭证改动
+    **即时生效、无需重启**。读取失败返回 None（照旧继承父进程环境）。
+    """
+    try:
+        from scripts.okx_runtime import _load_dotenv as _fresh_env
+        return {str(k): str(v) for k, v in _fresh_env().items()}
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class JobSpec:
     name: str
@@ -145,6 +161,7 @@ class GatewayScheduler:
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
+                env=_job_env(),
                 timeout=spec.timeout_seconds,
             )
             detail = (result.stderr if result.returncode else result.stdout)[-2000:]

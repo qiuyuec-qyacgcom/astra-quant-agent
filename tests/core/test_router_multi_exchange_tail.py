@@ -34,7 +34,7 @@ def _payload(**over):
         "gate_demo_api_key", "gate_demo_secret_key", "okx_live_api_key",
         "okx_live_secret_key", "okx_live_passphrase", "okx_demo_api_key",
         "okx_demo_secret_key", "okx_demo_passphrase", "binance_testnet", "gate_testnet",
-        "gate_execution", "binance_execution", "okx_execution", "okx_environment",
+        "gate_execution", "okx_execution", "okx_environment",
         "preferred_venue", "routing_mode")}
     fields["confirmation"] = ""
     fields.update(over)
@@ -84,6 +84,29 @@ class WriteTailTest(unittest.TestCase):
         self.assertEqual(spv.call_args.args, ("okx",))
         self.assertEqual(out, {"ok": True, "saved_secret_keys": ["OKX_DEMO_API_KEY"]},
                          "返回体只报键名（也排序了）")
+
+    def test_switching_to_binance_auto_opens_the_execution_gate(self):
+        """2026-10（用户拍板）：手动开闸已移除 ⇒ 切到币安即自动落闸。
+
+        读的是 `preferred_venue`（不是已删除的 `binance_execution`）；档位轴与
+        `registry.execution_open()` 同源（demo/sandbox/testnet → DEMO_EXECUTION）。
+        """
+        from astra_backend.exchanges import routing_policy as RP
+        with patch.object(RP, "save_preferred_venue") as spv, \
+             patch.object(RP, "save_routing_mode", return_value=True):
+            _out, exc = self._call(preferred_venue="binance", okx_environment="demo")
+        self.assertIsNone(exc)
+        self.assertEqual(spv.call_args.args, ("binance",))
+        self.fns["update_env"].assert_any_call({"ASTRA_BINANCE_DEMO_EXECUTION": "1"})
+
+    def test_switching_to_binance_live_tier_opens_the_live_gate(self):
+        """live 档必须落 `ASTRA_BINANCE_EXECUTION`（不能错写成 DEMO 键）。"""
+        from astra_backend.exchanges import routing_policy as RP
+        with patch.object(RP, "save_preferred_venue"), \
+             patch.object(RP, "save_routing_mode", return_value=True):
+            _out, exc = self._call(preferred_venue="binance", okx_environment="live")
+        self.assertIsNone(exc)
+        self.fns["update_env"].assert_any_call({"ASTRA_BINANCE_EXECUTION": "1"})
 
     def test_a_failing_cache_clear_is_swallowed_and_reported_as_success(self):
         """⚠️ **实测发现（列待议）**：实例清理失败被静默吞，响应仍是 `ok: True`。"""

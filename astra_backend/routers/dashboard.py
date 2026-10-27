@@ -196,7 +196,14 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
     if bar not in valid_bars:
         bar = "1H"
     limit = max(10, min(limit, 300))
-    cache_key = f"{inst_id}:{bar}:{limit}"
+    # 双所改造：缓存 key 带上生效所——双所共用币（同 instId）切所后，1s 命中/300s 陈旧
+    # 回退不得串所，否则会拿到上一所的 K 线且 venue 标成旧所。
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _active_venue = active_pool_venue()
+    except Exception:
+        _active_venue = "okx"
+    cache_key = f"{inst_id}:{bar}:{limit}:{_active_venue}"
     now_ts = time.time()
     cached = _CANDLES_CACHE.get(cache_key)
     if cached and (now_ts - cached[0] < 1.0):
@@ -207,12 +214,7 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
         from scripts.market_data_service import fetch_candles as _fetch_candles
         # 双源回退，**生效所优先**：切币安后先打币安，避免每根 K 线都先等 OKX 超时
         # （旧实现固定先试 OKX，OKX 不可达时要空等 5s 才回退）。
-        _active_venue = "okx"
-        try:
-            from scripts.instrument_pool import active_pool_venue
-            _active_venue = active_pool_venue()
-        except Exception:
-            _active_venue = "okx"
+        # `_active_venue` 已在缓存 key 处解析，这里直接复用。
         if _active_venue == "binance":
             raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0, venue="binance")
             venue, source = "binance", "Binance REST"
