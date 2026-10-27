@@ -320,6 +320,32 @@ async function saveBinanceEnvironment() {
   }
 }
 
+// ---- 币安执行开闸（ASTRA_BINANCE[_DEMO]_EXECUTION）----
+// 主脑交易日的前置门：未开闸时 ai_factor_trader 直接 exit 3（页面显示「交易主脑 失败」）。
+// 后端按当前统一档位落键；确认短语必须精确（与 OKX 同款 fail-closed 语义）。
+const binanceExecPhrase = ref('')
+const savingBinanceExec = ref(false)
+
+async function setBinanceExecution(enable: boolean) {
+  savingBinanceExec.value = true
+  try {
+    await api('/api/v1/admin/multi-exchange', {
+      method: 'PUT',
+      body: JSON.stringify({
+        binance_execution: enable,
+        confirmation: binanceExecPhrase.value.trim(),
+      }),
+    })
+    binanceExecPhrase.value = ''
+    toast.ok(t(enable ? 'admin.security.binanceExecOpened' : 'admin.security.binanceExecClosed'))
+    await loadMx()
+  } catch (e: any) {
+    toast.err(t('admin.security.errSaveFailed', undefined, { msg: e.message }))
+  } finally {
+    savingBinanceExec.value = false
+  }
+}
+
 async function saveManualClose() {
   try {
     const d = await api('/api/v1/admin/config', { method: 'PUT', body: JSON.stringify({ manual_close_enabled: manualClose.value }) })
@@ -1105,6 +1131,32 @@ onMounted(() => {
                 </div>
 
                 <p class="sc-hint"><AlertTriangle :size="11" />{{ t('admin.security.confirmBinanceLiveNote') }}</p>
+
+                <!-- 执行开闸：主脑交易的硬前置（未开闸 → 主脑每周期 exit 3） -->
+                <div class="sc-exec-gate">
+                  <p class="sc-hint"><ShieldCheck :size="11" />{{ t('admin.security.binanceExecHint') }}</p>
+                  <div class="sc-venue-actions">
+                    <input
+                      v-model="binanceExecPhrase"
+                      type="text"
+                      class="field"
+                      :placeholder="t('admin.security.binanceExecPhrasePlaceholder')"
+                      :aria-label="t('admin.security.binanceExecPhraseAria')"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-quiet btn-sm"
+                      :disabled="savingBinanceExec"
+                      @click="setBinanceExecution(false)"
+                    >{{ t('admin.security.binanceExecClose') }}</button>
+                    <button
+                      type="button"
+                      class="btn btn-primary btn-sm"
+                      :disabled="savingBinanceExec"
+                      @click="setBinanceExecution(true)"
+                    >{{ t('admin.security.binanceExecOpen') }}</button>
+                  </div>
+                </div>
               </div>
 
               <footer class="sc-venue-foot">
@@ -1781,6 +1833,13 @@ onMounted(() => {
   align-items: center;
   gap: var(--ds-space-2);
   margin-left: auto;
+}
+/* 执行开闸区块：与凭据表单留呼吸位，避免和「保存」按钮视觉粘连 */
+.sc-exec-gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+  margin-top: var(--ds-space-2);
 }
 
 /* ══ 表单布局 ══ */

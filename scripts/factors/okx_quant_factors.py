@@ -157,6 +157,51 @@ def _is_binance(venue: Optional[str]) -> bool:
     return str(venue or "").strip().lower() == "binance"
 
 
+#: 币安 USDⓈ-M 合约公共数据基址（官方文档：https://developers.binance.com/zh-CN/docs/derivatives/usds-margined-futures）
+#: 公共行情/数据门户不区分资金档（实盘/测试网同口径），凭证类接口才需要按档切 fapi / demo-fapi。
+_BINANCE_FAPI = "https://fapi.binance.com"
+
+
+def _binance_symbol(inst_id: str) -> str:
+    """`BTC-USDT-SWAP` → `BTCUSDT`（币安原生永续符号）。"""
+    s = str(inst_id or "").strip().upper()
+    if s.endswith("-USDT-SWAP"):
+        return s[: -len("-USDT-SWAP")] + "USDT"
+    return s.replace("-", "")
+
+
+def _binance_get(path: str, params: Optional[Dict[str, Any]] = None,
+                 timeout: float = 4.0, *, cache_key: str = "",
+                 ttl: float = 0.0) -> Any:
+    """币安 USDⓈ-M **公共**数据取数（fail-soft：失败返回 None，绝不编数）。
+
+    端点均取自官方文档：
+      · ``/fapi/v1/premiumIndex``                    标记价 / 当期资金费率
+      · ``/fapi/v1/openInterest``                    当前持仓量（基础币数量）
+      · ``/futures/data/openInterestHist``           持仓量历史（sumOpenInterestValue 已是 USD）
+      · ``/futures/data/topLongShortAccountRatio``   精英账户多空比
+      · ``/futures/data/topLongShortPositionRatio``  精英持仓多空比
+      · ``/futures/data/takerlongshortRatio``        主动买/卖量序列
+    """
+    if cache_key:
+        hit = _cache_get(cache_key, ttl)
+        if hit is not None:
+            return hit
+    from urllib.parse import urlencode
+    url = _BINANCE_FAPI + path + (("?" + urlencode(params)) if params else "")
+    for _ in range(2):
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if cache_key and data is not None:
+                _cache_put(cache_key, data)
+            return data
+        except Exception:
+            continue
+    return None
+
+
 def _cache_get(key: str, ttl: float) -> Any:
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
@@ -1150,8 +1195,32 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
         "liquidation_details": None,
     }
     if _is_binance(venue):
-        # 币安多空比等价口径（`/futures/data/globalLongShortAccountRatio`），经
-        # market_data_service 复用同一封装；其余字段无等价端点保持 None。
+        # 币安等价口径（全部取自官方 USDⓈ-M 文档）：
+        #   premiumIndex → 当期资金费率 + 标记价；openInterest → 当前 OI；
+        #   openInterestHist → ΔOI 序列（sumOpenInterestValue 已是 USD）；
+        #   globalLongShortAccountRatio → 全网账户多空比；
+        #   topLongShortAccountRatio / topLongShortPositionRatio → 精英账户/持仓多空比。
+        # 清算脉冲：币安公开 **REST 无等价端点**（仅 WS forceOrder 流）→ 保持 None。
+        symbol = _binance_symbol(inst_id)
+        prem = _binance_get("/fapi/v1/premiumIndex", {"symbol": symbol}, timeout,
+                            cache_key=f"bn:prem:{symbol}", ttl=30.0)
+        if isinstance(prem, dict):
+            fr = _sf(prem.get("lastFundingRate"), default=None)
+            if fr is not None:
+                snap["funding_rate_pct"] = round(fr * 100, 4)
+            # 币安不返回「下期预测费率」→ next_funding_rate_pct 保持 None（不臆造）
+        mark_px = _sf(prem.get("markPrice")) if isinstance(prem, dict) else 0.0
+        oi = _binance_get("/fapi/v1/openInterest", {"symbol": symbol}, timeout,
+                          cache_key=f"bn:oi:{symbol}", ttl=30.0)
+        if isinstance(oi, dict) and mark_px > 0:
+            snap["oi_usd"] = round(_sf(oi.get("openInterest")) * mark_px, 2)
+        hist = _binance_get("/futures/data/openInterestHist",
+                            {"symbol": symbol, "period": "1h", "limit": 6}, timeout,
+                            cache_key=f"bn:oih:{symbol}", ttl=300.0)
+        if isinstance(hist, list) and hist:
+            series = [_sf(r.get("sumOpenInterestValue")) for r in hist if isinstance(r, dict)]
+            if series:
+                snap["oi_series_usd"] = list(reversed(series))  # 与 OKX 同约定：新→旧
         try:
             try:
                 from market_data_service import fetch_long_short_ratio
@@ -1162,6 +1231,20 @@ def fetch_derivatives_snapshot(ccy: str, inst_id: str, ul_y: str, *,
                 snap["long_short_ratio"] = lsr
         except Exception:
             pass  # 取不到就保持 None，不因单点抖动毁掉整轮因子
+        top_acct = _binance_get("/futures/data/topLongShortAccountRatio",
+                                {"symbol": symbol, "period": "5m", "limit": 1}, timeout,
+                                cache_key=f"bn:topacct:{symbol}", ttl=300.0)
+        if isinstance(top_acct, list) and top_acct and isinstance(top_acct[0], dict):
+            v = top_acct[0].get("longShortRatio")
+            if v is not None:
+                snap["elite_account_ratio"] = _sf(v)
+        top_pos = _binance_get("/futures/data/topLongShortPositionRatio",
+                               {"symbol": symbol, "period": "5m", "limit": 1}, timeout,
+                               cache_key=f"bn:toppos:{symbol}", ttl=300.0)
+        if isinstance(top_pos, list) and top_pos and isinstance(top_pos[0], dict):
+            v = top_pos[0].get("longShortRatio")
+            if v is not None:
+                snap["elite_position_ratio"] = _sf(v)
         return snap
     base = str(ccy or "").upper().strip()
     if not base:
@@ -1234,6 +1317,29 @@ def fetch_taker_volume(ccy: str, period: str, *, timeout: float = 4.0,
     `takerNetUsd` 单点净差已在 `brain/packages.py` 经 market_data_service 单独补齐）。
     """
     if _is_binance(venue):
+        # 币安 `/futures/data/takerlongshortRatio`（官方文档）**支持历史序列**
+        # （period 5m/15m/30m/1h/2h/4h/6h/12h/1d，limit ≤500），映射成 OKX 同形状
+        # `[ts, sellVol, buyVol]`（newest-first），CVD 与买卖比即可正常计算。
+        symbol = _binance_symbol(f"{str(ccy or '').upper().strip()}-USDT-SWAP")
+        bn_period = {"5m": "5m", "15m": "15m", "30m": "30m", "1H": "1h", "1h": "1h",
+                     "2H": "2h", "4H": "4h"}.get(str(period), "5m")
+        cache_key = f"bn:taker:{symbol}:{bn_period}"
+        cached = _cache_get(cache_key, 30.0)
+        if cached is not None:
+            return cached
+        rows = _binance_get("/futures/data/takerlongshortRatio",
+                            {"symbol": symbol, "period": bn_period, "limit": 30}, timeout)
+        if not isinstance(rows, list) or not rows:
+            return None
+        out: List[Any] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            out.append([r.get("timestamp"), _sf(r.get("sellVol")), _sf(r.get("buyVol"))])
+        out.reverse()  # 币安返回时间正序 → OKX 约定 newest-first
+        if out:
+            _cache_put(cache_key, out)
+            return out
         return None
     base = str(ccy or "").upper().strip()
     if not base:

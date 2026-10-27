@@ -294,4 +294,11 @@ export const enAdminSecurity = {
   binanceEnvFollowsUnified: 'Follows global unified tier',
   toastBinanceCredsSaved: 'Binance credentials saved',
   confirmBinanceLiveNote: 'Binance tier follows the global unified tier (OKX env); switching LIVE requires confirmation.',
+  binanceExecHint: 'Binance execution gate: while closed, the trading brain exits every cycle (fail-closed) and places no orders.',
+  binanceExecPhrasePlaceholder: 'Type the phrase: OPEN BINANCE EXECUTION',
+  binanceExecPhraseAria: 'Binance execution gate confirmation phrase',
+  binanceExecOpen: 'Open execution',
+  binanceExecClose: 'Close execution',
+  binanceExecOpened: 'Binance execution opened for the current tier',
+  binanceExecClosed: 'Binance execution closed for the current tier',
 };

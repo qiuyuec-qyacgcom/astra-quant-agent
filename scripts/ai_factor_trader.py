@@ -885,11 +885,40 @@ def _live_oco_coverage(orders: List[Dict[str, Any]], pos_side: str) -> float:
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
     return _cloud_protection_coverage(orders, pos_side, _float_or_zero=_float_or_zero)
 
+def _algo_client():
+    """云端算法单客户端：生效所=币安时返回币安 algoOrder 门面，否则原 `okx_rest`。
+
+    双所改造（2026-10）：保护单此前**只走 okx_rest**，切币安后
+    `pending_algo_orders` 直接抛 OKXNotConfigured → 每笔持仓都报
+    「unable to verify cloud OCO」且永远补不上云端止损。
+    """
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        if active_pool_venue() == "binance":
+            from scripts.okx_runtime import current_environment
+            from astra_backend.exchanges.registry import get_adapter
+            from scripts.trader.algo_facade import algo_client_for
+            _client = algo_client_for("binance", get_adapter("binance", current_environment().mode))
+            if _client is not None:
+                return _client
+    except Exception:
+        pass
+    return okx_rest
+
+
+def _is_binance_venue() -> bool:
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        return active_pool_venue() == "binance"
+    except Exception:
+        return False
+
+
 def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, tp_px: float, sl_px: float,
-                                    tp1_px=None, scale_out_ratio: float = 0.5,
-                                    leg_min_sz: float = 0.0,
-                                    prec: int = 2, px_prec=None, legs_state=None,
-                                    simulated: bool = False, split_enabled: bool = True) -> Tuple[bool, str]:
+                                   tp1_px=None, scale_out_ratio: float = 0.5,
+                                   leg_min_sz: float = 0.0,
+                                   prec: int = 2, px_prec=None, legs_state=None,
+                                   simulated: bool = False, split_enabled: bool = True) -> Tuple[bool, str]:
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。
 
     2026-09-29：新增分批止盈参数透传（`tp1_px`/`scale_out_ratio`/`legs_state` 等）——
@@ -900,12 +929,18 @@ def ensure_cloud_position_protection(inst_id: str, pos_side: str, size: float, t
     `minSz`** 传入（而非行情表的 `minSz`，两者可能不同），漏转发会让双腿拆分退回
     实例最小下单量，实测导致腿量凑不满仓位 → 覆盖率卡在 98.13% → 看板报「1 笔缺失止损」。
     """
+    # 同名注入契约（extraction 守卫钉 `okx_rest=okx_rest`）：先解析成本地变量再传，
+    # 币安档下该变量指向币安 algoOrder 门面，OKX 档下就是原 okx_rest。
+    okx_rest = _algo_client()
     return _cloud_protection_ensure(
         inst_id, pos_side, size, tp_px, sl_px,
         okx_rest=okx_rest, _live_oco_coverage=_live_oco_coverage,
         tp1_px=tp1_px, scale_out_ratio=scale_out_ratio, leg_min_sz=leg_min_sz,
         prec=prec, px_prec=px_prec,
-        legs_state=legs_state, simulated=simulated, split_enabled=split_enabled)
+        legs_state=legs_state, simulated=simulated,
+        # 币安为分离腿模型，分批止盈双腿编排（sync_position_legs）暂不适用 →
+        # 保持「一对全量 TP/SL」语义，避免用 OKX 腿协议向币安下单
+        split_enabled=split_enabled and not _is_binance_venue())
 
 def build_signal_snapshot(f: dict) -> dict:
     """壳（第八十二刀搬至 `scripts/trader/signal_snapshot.py`）。
@@ -1017,6 +1052,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available):
 # =============================================================================
 def sync_cloud_algo_stop(inst_id: str, pos_side: str, new_sl: float, reason: str = "") -> bool:
     """壳（第八十五刀搬至 `scripts/trader/cloud_protection.py`）。"""
+    okx_rest = _algo_client()
     return _cloud_protection_sync_stop(inst_id, pos_side, new_sl, reason, okx_rest=okx_rest)
 
 def _purge_ai_position_instructions(inst_id):

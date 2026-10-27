@@ -587,7 +587,31 @@ async def refresh_cache_if_needed(ttl_seconds: float = 3.0):
         if time.time() - LAST_CACHE_TIME <= ttl_seconds and CACHE_DATA:
             return CACHE_DATA
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(SYNC_EXECUTOR, update_cache_cycle)
+        try:
+            await loop.run_in_executor(SYNC_EXECUTOR, update_cache_cycle)
+        except Exception as exc:      # noqa: BLE001 - 单周期异常不得把整页打成 500
+            # 可用性兜底（2026-10）：update_cache_cycle 内部已对账户/保护单/账单做了
+            # 分项降级，但**载荷装配段**仍有未兜路径。任一异常向上抛时 /api/all 直接
+            # 500、整页白屏（F12 只能看到 HTTP 500，拿不到堆栈）。
+            # 这里改为「保留上次快照 + 状态降级 + 错误留痕」，页面可继续渲染，
+            # 且 `data_health.errors` 里带出真实异常文本，便于定位。
+            _err = f"cache cycle: {type(exc).__name__}: {exc}"
+            if isinstance(CACHE_DATA, dict) and CACHE_DATA:
+                _h = dict(CACHE_DATA.get("data_health") or {})
+                _prev = list(_h.get("errors") or [])
+                _h.update({"status": "STALE", "partial": True,
+                           "errors": _prev + [_err], "attempted_at": None})
+                CACHE_DATA["data_health"] = _h
+                CACHE_DATA["is_stale"] = True
+            else:
+                CACHE_DATA = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S (北京时间)"),
+                    "data_health": {"status": "OFFLINE", "partial": True, "errors": [_err]},
+                    "account": {}, "today_stats": {}, "performance": {},
+                    "positions_summary": {"total": 0, "max_positions": 0, "items": []},
+                    "factors": [], "trades": [], "logs": [], "snapshots": [],
+                }
+            LAST_CACHE_TIME = time.time()
         return CACHE_DATA
 
 # Auto-start background worker to keep in-memory cache pre-warmed

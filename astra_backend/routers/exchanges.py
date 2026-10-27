@@ -121,6 +121,23 @@ def positions(x_astra_admin_token: str | None = Header(default=None)) -> dict[st
     from scripts.okx_runtime import current_environment
     from astra_backend.dependencies import okx
     env = current_environment()
+    # 双所改造：持仓按生效所分流（此前无论何时都走 OKX，切币安后恒 503「OKX 未配置」）
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _active_venue = active_pool_venue()
+    except Exception:
+        _active_venue = "okx"
+    if _active_venue == "binance":
+        try:
+            from astra_backend.exchanges.registry import get_adapter
+            _adapter = get_adapter("binance", env.mode)
+            return {"positions": _adapter.exchange.positions() or [],
+                    "source": "BINANCE REST", "venue": "binance"}
+        except Exception as exc:   # noqa: BLE001 - 统一转成可读的 503，不裸抛 500
+            raise HTTPException(
+                status_code=503,
+                detail=f"BINANCE {env.mode.upper()} 持仓读取失败：{type(exc).__name__}: {exc}",
+            ) from exc
     if not env.configured:
         raise HTTPException(status_code=503, detail=f"OKX {env.mode.upper()} NOT READY：请在后台配置完整 API Key 三件套")
     try:
@@ -521,7 +538,7 @@ def admin_okx_runtime(x_astra_session: str | None = Header(default=None, alias="
 def admin_okx_account_snapshot(
     x_astra_admin_token: str | None = Header(default=None),
     x_astra_session: str | None = Header(default=None, alias="X-Astra-Session"),
-    venue: str | None = Query(default="okx"),
+    venue: str | None = Query(default=None),
 ) -> dict[str, Any]:
     require_admin_header(x_astra_admin_token, x_astra_session)
     from scripts.okx_runtime import current_environment
@@ -529,8 +546,16 @@ def admin_okx_account_snapshot(
 
     # 直接调用（测试/内部）时 venue 可能是 Query 对象或 None，统一归一为字符串；
     # FastAPI 路由下 `?venue=binance` 才是真正的按所分流开关。
-    venue_raw = venue if isinstance(venue, str) else "okx"
-    venue_key = str(venue_raw).strip().lower() or "okx"
+    # 未显式传 venue 时**跟随生效所**（原先默认 okx → 切币安后本页恒显示「OKX 未配置」）。
+    venue_raw = venue if isinstance(venue, str) else ""
+    if str(venue_raw).strip():
+        venue_key = str(venue_raw).strip().lower()
+    else:
+        try:
+            from scripts.instrument_pool import active_pool_venue
+            venue_key = active_pool_venue()
+        except Exception:
+            venue_key = "okx"
     if venue_key not in ("okx", "binance"):
         raise HTTPException(status_code=400, detail="venue 只允许 okx 或 binance")
 

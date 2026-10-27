@@ -98,9 +98,16 @@ class SourcePreferenceTests(_HttpMixin, unittest.TestCase):
         with patch.object(sm, "_fetch_from_okx_rubik", lambda *a, **k: payload):
             self.assertIs(sm.fetch_smart_money_for_symbol("BTC"), payload)
 
-    def test_no_fallback_source_hook_remains(self):
-        # 多所移除后不存在任何备源 `_fetch_from_*`：单源失败即 None，绝不换所重试。
-        self.assertFalse(hasattr(sm, "_fetch_from_binance"))
+    def test_binance_source_is_venue_gated_not_a_fallback(self):
+        # 双所接入（2026-10）：币安有了自己的一套等价端点（官方 /futures/data/*），
+        # 但它是**按生效所分流**，绝不是 OKX 失败后的备源 —— OKX 单源失败仍返回 None。
+        self.assertTrue(hasattr(sm, "_fetch_from_binance"))
+        calls = []
+        with patch.object(sm, "_fetch_from_binance",
+                          lambda *a, **k: calls.append(1) or {"longShortRatio": {"x": 1}}), \
+             patch.object(sm, "_fetch_from_okx_rubik", lambda *a, **k: None):
+            self.assertIsNone(sm.fetch_smart_money_for_symbol("BTC"))
+            self.assertEqual(calls, [], "OKX 失败不得自动切到币安（不做跨所重试）")
 
     def test_blank_currency_short_circuits_without_any_request(self):
         for ccy in ("", "   ", None):

@@ -98,6 +98,66 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
     }
 
 
+_BINANCE_FAPI = "https://fapi.binance.com"
+
+
+def _bn_get(path: str, params: Dict[str, Any], timeout: float) -> Any:
+    from urllib.parse import urlencode
+    url = _BINANCE_FAPI + path + "?" + urlencode(params)
+    req = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_from_binance(ccy: str, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
+    """币安等价口径（官方 USDⓈ-M 文档 `/futures/data/*`）。
+
+    - ``topLongShortPositionRatio`` → 精英持仓多空比（对应 OKX long-short-pos-ratio）
+    - ``globalLongShortAccountRatio`` → 全网账户多空比（对应 OKX long-short-account-ratio）
+    - ``takerlongshortRatio`` → 主动买卖净额（对应 OKX taker-volume）
+    """
+    symbol = f"{str(ccy or '').upper().strip()}USDT"
+    ls_ratio: Optional[float] = None
+    for path in ("/futures/data/topLongShortPositionRatio",
+                 "/futures/data/globalLongShortAccountRatio"):
+        try:
+            rows = _bn_get(path, {"symbol": symbol, "period": "5m", "limit": 1}, timeout)
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                v = rows[0].get("longShortRatio")
+                if v is not None:
+                    ls_ratio = float(v)
+                    break
+        except Exception:
+            continue
+    if ls_ratio is None:
+        return None
+    w_long = round(ls_ratio / (1.0 + ls_ratio), 4)
+    net_notional_usd = 0.0
+    taker_str = "--"
+    try:
+        rows = _bn_get("/futures/data/takerlongshortRatio",
+                       {"symbol": symbol, "period": "5m", "limit": 1}, timeout)
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            b_vol = float(rows[0].get("buyVol") or 0.0)
+            s_vol = float(rows[0].get("sellVol") or 0.0)
+            net_notional_usd = b_vol - s_vol
+            taker_str = (
+                f"{round(net_notional_usd / 1e4, 1)}万 U"
+                if abs(net_notional_usd) >= 1e4
+                else f"{round(net_notional_usd, 0)} U"
+            )
+    except Exception:
+        pass
+    return {
+        "longShortRatio": {"weightedLongRatio": w_long, "longShortRatio": ls_ratio},
+        "notional": {"netNotionalUsdt": net_notional_usd},
+        "winRate": {},
+        "takerNetUsd": taker_str,
+        "lsRatio": ls_ratio,
+        "weighted_long_pct": round(w_long * 100, 1),
+    }
+
+
 def fetch_smart_money_pool(
     instruments: List[Dict[str, Any]],
     *,
@@ -107,13 +167,22 @@ def fetch_smart_money_pool(
 ) -> Dict[str, Any]:
     """并发采集标的池内全部币种的聪明钱与大户数据，返回标准 pool 字典。
 
-    venue="binance"：币安无对等 Rubik 聪明钱统计端点，返回空池 →
-    上层 `available=False` 优雅降级（绝不伪造中性信号）。
+    venue="binance"：走币安官方 ``/futures/data/*`` 三个等价端点
+    （精英持仓多空比 / 全网账户多空比 / 主动买卖量），取不到仍优雅返回空池。
     """
     pool: Dict[str, Any] = {}
     if not instruments:
         return pool
     if str(venue or "").strip().lower() == "binance":
+        def _fetch_bn(item: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
+            ccy = item.get("ccy") or item.get("name") or (
+                item.get("instId", "").split("-")[0] if "-" in item.get("instId", "") else "")
+            return ccy, _fetch_from_binance(ccy, timeout=timeout) if ccy else None
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(instruments))) as executor:
+            for ccy, sm in executor.map(_fetch_bn, instruments):
+                if ccy and sm:
+                    pool[ccy] = sm
         return pool
 
     def _fetch_one(item: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
