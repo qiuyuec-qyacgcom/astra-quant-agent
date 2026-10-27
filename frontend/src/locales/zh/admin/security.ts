@@ -298,7 +298,7 @@ export const zhAdminSecurity = {
   toastBinanceCredsSaved: '币安凭据已保存',
   confirmBinanceLiveNote: '币安档位跟随全局统一档位（OKX 环境），切 LIVE 需二次确认。',
   binanceExecHint: '币安执行开闸：未开闸时交易主脑每个周期直接退出（fail-closed），不会下任何单。',
-  binanceExecPhrasePlaceholder: '输入短语：OPEN BINANCE EXECUTION',
+  binanceExecPhrasePlaceholder: '输入短语：OBE',
   binanceExecPhraseAria: '币安执行开闸确认短语',
   binanceExecOpen: '开启执行',
   binanceExecClose: '关闭执行',

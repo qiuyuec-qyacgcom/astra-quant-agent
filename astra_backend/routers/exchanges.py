@@ -423,9 +423,9 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
     if payload.okx_environment is not None:
         env_values["ASTRA_OKX_ENV"] = "demo" if payload.okx_environment.lower() == "demo" else "live"
     if payload.binance_execution is not None:
-        if (payload.confirmation or "").strip().upper() != "OPEN BINANCE EXECUTION":
+        if (payload.confirmation or "").strip().upper() != "OBE":
             raise HTTPException(status_code=400,
-                                detail="变更币安执行开关确认短语必须精确为：OPEN BINANCE EXECUTION")
+                                detail="变更币安执行开关确认短语必须精确为：OBE")
         # 双轴：沙盒档写 ASTRA_BINANCE_DEMO_EXECUTION，实盘档写 ASTRA_BINANCE_EXECUTION
         _bin_mode = str(payload.okx_environment or "").strip().lower()
         if _bin_mode not in {"demo", "live"}:

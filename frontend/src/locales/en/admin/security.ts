@@ -295,7 +295,7 @@ export const enAdminSecurity = {
   toastBinanceCredsSaved: 'Binance credentials saved',
   confirmBinanceLiveNote: 'Binance tier follows the global unified tier (OKX env); switching LIVE requires confirmation.',
   binanceExecHint: 'Binance execution gate: while closed, the trading brain exits every cycle (fail-closed) and places no orders.',
-  binanceExecPhrasePlaceholder: 'Type the phrase: OPEN BINANCE EXECUTION',
+  binanceExecPhrasePlaceholder: 'Type the phrase: OBE',
   binanceExecPhraseAria: 'Binance execution gate confirmation phrase',
   binanceExecOpen: 'Open execution',
   binanceExecClose: 'Close execution',
