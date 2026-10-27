@@ -223,8 +223,10 @@ def _dashboard_background_worker_loop():
     while _BG_WORKER_RUNNING:
         try:
             update_cache_cycle()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 双所改造：静默吞异常会让 CACHE_DATA 停在旧值且日志无 traceback，
+            # 决策流/推演表现为「必须重启才更新」。留痕（不炸线程）。
+            print(f"[dashboard_cache] 后台刷新失败（缓存保持旧值）: {type(exc).__name__}: {exc}")
         # Refresh every 2 seconds in background
         time.sleep(2.0)
 
@@ -370,6 +372,13 @@ def update_cache_cycle():
             # 生效所：NOT_READY/OFFLINE 最小载荷也要带上，否则前端只能按 OKX 引导
             "active_venue": _core_venue,
         }
+        # 双所改造/决策流修复（2026-10）：账户 NOT_READY/OFFLINE 时，本地文件
+        # （ai_brain_decisions→factors、ai_brain_history、news、trades 等）**不依赖私有
+        # API**，必须照常注入——否则主脑已产出决策但决策流/推演页为空，表现为「必须重启」。
+        try:
+            _inject_local_data_into_stale(CACHE_DATA, [], timestamp_full)
+        except Exception:
+            pass
         LAST_CACHE_TIME = time.time()
         return
 
