@@ -205,14 +205,26 @@ def market_candles(inst_id: str, bar: str = "1H", limit: int = 150, response: Re
                 "source": "cache", "venue": _c_venue}
     try:
         from scripts.market_data_service import fetch_candles as _fetch_candles
-        # 双源回退：先试 OKX，空则回退币安（币种归属判定 = 实时探测 OKX）。
-        raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0)
-        venue = "okx"
-        source = "OKX REST"
-        if not raw:
+        # 双源回退，**生效所优先**：切币安后先打币安，避免每根 K 线都先等 OKX 超时
+        # （旧实现固定先试 OKX，OKX 不可达时要空等 5s 才回退）。
+        _active_venue = "okx"
+        try:
+            from scripts.instrument_pool import active_pool_venue
+            _active_venue = active_pool_venue()
+        except Exception:
+            _active_venue = "okx"
+        if _active_venue == "binance":
             raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0, venue="binance")
-            venue = "binance"
-            source = "Binance REST"
+            venue, source = "binance", "Binance REST"
+            if not raw:
+                raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0)
+                venue, source = "okx", "OKX REST"
+        else:
+            raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0)
+            venue, source = "okx", "OKX REST"
+            if not raw:
+                raw = _fetch_candles(inst_id, bar=bar, limit=limit, timeout=5.0, venue="binance")
+                venue, source = "binance", "Binance REST"
         candles = []
         for item in reversed(raw or []):
             try:

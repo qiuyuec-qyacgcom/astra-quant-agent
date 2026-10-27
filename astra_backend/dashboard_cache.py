@@ -293,17 +293,27 @@ def update_cache_cycle():
             _bn_adapter = get_adapter("binance", current_environment().mode)
         except Exception as exc:
             source_errors.append(f"binance adapter: {exc}")
-        (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_binance_account_state(
-            source_errors=source_errors,
-            tz_beijing=tz_beijing,
-            ThreadPoolExecutor=ThreadPoolExecutor,
-            _NOT_READY_TEXT=_NOT_READY_TEXT,
-            _core_collect_pending_order_rows=_core_collect_pending_order_rows,
-            _core_collect_position_rows=_core_collect_position_rows,
-            datetime=datetime,
-            load_instruments=load_instruments,
-            load_position_trackers=load_position_trackers,
-            adapter=_bn_adapter)
+        try:
+            (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_binance_account_state(
+                source_errors=source_errors,
+                tz_beijing=tz_beijing,
+                ThreadPoolExecutor=ThreadPoolExecutor,
+                _NOT_READY_TEXT=_NOT_READY_TEXT,
+                _core_collect_pending_order_rows=_core_collect_pending_order_rows,
+                _core_collect_position_rows=_core_collect_position_rows,
+                datetime=datetime,
+                load_instruments=load_instruments,
+                load_position_trackers=load_position_trackers,
+                adapter=_bn_adapter)
+        except Exception as exc:      # noqa: BLE001 - 币安采集异常不得让整页 /api/all 500
+            # 降级为「未就绪」，错误留在 data_health.errors（前台可见），既有真实失败语义不变。
+            source_errors.append(f"binance collect: {type(exc).__name__}: {exc}")
+            try:
+                _trackers_fallback = load_position_trackers()
+            except Exception:
+                _trackers_fallback = {}
+            (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = (
+                False, 0.0, False, 0.0, 0, [], [], [], False, 0, 0.0, 0.0, _trackers_fallback, 0.0)
     else:
         (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_core_account_state(
             source_errors=source_errors,
@@ -341,6 +351,8 @@ def update_cache_cycle():
             # factor_library, factors, news, review, logs, trades etc. are
             # read from local files and should always be fresh even in STALE mode.
             _inject_local_data_into_stale(stale, stale_positions, timestamp_full)
+            # 生效所：陈旧载荷是旧拷贝，显式补齐（前端首启/文案按所分流要用）
+            stale["active_venue"] = _core_venue
             CACHE_DATA = stale
             LAST_CACHE_TIME = time.time()
             return
@@ -355,6 +367,8 @@ def update_cache_cycle():
             "account": {}, "today_stats": {}, "performance": {},
             "positions_summary": {"total": 0, "max_positions": len(load_instruments()), "items": []},
             "factors": [], "trades": [], "logs": [], "snapshots": [],
+            # 生效所：NOT_READY/OFFLINE 最小载荷也要带上，否则前端只能按 OKX 引导
+            "active_venue": _core_venue,
         }
         LAST_CACHE_TIME = time.time()
         return
@@ -362,7 +376,7 @@ def update_cache_cycle():
     # Parallel Phase 2: Exchange algo orders for live TP/SL protection
     # （阶段 2·B2 第九刀：迁至 dashboard_payload/algo_protection.py）
     # 双所改造：币安保护腿走适配器 openAlgoOrders（分离腿由收集器合并判定）。
-    _binance_algo_fetch = None
+    _binance_algo_fetch: Any = None
     if _core_venue == "binance":
         try:
             from scripts.okx_runtime import current_environment
@@ -376,9 +390,12 @@ def update_cache_cycle():
                     return False, [], f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             source_errors.append(f"binance algo adapter: {exc}")
-    _core_collect_algo_protection(positions, source_errors, _fetch_json,
-                                  enrich_position_risk_fields, trackers,
-                                  venue=_core_venue, binance_algo_fetch=_binance_algo_fetch)
+    try:
+        _core_collect_algo_protection(positions, source_errors, _fetch_json,
+                                      enrich_position_risk_fields, trackers,
+                                      venue=_core_venue, binance_algo_fetch=_binance_algo_fetch)
+    except Exception as exc:      # noqa: BLE001 - 保护单取数失败不得让整页 500
+        source_errors.append(f"algo protection: {type(exc).__name__}: {exc}")
     # 2.5 多所对齐段已随外所下架整体移除（阶段 2·B2 第七刀迁出的
     # `dashboard_payload/multi_venue.py` 一并删除）——OKX 持仓/挂单已由上面的
     # position_view / order_view 收齐，无需再并入任何外所行。

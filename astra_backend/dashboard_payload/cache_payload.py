@@ -174,5 +174,16 @@ def build_live_cache_payload(
     "factor_library": factor_lib_snapshot,
     "cross_venue": _load_cross_venue_data(),
     "portfolio_risk": _load_portfolio_risk_data(),
-    "multi_venue_portfolio": _load_multi_venue_portfolio(total_eq, avail_eq, positions, orders_data)
+    "multi_venue_portfolio": _load_multi_venue_portfolio(total_eq, avail_eq, positions, orders_data),
+    # 生效所：供前端首启引导/文案按所分流（纯展示元数据，不参与任何资金计算）
+    "active_venue": _active_venue_name(),
 }
+
+
+def _active_venue_name() -> str:
+    """当前生效所（okx|binance）；读不到时回退 okx。只读、零网络。"""
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        return active_pool_venue()
+    except Exception:
+        return "okx"

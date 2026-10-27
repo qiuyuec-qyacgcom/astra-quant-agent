@@ -43,7 +43,12 @@ const status = computed(() =>
 /** 只在"读不到账户数据"时出现；陈旧（STALE）说明早就配好了，不该再教一遍。 */
 const visible = computed(() => status.value === 'NOT_READY' || status.value === 'OFFLINE');
 
-const steps = computed(() => tm('dash.firstRun.steps'));
+// 生效所分流：纯币安部署不该被要求「先接 OKX」。active_venue 由 /api/all 提供。
+const isBinance = computed(() =>
+  String((store.data as any)?.active_venue || 'okx').toLowerCase() === 'binance');
+const titleKey = computed(() => (isBinance.value ? 'dash.firstRun.titleBinance' : 'dash.firstRun.title'));
+const leadKey = computed(() => (isBinance.value ? 'dash.firstRun.leadBinance' : 'dash.firstRun.lead'));
+const steps = computed(() => tm(isBinance.value ? 'dash.firstRun.stepsBinance' : 'dash.firstRun.steps'));
 </script>
 
 <template>
@@ -56,14 +61,14 @@ const steps = computed(() => tm('dash.firstRun.steps'));
     <header class="mb-2 flex flex-wrap items-center gap-2">
       <KeyRound class="h-4 w-4 shrink-0" style="color: var(--warn)" aria-hidden="true" />
       <h2 id="first-run-title" class="section-title !mb-0 !text-sm" style="color: var(--ink-strong)">
-        {{ t('dash.firstRun.title') }}
+        {{ t(titleKey) }}
       </h2>
       <span class="dsh-pill text-3xs" style="color: var(--warn); border-color: var(--warn-line)">
         {{ t('dash.firstRun.badge') }}
       </span>
     </header>
 
-    <p class="mb-3 text-xs leading-body" style="color: var(--ink-2)">{{ t('dash.firstRun.lead') }}</p>
+    <p class="mb-3 text-xs leading-body" style="color: var(--ink-2)">{{ t(leadKey) }}</p>
 
     <ol class="mb-3 space-y-1.5">
       <li
@@ -105,7 +110,8 @@ const steps = computed(() => tm('dash.firstRun.steps'));
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button type="button" class="btn btn-primary btn-sm" @click="showWizard = true">
+      <!-- 极速接入向导目前只覆盖 OKX 三件套；币安档直接去「账户接入」，避免误导 -->
+      <button v-if="!isBinance" type="button" class="btn btn-primary btn-sm" @click="showWizard = true">
         <Sparkles class="h-3.5 w-3.5 text-amber-300" aria-hidden="true" />
         <span>{{ t('dash.firstRun.wizardBtn') }}</span>
       </button>

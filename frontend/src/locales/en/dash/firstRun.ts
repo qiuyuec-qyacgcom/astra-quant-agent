@@ -9,6 +9,15 @@ export const enDashFirstRun = {
     'Enter the three credentials in the admin account-access page and save (or put them in .env).',
     'Come back and refresh: once the top-bar status reads connected, data starts flowing.',
   ],
+  // Binance active venue: parallel onboarding (USDⓈ-M perpetuals only)
+  titleBinance: 'Connect this system to your own Binance',
+  leadBinance: 'No Binance account data has been read yet. Complete the four steps below and the dashboard will start updating.',
+  stepsBinance: [
+    'Get a Binance account — this system trades USDⓈ-M perpetual futures only, not spot.',
+    'Create an API key under Binance Futures → API Management with Futures Trading enabled; note the key and secret (no passphrase).',
+    'Enter the key and secret in the admin account-access page for the matching tier (demo / live) and save.',
+    'Open the Binance execution gate for that tier (confirmation phrase: OPEN BINANCE EXECUTION), then refresh this page.',
+  ],
   channelsTitle: 'No account yet? Sign-up channels',
   openChannel: 'Open sign-up page',
   ctaAccount: 'Enter API key',

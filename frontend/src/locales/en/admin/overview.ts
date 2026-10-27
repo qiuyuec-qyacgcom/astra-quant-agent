@@ -17,6 +17,7 @@ export const enAdminOverview = {
   uptime: 'Uptime',
   brain: 'Decision Brain',
   okxEnv: 'OKX environment',
+  binanceEnv: 'Binance environment',
   okxEnvHint: 'Manage account & symbol pool',
   quick: {
     prompts: 'Prompt Studio',
@@ -41,6 +42,7 @@ export const enAdminOverview = {
   hudEffortStd: 'standard',
   hudArbiter: 'Multi-model arbitration',
   hudVenueRoute: 'OKX V5 REST signed · private account',
+  hudVenueRouteBinance: 'Binance USDⓈ-M signed · private account',
   hudRiskLine: 'Circuit breaker & quote checks',
   hudPhysicalBlock: 'Daily-loss breaker + geometry',
   hudPipeReady: 'Hard lock on incomplete data / bad geometry',

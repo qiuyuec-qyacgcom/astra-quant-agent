@@ -41,6 +41,7 @@ class MultiExchangeUpdate(BaseModel):
     binance_demo_api_key: str | None = None
     binance_demo_secret_key: str | None = None
     okx_execution: bool | None = None      # ASTRA_OKX_EXECUTION 总开关
+    binance_execution: bool | None = None  # 币安执行开闸（按档位落 ASTRA_BINANCE[_DEMO]_EXECUTION）
     okx_environment: str | None = None     # OKX 资金环境：demo|live
     preferred_venue: str | None = None  # 全局路由首选（合法值见 routing_policy.VALID_PREFERRED_VENUES）
     routing_mode: str | None = None     # 选所路由模式：auto|balanced|split

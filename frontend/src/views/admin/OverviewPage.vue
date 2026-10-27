@@ -83,6 +83,8 @@ const conf = computed<Record<string, string>>(() => runtime.value?.configuration
 // OKX-only：优先取 OKX 专用环境键（值形如「模拟盘 DEMO」/「实盘 LIVE」），
 // 仅在缺失时回落到通用键。通用键的值里可能仍带「选所模式」等路由串，故不作首选。
 const venueEnv = computed(() => conf.value['OKX 当前环境'] || conf.value['交易场所与路由'] || 'DEMO');
+// 双所：后端配置摘要里的「生效交易场所」决定这张卡展示 OKX 还是币安（环境值两所同轴）。
+const isBinanceVenue = computed(() => String(conf.value['生效交易场所'] || '').includes('币安'));
 const isDemo = computed(() => venueEnv.value.includes('DEMO') || venueEnv.value.includes('模拟'));
 const health = computed(() => runtime.value?.data_health || {});
 const healthFiles = computed<any[]>(() => health.value.files || []);
@@ -208,14 +210,14 @@ function parseAuditContext(action: string, detail: any): { label: string; tag: s
       <RouterLink to="/admin/security" class="ov-hud-card is-interactive">
         <div class="ov-hud-head">
           <span class="ov-hud-icon"><Wallet :size="14" /></span>
-          <span class="ov-hud-label">{{ t('admin.overview.okxEnv') }}</span>
+          <span class="ov-hud-label">{{ t(isBinanceVenue ? 'admin.overview.binanceEnv' : 'admin.overview.okxEnv') }}</span>
           <span class="ov-hud-link-arrow"><ChevronRight :size="13" /></span>
         </div>
         <div class="ov-hud-body">
           <div class="ov-hud-val" :class="isDemo ? 'text-amber' : 'is-up'">
             {{ venueEnv }}
           </div>
-          <div class="ov-hud-sub">{{ t('admin.overview.hudVenueRoute') }}</div>
+          <div class="ov-hud-sub">{{ t(isBinanceVenue ? 'admin.overview.hudVenueRouteBinance' : 'admin.overview.hudVenueRoute') }}</div>
         </div>
         <div class="ov-hud-foot">
           <span class="ov-hud-pill">{{ t('admin.overview.okxEnvHint') }}</span>

@@ -435,6 +435,60 @@ def fetch_okx_rubik_sentiment(ccy: str) -> dict:
                 time.sleep(0.6)
     return None
 
+def fetch_binance_long_short_ratio(ccy: str) -> dict:
+    """从币安**公开**合约数据端点拉取多空账户比（零凭证，等价于 OKX Rubik）。
+
+    端点 ``GET /futures/data/globalLongShortAccountRatio``（全市场账户多空比，
+    ``longShortRatio = longAccount / shortAccount``）；返回结构与
+    ``fetch_okx_rubik_sentiment`` **逐字段一致**，供上层无差别消费。
+    """
+    c = ccy.upper()
+    symbol = f"{c}USDT"
+    url = ("https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+           f"?symbol={symbol}&period=1h&limit=1")
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            row = data[0] if isinstance(data, list) and data else None
+            if not isinstance(row, dict):
+                return None
+            ratio = float(row.get("longShortRatio") or 1.0)
+            if ratio <= 0:
+                return None
+            _long_acc = row.get("longAccount")
+            if _long_acc not in (None, ""):
+                bull_pct = round(float(_long_acc) * 100, 1)
+            else:
+                bull_pct = round((ratio / (ratio + 1.0)) * 100, 1)
+            bear_pct = round(100.0 - bull_pct, 1)
+            if ratio >= 1.25:
+                label = "bullish"
+            elif ratio <= 0.82:
+                label = "bearish"
+            else:
+                label = "neutral"
+            score = round((ratio - 1.0) / max(1.0, ratio), 2)
+            return {
+                "ccy": c,
+                "label": label,
+                "bullish_ratio": f"{bull_pct:.1f}%",
+                "bearish_ratio": f"{bear_pct:.1f}%",
+                "bullish_pct": f"{bull_pct:.1f}%",
+                "bearish_pct": f"{bear_pct:.1f}%",
+                "long_short_ratio": f"{ratio:.2f}",
+                "bull_cnt": int(bull_pct),
+                "bear_cnt": int(bear_pct),
+                "neutral_cnt": 0,
+                "sentiment_factor_score": score,
+            }
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.6)
+    return None
+
+
 def fetch_and_analyze_news_sentiment():
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now_bj = datetime.datetime.now(tz_bj)
@@ -530,7 +584,15 @@ def fetch_and_analyze_news_sentiment():
                 except Exception as _we:
                     print(f"[熔断自愈] warn 重写失败: {_we}")
 
-    # 2. Multi-Coin Sentiment：直连 OKX Rubik 官方多空账户比，真实反映全网多空力量
+    # 2. Multi-Coin Sentiment：按生效所取多空账户比（币安→币安公开 longShortRatio；OKX→Rubik）
+    try:
+        from astra_backend.exchanges.routing_policy import load_preferred_venue
+        _lsr_venue = "binance" if str(load_preferred_venue()).strip().lower() == "binance" else "okx"
+    except Exception:
+        _lsr_venue = "okx"
+    _fetch_lsr = fetch_binance_long_short_ratio if _lsr_venue == "binance" else fetch_okx_rubik_sentiment
+    _lsr_name = "币安账户多空比" if _lsr_venue == "binance" else "OKX Rubik 账户多空比"
+
     active_instruments = load_instruments()
     target_coins = [item["name"] for item in active_instruments]
     coin_sentiments = {}
@@ -546,7 +608,7 @@ def fetch_and_analyze_news_sentiment():
             pass
 
     for ccy in target_coins:
-        rubik_data = fetch_okx_rubik_sentiment(ccy)
+        rubik_data = _fetch_lsr(ccy)
         if rubik_data:
             coin_sentiments[ccy] = rubik_data
         elif ccy in existing_sentiments:
@@ -584,7 +646,7 @@ def fetch_and_analyze_news_sentiment():
         "updated_at": now_str,
         # 数据源可用性只认**可展示**的快讯源；只剩官方运营公告不算「有舆情」。
         "source_available": bool(parsed_news),
-        "source_reason": ("Cointelegraph/CoinDesk 加密快讯 + 金十数据宏观要闻 + OKX Rubik 账户多空比" if parsed_news
+        "source_reason": (f"Cointelegraph/CoinDesk 加密快讯 + 金十数据宏观要闻 + {_lsr_name}" if parsed_news
                           else "金十数据/宏观快讯拉取失败，显示缺失而非中性"),
         "macro_sentiment": macro_env,
         "circuit_breaker": (cb_info if (cb_active or cb_info.get("unknown"))

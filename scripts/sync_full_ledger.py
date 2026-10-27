@@ -445,8 +445,18 @@ def build_lifecycle_ledger():
 
     env = okx_runtime.current_environment()
 
-    if not env.configured:
+    # 双所改造（2026-10）：OKX 凭证不再是**硬前提** —— 生效所=币安时允许仅同步币安台账。
+    # 旧实现无条件 raise，导致切币安后台账同步必然失败（trading_ledger.json 永远不更新）。
+    try:
+        from astra_backend.exchanges import routing_policy as _routing
+        _active_venue = "binance" if _routing.load_preferred_venue() == "binance" else "okx"
+    except Exception:
+        _active_venue = "okx"
+
+    if not env.configured and _active_venue != "binance":
         raise okx_rest.OKXNotConfigured("OKX API Key 未配置 — 台账同步 fail-closed（既有 trading_ledger.json 保持不动）")
+    if not env.configured:
+        _mark("okx", "skipped", reason="OKX 未配置（当前生效所为币安）")
 
     pos_history = []
     pos_data = []

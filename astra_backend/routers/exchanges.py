@@ -405,6 +405,21 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
         env_values["ASTRA_OKX_EXECUTION"] = "1" if payload.okx_execution else "0"
     if payload.okx_environment is not None:
         env_values["ASTRA_OKX_ENV"] = "demo" if payload.okx_environment.lower() == "demo" else "live"
+    if payload.binance_execution is not None:
+        if (payload.confirmation or "").strip().upper() != "OPEN BINANCE EXECUTION":
+            raise HTTPException(status_code=400,
+                                detail="变更币安执行开关确认短语必须精确为：OPEN BINANCE EXECUTION")
+        # 双轴：沙盒档写 ASTRA_BINANCE_DEMO_EXECUTION，实盘档写 ASTRA_BINANCE_EXECUTION
+        _bin_mode = str(payload.okx_environment or "").strip().lower()
+        if _bin_mode not in {"demo", "live"}:
+            try:
+                from scripts.okx_runtime import current_environment
+                _bin_mode = str(current_environment().mode or "demo").strip().lower()
+            except Exception:
+                _bin_mode = "demo"
+        _bin_flag = ("ASTRA_BINANCE_DEMO_EXECUTION"
+                     if _bin_mode in {"demo", "sandbox", "testnet"} else "ASTRA_BINANCE_EXECUTION")
+        env_values[_bin_flag] = "1" if payload.binance_execution else "0"
     if env_values:
         fn_update_env(env_values)
     fn_refresh_settings()

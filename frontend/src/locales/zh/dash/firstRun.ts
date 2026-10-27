@@ -9,6 +9,15 @@ export const zhDashFirstRun = {
     '在后台「账户接入」填入三件套并保存（也可以直接写进 .env）。',
     '回到本页刷新：顶部状态变成「已连接」，数据就开始刷新。',
   ],
+  // 币安生效所：与 OKX 并行的引导（只做 USDⓈ-M 永续）
+  titleBinance: '先把系统接上你自己的币安',
+  leadBinance: '现在还没有读到币安账户数据。走完下面四步，看板就会开始刷新。',
+  stepsBinance: [
+    '准备一个币安账户 —— 本系统只做 USDⓈ-M 永续合约，不是现货。',
+    '在币安「合约 → API 管理」创建 API Key，勾选「启用合约交易」，记下 Key / Secret（币安无需 Passphrase）。',
+    '在后台「账户接入」把 Key / Secret 填到对应档位（模拟盘 / 实盘）并保存。',
+    '在后台打开该档位的「币安执行开闸」（确认短语 OPEN BINANCE EXECUTION），再刷新本页。',
+  ],
   channelsTitle: '还没有账户？注册通道',
   openChannel: '打开注册页',
   ctaAccount: '去填 API Key',

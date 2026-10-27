@@ -18,6 +18,7 @@ export const zhAdminOverview = {
   uptime: '持续运行',
   brain: '决策主脑',
   okxEnv: 'OKX 连接环境',
+  binanceEnv: '币安连接环境',
   okxEnvHint: '点击管理账户与标的池',
   quick: {
     prompts: '提示词与方案工坊',
@@ -42,6 +43,7 @@ export const zhAdminOverview = {
   hudEffortStd: '标准',
   hudArbiter: '多模型参谋仲裁',
   hudVenueRoute: 'OKX V5 REST 直签 · 私有账户',
+  hudVenueRouteBinance: '币安 USDⓈ-M 永续直签 · 私有账户',
   hudRiskLine: '物理风控与熔断',
   hudPhysicalBlock: '日亏熔断 + 报价几何',
   hudPipeReady: '行情不完整 / 几何非法硬锁拒单',

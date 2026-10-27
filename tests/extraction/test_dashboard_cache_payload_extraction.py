@@ -79,6 +79,8 @@ HISTORICAL_TOP = {
 ADDED_AFTER_EXTRACTION = {
     "is_stale": "TS 契约必填 + 前端读根；由 `is_stale_status(data_health.status)` 单一事实源推导",
     "macro_assessment": "TS 契约声明在根；取 `ai_brain_history[0]` 的同源别名（不新算）",
+    "active_venue": "双所：前端首启引导/文案需按生效所分流（okx|binance）；"
+                    "NOT_READY/OFFLINE/STALE 三个分支都要带，否则纯币安部署被要求先接 OKX",
 }
 
 #: 当前应有的顶层字段 = 历史冻结 ∪ 契约补发。
