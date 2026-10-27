@@ -1785,13 +1785,6 @@ onMounted(() => {
   gap: var(--ds-space-2);
   margin-left: auto;
 }
-/* 执行开闸区块：与凭据表单留呼吸位，避免和「保存」按钮视觉粘连 */
-.sc-exec-gate {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ds-space-2);
-  margin-top: var(--ds-space-2);
-}
 
 /* ══ 表单布局 ══ */
 .sc-form-2 {

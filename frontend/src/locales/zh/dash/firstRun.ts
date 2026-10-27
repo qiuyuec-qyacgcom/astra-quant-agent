@@ -16,7 +16,7 @@ export const zhDashFirstRun = {
     '准备一个币安账户 —— 本系统只做 USDⓈ-M 永续合约，不是现货。',
     '在币安「合约 → API 管理」创建 API Key，勾选「启用合约交易」，记下 Key / Secret（币安无需 Passphrase）。',
     '在后台「账户接入」把 Key / Secret 填到对应档位（模拟盘 / 实盘）并保存。',
-    '在后台打开该档位的「币安执行开闸」（确认短语 OBE），再刷新本页。',
+    '在后台切到币安即自动开闸（无需输入短语），保存后刷新本页。',
   ],
   channelsTitle: '还没有账户？注册通道',
   openChannel: '打开注册页',

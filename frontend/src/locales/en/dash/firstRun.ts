@@ -16,7 +16,7 @@ export const enDashFirstRun = {
     'Get a Binance account — this system trades USDⓈ-M perpetual futures only, not spot.',
     'Create an API key under Binance Futures → API Management with Futures Trading enabled; note the key and secret (no passphrase).',
     'Enter the key and secret in the admin account-access page for the matching tier (demo / live) and save.',
-    'Open the Binance execution gate for that tier (confirmation phrase: OBE), then refresh this page.',
+    'Switch to Binance to auto-open execution for that tier (no phrase needed); save, then refresh this page.',
   ],
   channelsTitle: 'No account yet? Sign-up channels',
   openChannel: 'Open sign-up page',
