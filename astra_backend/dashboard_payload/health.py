@@ -144,8 +144,18 @@ def _load_cross_venue_data(data_dir: str | os.PathLike[str], decisions_file: str
     except Exception:
         pass
 
+    _venue = "okx"
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _venue = active_pool_venue()
+    except Exception:
+        _venue = "okx"
     for asset in src.keys() | sym_rows.keys():
         sym = sym_rows.get(asset) or {}
         okx = sym.get("okx") or src.get(asset, {}).get("okx_last") or ""
-        out["by_asset"][asset] = {"okx_last": okx}
+        _row = {"okx_last": okx}
+        # 生效所=币安时额外带出币安价（新增键，不改变只读 okx_last 的前端契约）。
+        if _venue == "binance":
+            _row["binance_last"] = sym.get("binance") or src.get(asset, {}).get("okx_last") or ""
+        out["by_asset"][asset] = _row
     return out

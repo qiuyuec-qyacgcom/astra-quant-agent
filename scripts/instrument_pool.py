@@ -40,6 +40,7 @@ POOL_FILE = DATA_DIR / "instrument_pool.json"
 BINANCE_POOL_FILE = DATA_DIR / "instrument_pool_binance.json"
 TRADING_STATE_FILE = DATA_DIR / "trading_state.json"
 FACTOR_LIBRARY_FILE = DATA_DIR / "factor_library_snapshot.json"
+BINANCE_FACTOR_LIBRARY_FILE = DATA_DIR / "factor_library_snapshot_binance.json"
 NEWS_SENTIMENT_FILE = DATA_DIR / "news_sentiment.json"
 DASHBOARD_CACHE_FILE = DATA_DIR / "dashboard_last_good.json"
 
@@ -333,6 +334,21 @@ def active_pool_venue() -> str:
     return DEFAULT_VENUE
 
 
+def factor_snapshot_filename_for(venue: Any = None) -> str:
+    """生效所的因子快照**文件名**（不含目录，供各处拼自己的 data_dir）。
+
+    OKX 沿用 `factor_library_snapshot.json`，币安用 `factor_library_snapshot_binance.json`
+    —— 与 `factor_library._snapshot_file` 逐字一致，避免各处各拼一份路径字面量。
+    """
+    return (BINANCE_FACTOR_LIBRARY_FILE.name if normalize_venue(venue or active_pool_venue()) == "binance"
+            else FACTOR_LIBRARY_FILE.name)
+
+
+def factor_snapshot_file_for(venue: Any = None) -> Path:
+    """生效所的因子快照完整路径（DATA_DIR 下）。"""
+    return DATA_DIR / factor_snapshot_filename_for(venue)
+
+
 def load_instruments(venue: Any = None) -> list[dict[str, Any]]:
     """读取指定场所的标的池。
 
@@ -595,16 +611,19 @@ def sync_instruments_state(venue: Any = None) -> None:
     except Exception:
         pass
 
-    # 2. Update data/factor_library_snapshot.json to prune deleted coins
-    if FACTOR_LIBRARY_FILE.exists():
+    # 2. Update data/factor_library_snapshot[_binance].json to prune deleted coins
+    #    按生效所裁剪对应所的因子快照（币安快照与 OKX 快照分文件，别裁错对象）。
+    #    用模块常量直接判定（而非 helper），以保留 `patch.object(ip, "FACTOR_LIBRARY_FILE")` 测试缝。
+    factor_file = BINANCE_FACTOR_LIBRARY_FILE if active_venue == "binance" else FACTOR_LIBRARY_FILE
+    if factor_file.exists():
         try:
-            factor_data = json.loads(FACTOR_LIBRARY_FILE.read_text(encoding="utf-8"))
+            factor_data = json.loads(factor_file.read_text(encoding="utf-8"))
             if isinstance(factor_data, dict) and "instruments" in factor_data:
                 factor_data["instruments"] = [
                     item for item in factor_data["instruments"]
                     if isinstance(item, dict) and item.get("instId") in active_ids
                 ]
-                _write_json_atomic(FACTOR_LIBRARY_FILE, factor_data)
+                _write_json_atomic(factor_file, factor_data)
         except Exception:
             pass
 

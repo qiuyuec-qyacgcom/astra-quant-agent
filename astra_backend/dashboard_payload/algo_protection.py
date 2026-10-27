@@ -44,8 +44,60 @@ def _trigger_type_legs(algo):
     return legs
 
 
+_BINANCE_LIVE_STATUS = {"NEW", "RUNNING", "TRIGGERING"}
+
+
+def _binance_leg(row):
+    """币安算法腿（STOP_MARKET / TAKE_PROFIT_MARKET）→ 半 OKX 形状。
+
+    只负责把单腿映射成 `{slTriggerPx|tpTriggerPx, sz, reduceOnly, posSide, state, algoId}`；
+    非活跃状态（已触发/已撤）返回 None（与 OKX 侧 `state in {live, effective}` 同口径）。
+    """
+    status = str(row.get("algoStatus") or row.get("status") or "").strip().upper()
+    if status and status not in _BINANCE_LIVE_STATUS:
+        return None
+    otype = str(row.get("orderType") or row.get("type") or "").strip().upper()
+    trigger = row.get("triggerPrice") or row.get("stopPrice") or row.get("price")
+    native = str(row.get("positionSide") or "BOTH").strip().upper()
+    pos_side = {"LONG": "long", "SHORT": "short"}.get(native, "net")
+    close_pos = str(row.get("closePosition") or "").strip().lower() in {"true", "1", "yes"}
+    return {
+        "algoId": str(row.get("algoId") or ""),
+        "posSide": pos_side,
+        "state": "live",
+        "reduceOnly": "true",
+        "sz": "" if close_pos else str(row.get("quantity") or row.get("origQty") or ""),
+        "closePosition": close_pos,
+        "tpTriggerPx" if "TAKE_PROFIT" in otype else "slTriggerPx": trigger,
+    }
+
+
+def _merge_binance_legs(rows):
+    """把币安**分离**的 SL/TP 腿合成一条 OKX 同形状记录（SL 为主，补齐 TP）。
+
+    币安每个保护腿是独立算法单（`STOP_MARKET` / `TAKE_PROFIT_MARKET`），而下面的判定
+    逻辑假设「一条记录同时带 slTriggerPx 与 tpTriggerPx 才算 fully_protected」。
+    不合并就会把已双保护的仓位误判成 `partially_protected`。
+    """
+    legs = [x for x in (_binance_leg(r) for r in (rows or []) if isinstance(r, dict)) if x]
+    if not legs:
+        return []
+    sl = next((leg for leg in legs if leg.get("slTriggerPx")), None)
+    tp = next((leg for leg in legs if leg.get("tpTriggerPx")), None)
+    base = dict(sl or tp)
+    if tp:
+        base["tpTriggerPx"] = tp.get("tpTriggerPx")
+    if sl:
+        base["slTriggerPx"] = sl.get("slTriggerPx")
+    _ids = [leg.get("algoId") for leg in (sl, tp) if leg and leg.get("algoId")]
+    if _ids:
+        base["algoId"] = ",".join(_ids)
+    return [base]
+
+
 def collect_algo_protection(positions, source_errors, fetch_json,
-                           enrich_risk_fields, trackers):
+                           enrich_risk_fields, trackers, *, venue="okx",
+                           binance_algo_fetch=None):
     # 惰性 import（不在 import 期拉 scripts 侧模块）；提到函数首行是因为下面的三态
     # 类型字段在循环里**多处**使用，曾因 import 写在用点之后触发 UnboundLocalError。
     from scripts.trader.venue_protection import (
@@ -55,14 +107,20 @@ def collect_algo_protection(positions, source_errors, fetch_json,
     # Parallel Phase 2: Exchange algo orders for live TP/SL protection
     if positions:
         with ThreadPoolExecutor(max_workers=min(len(positions), 6)) as pool:
-            futures = {
-                pos["instId"]: pool.submit(
-                    fetch_json,
-                    okx_rest.pending_algo_orders,
-                    pos["instId"],
-                )
-                for pos in positions
-            }
+            if binance_algo_fetch is not None:
+                futures = {
+                    pos["instId"]: pool.submit(binance_algo_fetch, pos["instId"])
+                    for pos in positions
+                }
+            else:
+                futures = {
+                    pos["instId"]: pool.submit(
+                        fetch_json,
+                        okx_rest.pending_algo_orders,
+                        pos["instId"],
+                    )
+                    for pos in positions
+                }
             algo_results = {inst_id: f.result() for inst_id, f in futures.items()}
 
         for position in positions:
@@ -70,6 +128,9 @@ def collect_algo_protection(positions, source_errors, fetch_json,
             if not algo_ok:
                 source_errors.append(f"algo {position['instId']}: {algo_error}")
                 algo_orders = []
+            elif venue == "binance":
+                # 币安分离腿 → 合并成 OKX 同形状记录（见 _merge_binance_legs）
+                algo_orders = _merge_binance_legs(algo_orders)
             # 第一百六十七刀：触发价类型（读失败/无腿/未上报 三态，**不**用默认值顶替）。
             # 取数失败时先按"unknown"写，下面有腿时会按选中的腿覆盖。
             position.update(protection_trigger_type_fields([], readable=bool(algo_ok)))

@@ -186,7 +186,12 @@ def build_signal_snapshot(f: dict, *, data_dir: str) -> dict:
     # 跳过，**绝不伪造**（取不到就保持 None，由宿主审计如实标"不可观测"）。
     if any(snap.get(key) is None for key, _srcs in _TIER_LIBRARY_SOURCES):
         try:
-            lib_file = os.path.join(data_dir, "factor_library_snapshot.json")
+            # 因子快照按生效所分文件（币安→_binance.json），避免币安模式回填 OKX 口径因子。
+            try:
+                from instrument_pool import factor_snapshot_filename_for
+            except ImportError:
+                from scripts.instrument_pool import factor_snapshot_filename_for
+            lib_file = os.path.join(data_dir, factor_snapshot_filename_for())
             if os.path.exists(lib_file):
                 with open(lib_file, "r", encoding="utf-8") as handle:
                     lib = json.load(handle)

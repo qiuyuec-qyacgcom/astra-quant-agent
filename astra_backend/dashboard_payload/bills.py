@@ -34,7 +34,42 @@
 """
 from __future__ import annotations
 
-__all__ = ["aggregate_bills"]
+__all__ = ["aggregate_bills", "binance_income_to_bills"]
+
+
+def binance_income_to_bills(rows):
+    """币安 `/fapi/v1/income` 流水 → OKX bills 同形状（供 `aggregate_bills` 复用）。
+
+    顺序约定与 OKX 账单一致：**新→旧**（`aggregate_bills` 内部会再 `reversed` 成时间正序）。
+    映射：
+    - `REALIZED_PNL` → 平仓行（`subType="5"`，pnl=income）
+    - `COMMISSION`   → 平仓行手续费（`subType="5"`，fee=income，pnl=0）
+    - `FUNDING_FEE`  → 资金费（`type="8"`，subType 174/173 按收付方向）
+    其余类型（划转/返佣/体验金/保险清算等）不代表交易盈亏，跳过。
+    """
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            ts = int(row.get("time") or 0)
+            income = float(row.get("income") or 0)
+        except (TypeError, ValueError):
+            continue
+        sym = str(row.get("symbol") or "").strip().upper()
+        inst = f"{sym[:-4]}-USDT-SWAP" if sym.endswith("USDT") and len(sym) > 4 else sym
+        itype = str(row.get("incomeType") or "").strip().upper()
+        if itype == "REALIZED_PNL":
+            out.append({"ts": ts, "instId": inst, "type": "", "subType": "5",
+                        "pnl": income, "fee": 0.0, "balChg": income, "sz": 0})
+        elif itype == "COMMISSION":
+            out.append({"ts": ts, "instId": inst, "type": "", "subType": "5",
+                        "pnl": 0.0, "fee": income, "balChg": income, "sz": 0})
+        elif itype == "FUNDING_FEE":
+            out.append({"ts": ts, "instId": inst, "type": "8",
+                        "subType": "174" if income > 0 else "173",
+                        "pnl": income, "fee": 0.0, "balChg": income, "sz": 0})
+    return out
 
 
 def aggregate_bills(bills_data, *, reset_time_str, today_bj_str, tz_beijing, datetime):

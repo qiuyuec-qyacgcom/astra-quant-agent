@@ -383,10 +383,10 @@ async function saveCapital() {
 
 async function addInstrument() {
   let instId = newInstId.value.trim().toUpperCase()
-  if (/^[A-Z0-9]{2,15}$/.test(instId)) {
+  if (/^[A-Z0-9]{1,15}$/.test(instId)) {
     instId = `${instId}-USDT-SWAP`
   }
-  if (!/^[A-Z0-9]{2,15}-USDT-SWAP$/.test(instId)) { toast.err(t('admin.security.errInstFormat')); return }
+  if (!/^[A-Z0-9]{1,15}-USDT-SWAP$/.test(instId)) { toast.err(t('admin.security.errInstFormat')); return }
   try {
     const res = await api(`/api/v1/admin/instruments?venue=${encodeURIComponent(activeVenue.value)}`, { method: 'POST', body: JSON.stringify({ inst_id: instId }) })
     toast.ok(res.message || t('admin.security.toastInstAdded', undefined, { inst: instId }))

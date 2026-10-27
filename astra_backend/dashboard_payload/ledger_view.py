@@ -51,7 +51,13 @@ def _factor_snapshot_for(data_dir: str, inst_raw: str):
     现改为读 `factor_library_snapshot.json` 的对应标的 7 梯队块；
     读不到就返回 None（前端显示 `--`，**绝不用旧数理值冒充**）。
     """
-    path = os.path.join(data_dir, "factor_library_snapshot.json")
+    # 因子快照按生效所分文件：币安用 _binance.json，OKX 用原文件（单一事实源）。
+    try:
+        from scripts.instrument_pool import factor_snapshot_filename_for
+        _factor_name = factor_snapshot_filename_for()
+    except Exception:
+        _factor_name = "factor_library_snapshot.json"
+    path = os.path.join(data_dir, _factor_name)
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)

@@ -98,3 +98,105 @@ def collect_core_account_state(*,
         orders_data, pending_orders_list, tz_beijing=tz_beijing, datetime=datetime)
     return (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc)
 
+
+def collect_binance_account_state(*,
+        source_errors,
+        tz_beijing,
+        ThreadPoolExecutor,
+        _NOT_READY_TEXT,
+        _core_collect_pending_order_rows,
+        _core_collect_position_rows,
+        datetime,
+        load_instruments,
+        load_position_trackers,
+        adapter):
+    """币安相位 1：与 `collect_core_account_state` **同构**的账户/持仓/挂单抓取。
+
+    数据源 = 币安交易适配器（`adapter.exchange` 的 `balance/positions/open_orders`，
+    返回结构与 OKX 同构），失败语义/降级/连接缺失判定与 OKX 版逐条一致；
+    返回 14 元组，字段顺序与 `collect_core_account_state` 完全相同。
+
+    注：本函数**独立新增**，不改动被 AST 对拍钉住的 `collect_core_account_state`。
+    """
+    _ex = getattr(adapter, "exchange", None) if adapter is not None else None
+
+    def _invoke(fn):
+        if fn is None:
+            return False, None, "币安适配器不可用"
+        try:
+            return True, fn(), ""
+        except Exception as exc:      # noqa: BLE001 - 与 OKX 侧同一 fail-soft 语义
+            msg = str(exc)
+            # 未配置凭证 ⇒ 与 OKX 的 OKXNotConfigured 同语义：记「连接方式缺失」
+            if "credentials are not configured" in msg.lower() or "未配置" in msg:
+                return False, None, _NOT_READY_TEXT
+            return False, None, f"{type(exc).__name__}: {msg}"
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_bal = pool.submit(_invoke, getattr(_ex, "balance", None))
+        f_pos = pool.submit(_invoke, getattr(_ex, "positions", None))
+        f_ord = pool.submit(_invoke, getattr(_ex, "open_orders", None))
+        balance_ok, bal_data, balance_error = f_bal.result()
+        positions_ok, pos_data, positions_error = f_pos.result()
+        orders_ok, orders_data, orders_error = f_ord.result()
+
+    if not balance_ok:
+        source_errors.append(f"balance: {balance_error}")
+        bal_data = []
+    if not positions_ok:
+        source_errors.append(f"positions: {positions_error}")
+        pos_data = []
+    if not orders_ok:
+        source_errors.append(f"orders: {orders_error}")
+        orders_data = []
+
+    _private_not_ready = (
+        not balance_ok and not positions_ok and not orders_ok
+        and balance_error == _NOT_READY_TEXT
+        and positions_error == _NOT_READY_TEXT
+        and orders_error == _NOT_READY_TEXT
+    )
+
+    total_eq = 0.0
+    avail_eq = 0.0
+    cash_bal = 0.0
+    upl_acc = 0.0
+    if isinstance(bal_data, list) and bal_data and isinstance(bal_data[0], dict):
+        for d in (bal_data[0].get("details") or []):
+            if isinstance(d, dict) and d.get("ccy") == "USDT":
+                total_eq = float(d.get("eq", 0.0) or 0.0)
+                avail_eq = float(d.get("availBal", 0.0) or 0.0)
+                cash_bal = float(d.get("cashBal", 0.0) or 0.0)
+                upl_acc = float(d.get("upl", 0.0) or 0.0)
+                break
+
+    positions = []
+    total_pos_upl = 0.0
+    long_count = 0
+    short_count = 0
+
+    trackers = load_position_trackers()
+
+    _pos_delta = _core_collect_position_rows(pos_data, positions, trackers,
+                                            load_instruments=load_instruments)
+    long_count += _pos_delta[0]
+    short_count += _pos_delta[1]
+    total_pos_upl += _pos_delta[2]
+
+    pending_orders_list = []
+    _core_collect_pending_order_rows(
+        orders_data, pending_orders_list, tz_beijing=tz_beijing, datetime=datetime)
+
+    # 行级 venue 标记：`collect_position_rows`/`collect_pending_order_rows` 默认按 OKX 写死，
+    # 币安模式下在此统一改写（不改那两个被大量用例覆盖的函数）。
+    for _row in positions:
+        if isinstance(_row, dict):
+            _row["venue"] = "binance"
+            _row["exchange"] = "binance"
+    for _row in pending_orders_list:
+        if isinstance(_row, dict):
+            _row["venue"] = "binance"
+            _row["exchange"] = "binance"
+
+    return (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc)
+

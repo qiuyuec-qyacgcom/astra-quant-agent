@@ -50,6 +50,13 @@ def cache(resource: str, x_astra_admin_token: str | None = Header(default=None),
         # （与 /api/all 同级的公开面——该文件本就是首页时间线的数据源，不含密钥）
         "brain-history": "ai_brain_history.json",
     }
+    # 因子快照按生效所分文件：币安读 _binance.json，OKX/缺省读原文件。
+    if resource == "factors":
+        try:
+            from scripts.instrument_pool import factor_snapshot_filename_for
+            allowed["factors"] = factor_snapshot_filename_for()
+        except Exception:
+            pass
     filename = allowed.get(resource)
     if not filename:
         raise HTTPException(status_code=404, detail="unknown cache resource")
@@ -152,6 +159,19 @@ def public_ledger(all_time: bool = Query(default=False)) -> dict[str, Any]:
 def market(inst_id: str) -> dict[str, Any]:
     if not inst_id.endswith("-SWAP"):
         raise HTTPException(status_code=400, detail="only SWAP instrument ids are accepted")
+    # 行情按生效所分流：币安模式走币安公开行情，OKX 保持原路径与载荷形状。
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _venue = active_pool_venue()
+    except Exception:
+        _venue = "okx"
+    if _venue == "binance":
+        try:
+            from scripts.market_data_service import fetch_ticker as _fetch_ticker
+            row = _fetch_ticker(inst_id, venue="binance")
+            return {"instId": inst_id, "ticker": row or {}, "source": "BINANCE REST", "venue": "binance"}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"BINANCE market request failed: {exc}") from exc
     try:
         ticker = okx.ticker(inst_id)
         return {"instId": inst_id, "ticker": ticker[0] if ticker else {}, "source": "OKX REST"}

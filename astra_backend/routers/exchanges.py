@@ -135,6 +135,7 @@ _VENUE_ACCOUNT_FIELDS = ("equity", "available", "positions_count", "open_orders_
 
 _LISTING_ENV_MAP: dict[str, dict[str, str]] = {
     "okx": {"demo": "demo", "live": "live"},
+    "binance": {"demo": "demo", "live": "live"},
 }
 
 
@@ -641,7 +642,7 @@ def listing_status(environment: str = Query(default="demo"),
         raise HTTPException(status_code=400, detail="environment 只允许 demo 或 live")
     from astra_backend.exchanges.listing import listing_snapshot
     venues: dict[str, dict[str, Any]] = {}
-    for venue in ("okx",):
+    for venue in ("okx", "binance"):
         snap = listing_snapshot(venue, _LISTING_ENV_MAP[venue][env_key])
         venues[venue] = {
             "ok": snap.ok,

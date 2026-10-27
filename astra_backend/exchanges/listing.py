@@ -72,6 +72,23 @@ def _fetch_directory(venue: str, environment: str) -> Dict[str, Dict[str, str]]:
     base_url = env_profiles.resolve_base_url(venue, environment)
 
     headers = {"User-Agent": _UA, "Accept": "application/json"}
+    if venue == "binance":
+        # 币安 USDⓈ-M：公共 exchangeInfo（零凭证）。目录键归一成本仓 instId 形态
+        # （BTCUSDT → BTC-USDT-SWAP），与 OKX 侧同一套查找口径。
+        req = Request(base_url + "/fapi/v1/exchangeInfo", headers=headers, method="GET")
+        with urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        _directory: Dict[str, Dict[str, str]] = {}
+        for sym in payload.get("symbols", []):
+            if not isinstance(sym, dict):
+                continue
+            raw = str(sym.get("symbol") or "").strip().upper()
+            if not raw.endswith("USDT"):
+                continue
+            inst_id = f"{raw[:-4]}-USDT-SWAP"
+            status = str(sym.get("status") or "").strip().upper()
+            _directory[inst_id] = {"state": "live" if status == "TRADING" else status.lower()}
+        return _directory
     if venue != "okx":
         raise ExchangeCapabilityError(f"listing gate 未支持的 venue={venue!r}")
     path = "/api/v5/public/instruments?instType=SWAP"

@@ -90,8 +90,16 @@ def get_admin_configuration() -> dict[str, str]:
     except Exception:
         pass
 
+    # 生效交易场所（双所）：与交易日历/标的池同一事实源，避免面板只显示 OKX。
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _active_venue = active_pool_venue()
+    except Exception:
+        _active_venue = "okx"
+
     return {
         "交易场所与路由": f"{'模拟盘 DEMO' if settings.okx_simulated else '实盘 LIVE'} · 选所模式: {pref_venue.upper()}",
+        "生效交易场所": "币安 USDⓈ-M" if _active_venue == "binance" else "OKX V5",
         "OKX 当前环境": "模拟盘 DEMO" if settings.okx_simulated else "实盘 LIVE",
         "OKX 实盘凭证": "已完整配置" if settings.okx_live_configured else "未配置",
         "OKX 模拟盘凭证": "已配置" if settings.okx_demo_configured else "未配置",
@@ -108,9 +116,18 @@ def get_admin_configuration() -> dict[str, str]:
 
 
 def runtime_overview() -> dict[str, Any]:
+    # 因子快照按所分文件：生效所=币安时盯 factor_library_snapshot_binance.json，
+    # 否则盯 factor_library_snapshot.json。若把两份都无条件纳入新鲜度门槛，另一所
+    # 的缺席/陈旧会永远把整体误判成 STALE（见 factor_library._snapshot_file）。
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _venue = active_pool_venue()
+    except Exception:
+        _venue = "okx"
+    factor_file = "factor_library_snapshot_binance.json" if _venue == "binance" else "factor_library_snapshot.json"
     health_files = [
         file_health("ai_brain_decisions.json", 15 * 60),
-        file_health("factor_library_snapshot.json", 60),
+        file_health(factor_file, 60),
         file_health("news_sentiment.json", 10 * 60),
         file_health("trading_ledger.json", 15 * 60),
     ]

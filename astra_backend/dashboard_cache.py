@@ -6,6 +6,7 @@ from typing import Any
 from astra_backend.time_utils import beijing_text
 from astra_backend.dashboard_payload.collect import (  # noqa: E402
     collect_core_account_state,
+    collect_binance_account_state,
 )
 from astra_backend.dashboard_payload.cache import (  # noqa: E402
     load_persisted_dashboard_cache as _core_load_persisted_dashboard_cache,
@@ -260,7 +261,15 @@ def _load_cross_venue_data() -> dict:
 
 
 def update_cache_cycle():
-    global CACHE_DATA, LAST_CACHE_TIME
+    global CACHE_DATA, LAST_CACHE_TIME, FACTOR_LIBRARY_FILE
+    # 因子快照按生效所：薄壳在**调用期**读本模块常量，故开跑前把常量指向生效所的文件
+    # （OKX→factor_library_snapshot.json，币安→factor_library_snapshot_binance.json）。
+    # 用「改模块常量」而非「薄壳内换实参」，以保留 shell 的身份断言与 seam 守卫。
+    try:
+        from scripts.instrument_pool import factor_snapshot_filename_for
+        FACTOR_LIBRARY_FILE = os.path.join(DATA_DIR, factor_snapshot_filename_for())
+    except Exception:
+        pass
     tz_beijing = datetime.timezone(datetime.timedelta(hours=8))
     now_bj = datetime.datetime.now(tz_beijing)
     today_bj_str = now_bj.strftime("%Y-%m-%d")
@@ -269,18 +278,45 @@ def update_cache_cycle():
     source_errors = []
 
     # Parallel Phase 1: Fetch Balance, Positions, and Maker Orders concurrently
-    (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_core_account_state(
-        source_errors=source_errors,
-        tz_beijing=tz_beijing,
-        ThreadPoolExecutor=ThreadPoolExecutor,
-        _NOT_READY_TEXT=_NOT_READY_TEXT,
-        _core_collect_pending_order_rows=_core_collect_pending_order_rows,
-        _core_collect_position_rows=_core_collect_position_rows,
-        _fetch_json=_fetch_json,
-        datetime=datetime,
-        load_instruments=load_instruments,
-        load_position_trackers=load_position_trackers,
-        okx_rest=okx_rest    )
+    # 双所改造：核心账户三读按生效所分流——币安走交易适配器，OKX 保持原 okx_rest 路径。
+    _core_venue = "okx"
+    try:
+        from scripts.instrument_pool import active_pool_venue
+        _core_venue = active_pool_venue()
+    except Exception:
+        _core_venue = "okx"
+    if _core_venue == "binance":
+        _bn_adapter = None
+        try:
+            from astra_backend.exchanges.registry import get_adapter
+            from scripts.okx_runtime import current_environment
+            _bn_adapter = get_adapter("binance", current_environment().mode)
+        except Exception as exc:
+            source_errors.append(f"binance adapter: {exc}")
+        (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_binance_account_state(
+            source_errors=source_errors,
+            tz_beijing=tz_beijing,
+            ThreadPoolExecutor=ThreadPoolExecutor,
+            _NOT_READY_TEXT=_NOT_READY_TEXT,
+            _core_collect_pending_order_rows=_core_collect_pending_order_rows,
+            _core_collect_position_rows=_core_collect_position_rows,
+            datetime=datetime,
+            load_instruments=load_instruments,
+            load_position_trackers=load_position_trackers,
+            adapter=_bn_adapter)
+    else:
+        (_private_not_ready, avail_eq, balance_ok, cash_bal, long_count, orders_data, pending_orders_list, positions, positions_ok, short_count, total_eq, total_pos_upl, trackers, upl_acc) = collect_core_account_state(
+            source_errors=source_errors,
+            tz_beijing=tz_beijing,
+            ThreadPoolExecutor=ThreadPoolExecutor,
+            _NOT_READY_TEXT=_NOT_READY_TEXT,
+            _core_collect_pending_order_rows=_core_collect_pending_order_rows,
+            _core_collect_position_rows=_core_collect_position_rows,
+            _fetch_json=_fetch_json,
+            datetime=datetime,
+            load_instruments=load_instruments,
+            load_position_trackers=load_position_trackers,
+            okx_rest=okx_rest    )
 
     # A failed core account query must never overwrite last-known-good data with zeros.
     if not balance_ok or not positions_ok:
@@ -325,15 +361,44 @@ def update_cache_cycle():
 
     # Parallel Phase 2: Exchange algo orders for live TP/SL protection
     # （阶段 2·B2 第九刀：迁至 dashboard_payload/algo_protection.py）
+    # 双所改造：币安保护腿走适配器 openAlgoOrders（分离腿由收集器合并判定）。
+    _binance_algo_fetch = None
+    if _core_venue == "binance":
+        try:
+            from scripts.okx_runtime import current_environment
+            from astra_backend.exchanges.registry import get_adapter
+            _algo_ex = get_adapter("binance", current_environment().mode).exchange
+
+            def _binance_algo_fetch(inst_id, _ex=_algo_ex):
+                try:
+                    return True, _ex._open_algos(inst_id), ""
+                except Exception as exc:
+                    return False, [], f"{type(exc).__name__}: {exc}"
+        except Exception as exc:
+            source_errors.append(f"binance algo adapter: {exc}")
     _core_collect_algo_protection(positions, source_errors, _fetch_json,
-                                  enrich_position_risk_fields, trackers)
+                                  enrich_position_risk_fields, trackers,
+                                  venue=_core_venue, binance_algo_fetch=_binance_algo_fetch)
     # 2.5 多所对齐段已随外所下架整体移除（阶段 2·B2 第七刀迁出的
     # `dashboard_payload/multi_venue.py` 一并删除）——OKX 持仓/挂单已由上面的
     # position_view / order_view 收齐，无需再并入任何外所行。
     # 3. Read Reset Initial State（阶段 2·B2 第九刀：迁至 dashboard_payload/reset_state.py）
     reset_time_str, initial_capital_val = _core_read_reset_initial_state(DATA_DIR)
     # 4. Load Bills and Real Order-Level Ledger
-    bills_ok, bills_data, bills_error = _fetch_json(okx_rest.bills, limit=100)
+    # 双所改造：币安账单走 /fapi/v1/income（映射成 OKX bills 同形状后再同一套聚合）。
+    if _core_venue == "binance":
+        try:
+            from scripts.okx_runtime import current_environment
+            from astra_backend.exchanges.registry import get_adapter
+            from astra_backend.dashboard_payload.bills import binance_income_to_bills
+            _bills_ex = get_adapter("binance", current_environment().mode).exchange
+            bills_ok, bills_data, bills_error = _fetch_json(_bills_ex._income, limit=100)
+            if bills_ok and isinstance(bills_data, list):
+                bills_data = binance_income_to_bills(bills_data)
+        except Exception as exc:
+            bills_ok, bills_data, bills_error = False, [], f"{type(exc).__name__}: {exc}"
+    else:
+        bills_ok, bills_data, bills_error = _fetch_json(okx_rest.bills, limit=100)
     if not bills_ok:
         source_errors.append(f"bills: {bills_error}")
         bills_data = []
@@ -456,11 +521,18 @@ def update_cache_cycle():
     try:
         from scripts.okx_runtime import current_environment
         _okx_mode = str(current_environment().mode or "demo").lower()
-        # 本仓已收口为 OKX 专用：全站只剩一个档位轴 ⇒ `venue_environments` 只含 okx，
-        # `is_mixed_environment` 恒 False（单所不可能"混合"）。
-        # 键名保留是为了不破坏既有载荷契约。
+        # 环境轴仍以全站统一档位（okx_runtime）为准；币安跟随同一档位。
+        # `venue_environments` 在生效所=币安时补 binance 键（键名保持不变，兼容既有载荷契约）。
+        try:
+            from scripts.instrument_pool import active_pool_venue
+            _active_venue = active_pool_venue()
+        except Exception:
+            _active_venue = "okx"
+        _venue_envs = {"okx": _okx_mode}
+        if _active_venue == "binance":
+            _venue_envs["binance"] = _okx_mode
         CACHE_DATA["environment"] = _okx_mode
-        CACHE_DATA["venue_environments"] = {"okx": _okx_mode}
+        CACHE_DATA["venue_environments"] = _venue_envs
         CACHE_DATA["is_mixed_environment"] = False
         if isinstance(CACHE_DATA.get("account"), dict):
             CACHE_DATA["account"]["environment"] = _okx_mode

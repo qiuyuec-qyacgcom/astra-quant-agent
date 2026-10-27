@@ -35,7 +35,13 @@ def aggregate_venue_accounts(venues_dict: Dict[str, Any], environment: str) -> D
     active_venues: List[str] = []
     venue_equities: Dict[str, float] = {}
 
-    target_venues = ("okx",)
+    # 双所改造（2026-10）：OKX 恒参与；币安仅当调用方确实提供了「ready」卡片时参与聚合
+    # （未提供/未就绪时行为与旧「OKX 专用」逐字一致，避免把未接所算成 0 权益）。
+    _targets = ["okx"]
+    _bin = venues_dict.get("binance")
+    if isinstance(_bin, dict) and _bin.get("status") == "ready":
+        _targets.append("binance")
+    target_venues = tuple(_targets)
     for v in target_venues:
         card = venues_dict.get(v)
         if not isinstance(card, dict):

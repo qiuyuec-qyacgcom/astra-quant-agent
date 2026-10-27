@@ -175,8 +175,15 @@ def _load_multi_venue_portfolio(total_eq: float, avail_eq: float, positions: lis
     try:
         from astra_backend.portfolio_aggregator import aggregate_venue_accounts
         env = _global_env_axis()
+        # 卡片归属 = 生效所：核心账户三读已按所分流，不能把币安数据标成 okx。
+        _venue = "okx"
+        try:
+            from scripts.instrument_pool import active_pool_venue
+            _venue = active_pool_venue()
+        except Exception:
+            _venue = "okx"
         venues_map = {
-            "okx": {
+            _venue: {
                 "status": "ready" if total_eq > 0 else "unavailable",
                 "equity": total_eq,
                 "available": avail_eq,

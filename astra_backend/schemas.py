@@ -191,7 +191,7 @@ class GatewayReplayRequest(BaseModel):
 
 
 class InstrumentAddRequest(BaseModel):
-    inst_id: str = Field(pattern=r"^[A-Z0-9]{2,15}-USDT-SWAP$")
+    inst_id: str = Field(pattern=r"^[A-Z0-9]{1,15}-USDT-SWAP$")
 
 
 class InstrumentDeleteRequest(BaseModel):

@@ -118,8 +118,17 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_astra_session: str 
         lines = ["======================= 【推演基准与资金持仓（真实快照）】 ======================="]
         snap_ts = ""
         instruments = []
+        # 因子快照按所分文件：币安因子写在 factor_library_snapshot_binance.json，
+        # OKX/缺省写在 factor_library_snapshot.json（见 factor_library._snapshot_file）。
         try:
-            factor_snap_file = ROOT / "data" / "factor_library_snapshot.json"
+            from scripts.instrument_pool import active_pool_venue
+            venue = active_pool_venue()
+        except Exception:
+            venue = "okx"
+        context_meta["venue"] = venue
+        snap_name = "factor_library_snapshot_binance.json" if venue == "binance" else "factor_library_snapshot.json"
+        try:
+            factor_snap_file = ROOT / "data" / snap_name
             if factor_snap_file.is_file():
                 payload_snap = json.loads(factor_snap_file.read_text(encoding="utf-8"))
                 if isinstance(payload_snap, dict):
@@ -130,17 +139,39 @@ def admin_test_council_debate(payload: CouncilTestRequest, x_astra_session: str 
         lines.append(f"【推演基准时间】: {snap_ts or '—（因子快照不可用）'}")
 
         account = positions = pending = None
-        try:
-            import astra_backend.dashboard_cache as dashboard_app
-            cache = getattr(dashboard_app, "CACHE_DATA", None)
-            if isinstance(cache, dict):
-                account = cache.get("account") if isinstance(cache.get("account"), dict) else None
-                positions = cache.get("positions") if isinstance(cache.get("positions"), list) else None
-                pending = cache.get("pending_orders") if isinstance(cache.get("pending_orders"), list) else None
-            else:
-                context_meta["missing"].append("dashboard 缓存不可用")
-        except Exception as exc:
-            context_meta["missing"].append(f"dashboard 缓存读取失败: {str(exc)[:80]}")
+        if venue == "binance":
+            # 币安资金/持仓/挂单走币安适配器（dashboard 缓存是 OKX 专用，切币安会读到 0 权益）
+            try:
+                from scripts.okx_runtime import current_environment
+                from astra_backend.exchanges.registry import get_adapter
+                adapter = get_adapter("binance", current_environment().mode)
+                bal = adapter.exchange.balance()
+                _total_eq = 0.0
+                _avail_eq = 0.0
+                if isinstance(bal, list) and bal and isinstance(bal[0], dict):
+                    _total_eq = float(bal[0].get("totalEq") or 0.0)
+                    for _d in (bal[0].get("details") or []):
+                        if isinstance(_d, dict) and _d.get("ccy") == "USDT":
+                            _avail_eq = float(_d.get("availBal") or 0.0)
+                            break
+                account = {"total_eq": _total_eq, "avail_eq": _avail_eq}
+                positions = [dict(p, venue="binance") for p in (adapter.exchange.positions() or []) if isinstance(p, dict)]
+                pending = adapter.exchange.open_orders()
+            except Exception as exc:
+                context_meta["missing"].append(f"币安账户读取失败: {str(exc)[:80]}")
+                account = positions = pending = None
+        else:
+            try:
+                import astra_backend.dashboard_cache as dashboard_app
+                cache = getattr(dashboard_app, "CACHE_DATA", None)
+                if isinstance(cache, dict):
+                    account = cache.get("account") if isinstance(cache.get("account"), dict) else None
+                    positions = cache.get("positions") if isinstance(cache.get("positions"), list) else None
+                    pending = cache.get("pending_orders") if isinstance(cache.get("pending_orders"), list) else None
+                else:
+                    context_meta["missing"].append("dashboard 缓存不可用")
+            except Exception as exc:
+                context_meta["missing"].append(f"dashboard 缓存读取失败: {str(exc)[:80]}")
 
         if account:
             lines.append(f"【当前账户可用资金】: {account.get('avail_eq', '—')} USDT"
