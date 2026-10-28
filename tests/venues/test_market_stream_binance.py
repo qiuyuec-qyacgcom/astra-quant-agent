@@ -239,5 +239,105 @@ class MarketDataServicePrefersSnapshotTests(unittest.TestCase):
             self.assertEqual(len(rows), 4)
 
 
+class DeepStreamTests(unittest.TestCase):
+    """深度 / 标记价(资金费率) / 清算 三类流的解析与状态。"""
+
+    def test_stream_params_cover_depth_markprice_and_liquidation(self):
+        params = ms.binance_stream_params(["btcusdt"])
+        self.assertIn("btcusdt@depth20@100ms", params)
+        self.assertIn("btcusdt@markPrice@1s", params)
+        self.assertEqual(params.count("!forceOrder@arr"), 1, "全局清算流只能订阅一次")
+
+    def test_depth_frame_parsed(self):
+        out = ms.parse_frame("binance", json.dumps({
+            "e": "depthUpdate", "E": 123, "s": "BTCUSDT",
+            "b": [["100.0", "2"], ["99.5", "3"]], "a": [["100.5", "1"]]}))
+        row = out["ticks"][0]
+        self.assertEqual(row["kind"], "depth")
+        self.assertEqual(row["symbol"], "BTC-USDT-SWAP")
+        self.assertAlmostEqual(row["bids"][0][0], 100.0)
+        self.assertAlmostEqual(row["asks"][0][1], 1.0)
+
+    def test_mark_price_frame_parsed_with_decimal_funding(self):
+        out = ms.parse_frame("binance", json.dumps({
+            "e": "markPriceUpdate", "E": 1, "s": "BTCUSDT",
+            "p": "80000.5", "r": "0.00010000", "T": 999}))
+        row = out["ticks"][0]
+        self.assertEqual(row["kind"], "mark")
+        self.assertAlmostEqual(row["mark_px"], 80000.5)
+        self.assertAlmostEqual(row["funding_rate"], 0.0001)
+
+    def test_liquidation_frame_and_array_frame(self):
+        one = {"e": "forceOrder", "E": 5, "o": {"s": "BTCUSDT", "S": "SELL",
+                                                "p": "79000", "q": "0.5"}}
+        single = ms.parse_frame("binance", json.dumps(one))["ticks"][0]
+        self.assertEqual(single["kind"], "liquidation")
+        self.assertEqual(single["side"], "sell")
+        arr = ms.parse_frame("binance", json.dumps([one, one]))["ticks"]
+        self.assertEqual(len(arr), 2, "数组帧必须逐元素展开")
+
+    def test_state_keeps_latest_depth_mark_and_recent_liquidations(self):
+        state = ms.MarketState(max_liquidations=2)
+        state.update({"kind": "depth", "symbol": "BTC-USDT-SWAP",
+                      "bids": [[1.0, 2.0]], "asks": [[1.1, 3.0]]})
+        state.update({"kind": "mark", "symbol": "BTC-USDT-SWAP",
+                      "mark_px": 100.0, "funding_rate": 0.0002})
+        for i in range(3):
+            state.update({"kind": "liquidation", "symbol": "BTC-USDT-SWAP",
+                          "side": "buy", "price": 100.0 + i, "qty": 1.0})
+        self.assertEqual(len(state.depth("BTC-USDT-SWAP")["bids"]), 1)
+        self.assertAlmostEqual(state.mark("BTC-USDT-SWAP")["funding_rate"], 0.0002)
+        self.assertEqual(len(state.liquidations()), 2, "清算缓冲必须有界")
+        snap = state.snapshot(now_ms=1)
+        self.assertIn("depth", snap)
+        self.assertIn("marks", snap)
+        self.assertIn("liquidations", snap)
+
+
+class MarketDataServiceDeepTests(unittest.TestCase):
+    def _snapshot(self, td):
+        payload = {
+            "schema_version": ms.MARKET_SCHEMA_VERSION,
+            "written_at_ms": int(mds.time.time() * 1000),
+            "venue": "binance",
+            "tickers": {}, "klines": {}, "liquidations": [],
+            "depth": {"BTC-USDT-SWAP": {"bids": [[100.0, 2.0]], "asks": [[100.5, 1.0]]}},
+            "marks": {"BTC-USDT-SWAP": {"mark_px": 100.0, "funding_rate": 0.0001}},
+            "health": {},
+        }
+        path = os.path.join(td, "ws.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return path
+
+    def test_funding_rate_served_from_snapshot_as_percent(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._snapshot(td)
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange",
+                              side_effect=AssertionError("不得回退 REST")):
+                rate = mds.fetch_funding_rate("BTC-USDT-SWAP", venue="binance")
+            self.assertAlmostEqual(rate, 0.01, places=6, msg="0.0001 小数 → 0.01%")
+
+    def test_depth_served_from_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._snapshot(td)
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange",
+                              side_effect=AssertionError("不得回退 REST")):
+                book = mds.fetch_orderbook_depth("BTC-USDT-SWAP", sz=5, venue="binance")
+            self.assertIsNotNone(book)
+            self.assertTrue(book.get("bids"))
+
+    def test_missing_mark_falls_back_to_rest(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._snapshot(td)
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange") as fake:
+                fake.return_value.funding_rate.return_value = 0.05
+                rate = mds.fetch_funding_rate("ETH-USDT-SWAP", venue="binance")
+            self.assertAlmostEqual(rate, 0.05, "快照无该标的时必须回退 REST")
+
+
 if __name__ == "__main__":
     unittest.main()

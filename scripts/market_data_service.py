@@ -88,6 +88,35 @@ def _ws_ticker(inst_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+_WS_DEPTH_TTL_S = float(os.getenv("ASTRA_BINANCE_WS_DEPTH_TTL", "5") or 5.0)
+_WS_FUNDING_TTL_S = float(os.getenv("ASTRA_BINANCE_WS_FUNDING_TTL", "30") or 30.0)
+
+
+def _ws_funding_pct(inst_id: str) -> Optional[float]:
+    """WS 标记价流里的当期资金费率（**百分比**，与适配器 REST 分支同口径）。"""
+    snap = _ws_snapshot(_WS_FUNDING_TTL_S)
+    row = ((snap.get("marks") or {}).get(inst_id)) if snap else None
+    if not isinstance(row, dict):
+        return None
+    try:
+        return round(float(row.get("funding_rate")) * 100, 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ws_depth(inst_id: str) -> Optional[Dict[str, Any]]:
+    """WS 20 档盘口（`{"bids": [[px, qty]], "asks": [...]}`）；空则在调用方回退 REST。"""
+    snap = _ws_snapshot(_WS_DEPTH_TTL_S)
+    row = ((snap.get("depth") or {}).get(inst_id)) if snap else None
+    if not isinstance(row, dict):
+        return None
+    bids = row.get("bids") or []
+    asks = row.get("asks") or []
+    if not bids and not asks:
+        return None
+    return {"bids": bids, "asks": asks}
+
+
 def _ws_candles(inst_id: str, bar: str, limit: int) -> List[List[str]]:
     """WS 快照里的 K 线（newest-first 9 列）；**不足 limit 根就不给**，让调用方回退 REST。"""
     need = max(1, int(limit))
@@ -373,14 +402,18 @@ def fetch_orderbook_depth(inst_id: str, sz: int = 5, timeout: float = 3.5, venue
     v = _normalize_venue(venue)
     if v == "binance":
         try:
+            from market_normalizer import normalize_depth
+        except ImportError:  # pragma: no cover - 包导入路径
+            from scripts.market_normalizer import normalize_depth
+        # WS 20 档盘口（`@depth20@100ms`）零权重；缺失/过期才回退 REST。
+        ws_book = _ws_depth(inst_id)
+        if ws_book is not None:
+            return normalize_depth(ws_book, venue=v)
+        try:
             raw = _binance_exchange().orderbook(inst_id, sz=sz)
         except Exception as exc:
             logger.debug("Binance orderbook failed for %s: %s", inst_id, exc)
             return None
-        try:
-            from market_normalizer import normalize_depth
-        except ImportError:  # pragma: no cover - 包导入路径
-            from scripts.market_normalizer import normalize_depth
         return normalize_depth(raw, venue=v)
     data = _public_get("/api/v5/market/books", params={"instId": inst_id, "sz": sz}, timeout=timeout)
     if data and data.get("data"):
@@ -651,6 +684,10 @@ def fetch_funding_rate(inst_id: str, timeout: float = 3.5, venue: Optional[str] 
     """Fetch current perpetual funding rate as percentage."""
     v = _normalize_venue(venue)
     if v == "binance":
+        # WS 标记价流（`@markPrice@1s`）零权重；缺失/过期才回退 REST。
+        ws_rate = _ws_funding_pct(inst_id)
+        if ws_rate is not None:
+            return ws_rate
         try:
             return _binance_exchange().funding_rate(inst_id)
         except Exception as exc:

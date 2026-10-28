@@ -61,6 +61,7 @@ __all__ = [
     "MARKET_SCHEMA_VERSION",
     "VENUE_ENDPOINTS",
     "BINANCE_WS_INTERVALS",
+    "binance_stream_params",
     "TickBuffer",
     "StreamHealth",
     "MarketState",
@@ -134,11 +135,36 @@ def subscribe_payload(venue: str, symbol: str) -> Optional[Dict[str, Any]]:
     if venue == "okx":
         return {"op": "subscribe", "args": [{"channel": "tickers", "instId": symbol}]}
     if venue == "binance":
-        # 一条订阅帧同时拿 ticker + 三档 K 线：后续所有周期都不再打 REST。
-        params = [f"{symbol}@ticker"]
-        params += [f"{symbol}@kline_{iv}" for iv in BINANCE_WS_INTERVALS.values()]
-        return {"method": "SUBSCRIBE", "params": params, "id": 1}
+        # 一条订阅帧同时拿 ticker + 三档K线 + 20档深度 + 标记价/资金费率（见
+        # `binance_stream_params`）；后续所有周期都不再打 REST。
+        return {"method": "SUBSCRIBE", "params": binance_stream_params([symbol]), "id": 1}
     raise KeyError(f"未知场所：{venue}")
+
+
+def binance_stream_params(symbols: Sequence[str]) -> List[str]:
+    """币安订阅流清单（**单一事实源**，`subscribe_payload` 与 `run_stream` 共用）。
+
+    每标的：`@ticker`（价/买卖/24h）、三档 `@kline_*`、`@depth20@100ms`（盘口，
+    权重 5~10/次的 REST 端点在这里变成 0）、`@markPrice@1s`（标记价 + 当期资金费率）。
+    另加一条全局 `!forceOrder@arr`（清算流，**REST 完全没有**）。
+    """
+    params: List[str] = []
+    for sym in symbols:
+        params.append(f"{sym}@ticker")
+        params.extend(f"{sym}@kline_{iv}" for iv in BINANCE_WS_INTERVALS.values())
+        params.append(f"{sym}@depth20@100ms")
+        params.append(f"{sym}@markPrice@1s")
+    params.append("!forceOrder@arr")
+    return params
+
+
+def _pairs(rows: Any) -> List[Tuple[Any, Any]]:
+    """`[["px","qty"], ...]` → `[(px, qty), ...]`（形状不对的整行丢弃）。"""
+    out: List[Tuple[Any, Any]] = []
+    for row in rows or []:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            out.append((row[0], row[1]))
+    return out
 
 
 def _tick(venue: str, symbol: str, price: Any, *, kind: str,
@@ -171,6 +197,17 @@ def parse_frame(venue: str, raw: Any, *, now_ms: Optional[int] = None) -> Dict[s
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("utf-8", "replace")
         payload = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(payload, list):
+            # 币安 `!forceOrder@arr` 是**数组帧**：逐元素复用同一套解析后合并。
+            if venue == "binance":
+                merged: Dict[str, Any] = {"ticks": [], "control": None, "error": None}
+                for item in payload:
+                    one = parse_frame(venue, item, now_ms=now_ms)
+                    merged["ticks"].extend(one["ticks"])
+                    merged["control"] = merged["control"] or one["control"]
+                    merged["error"] = merged["error"] or one["error"]
+                return merged
+            return {"ticks": [], "control": None, "error": "非对象帧：list"}
         if not isinstance(payload, dict):
             return {"ticks": [], "control": None, "error": f"非对象帧：{type(payload).__name__}"}
     except Exception as exc:
@@ -240,6 +277,42 @@ def parse_frame(venue: str, raw: Any, *, now_ms: Optional[int] = None) -> Dict[s
                         "exchange_ms": data.get("E"),
                         "local_ms": int(now_ms if now_ms is not None else _now_ms()),
                     })
+            elif event == "depthUpdate" or ("s" in data and ("b" in data or "bids" in data)):
+                # 20 档部分深度（`@depth20@100ms`）每帧即**全量快照**，直接覆盖。
+                out["ticks"].append({
+                    "venue": "binance",
+                    "symbol": _binance_inst(data.get("s")),
+                    "kind": "depth",
+                    "bids": [[_num(p), _num(q)] for p, q in _pairs(data.get("b") or data.get("bids"))],
+                    "asks": [[_num(p), _num(q)] for p, q in _pairs(data.get("a") or data.get("asks"))],
+                    "exchange_ms": data.get("E"),
+                    "local_ms": int(now_ms if now_ms is not None else _now_ms()),
+                })
+            elif event == "markPriceUpdate":
+                out["ticks"].append({
+                    "venue": "binance",
+                    "symbol": _binance_inst(data.get("s")),
+                    "kind": "mark",
+                    "mark_px": _num(data.get("p")),
+                    # 币安给的是**小数**（0.0001）；下游 `fetch_funding_rate` 用百分比，
+                    # 故这里保持原值，由读取侧统一 ×100（与适配器 REST 分支同口径）。
+                    "funding_rate": _num(data.get("r")),
+                    "next_funding_ms": data.get("T"),
+                    "exchange_ms": data.get("E"),
+                    "local_ms": int(now_ms if now_ms is not None else _now_ms()),
+                })
+            elif event == "forceOrder":
+                order = data.get("o") if isinstance(data.get("o"), dict) else {}
+                out["ticks"].append({
+                    "venue": "binance",
+                    "symbol": _binance_inst(order.get("s")),
+                    "kind": "liquidation",
+                    "side": str(order.get("S") or "").strip().lower(),
+                    "price": _num(order.get("p")),
+                    "qty": _num(order.get("q")),
+                    "exchange_ms": data.get("E") or order.get("T"),
+                    "local_ms": int(now_ms if now_ms is not None else _now_ms()),
+                })
             else:
                 out["control"] = f"binance {event or 'unknown'}"
         else:
@@ -466,11 +539,15 @@ class MarketState:
       让 `market_data_service.fetch_candles()` 可以零改动地直接消费。
     """
 
-    def __init__(self, max_bars: int = 240) -> None:
+    def __init__(self, max_bars: int = 240, max_liquidations: int = 200) -> None:
         self._lock = threading.Lock()
         self._max_bars = max(1, int(max_bars))
+        self._max_liq = max(1, int(max_liquidations))
         self._tickers: Dict[str, Dict[str, Any]] = {}
         self._klines: Dict[str, Dict[str, Dict[int, List[str]]]] = {}
+        self._depth: Dict[str, Dict[str, Any]] = {}
+        self._marks: Dict[str, Dict[str, Any]] = {}
+        self._liquidations: Deque[Dict[str, Any]] = deque(maxlen=self._max_liq)
 
     def update(self, tick: Dict[str, Any]) -> None:
         kind = str(tick.get("kind") or "")
@@ -488,6 +565,38 @@ class MarketState:
                     "exchange_ms": tick.get("exchange_ms"),
                     "local_ms": tick.get("local_ms"),
                 }
+                return
+            if kind == "depth":
+                bids = tick.get("bids") or []
+                asks = tick.get("asks") or []
+                if bids or asks:
+                    self._depth[inst] = {
+                        "bids": [list(row) for row in bids],
+                        "asks": [list(row) for row in asks],
+                        "exchange_ms": tick.get("exchange_ms"),
+                        "local_ms": tick.get("local_ms"),
+                    }
+                return
+            if kind == "mark":
+                self._marks[inst] = {
+                    "mark_px": tick.get("mark_px"),
+                    "funding_rate": tick.get("funding_rate"),
+                    "next_funding_ms": tick.get("next_funding_ms"),
+                    "exchange_ms": tick.get("exchange_ms"),
+                    "local_ms": tick.get("local_ms"),
+                }
+                return
+            if kind == "liquidation":
+                price = tick.get("price")
+                if price is not None:
+                    self._liquidations.appendleft({
+                        "symbol": inst,
+                        "side": tick.get("side") or "",
+                        "price": price,
+                        "qty": tick.get("qty"),
+                        "exchange_ms": tick.get("exchange_ms"),
+                        "local_ms": tick.get("local_ms"),
+                    })
                 return
             if kind != "kline":
                 return
@@ -518,6 +627,22 @@ class MarketState:
             keys = sorted(series, reverse=True)[: max(1, int(limit))]
             return [list(series[k]) for k in keys]
 
+    def depth(self, inst_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._depth.get(inst_id)
+            return {"bids": [list(r) for r in row["bids"]],
+                    "asks": [list(r) for r in row["asks"]],
+                    "local_ms": row.get("local_ms")} if row else None
+
+    def mark(self, inst_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._marks.get(inst_id)
+            return dict(row) if row else None
+
+    def liquidations(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in list(self._liquidations)[: max(1, int(limit))]]
+
     def snapshot(self, *, now_ms: Optional[int] = None,
                  health: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         stamp = int(now_ms if now_ms is not None else _now_ms())
@@ -528,12 +653,21 @@ class MarketState:
                        for bar, series in bars.items()}
                 for inst, bars in self._klines.items()
             }
+            depth = {k: {"bids": [list(r) for r in v["bids"]],
+                         "asks": [list(r) for r in v["asks"]],
+                         "local_ms": v.get("local_ms")}
+                     for k, v in self._depth.items()}
+            marks = {k: dict(v) for k, v in self._marks.items()}
+            liquidations = [dict(r) for r in list(self._liquidations)]
         return {
             "schema_version": MARKET_SCHEMA_VERSION,
             "written_at_ms": stamp,
             "venue": "binance",
             "tickers": tickers,
             "klines": klines,
+            "depth": depth,
+            "marks": marks,
+            "liquidations": liquidations,
             "health": health or {},
         }
 
@@ -575,9 +709,7 @@ def run_stream(*, venue: str = "binance", symbols: Sequence[str],
     url = stream_url(venue, native[0])
     payload: Optional[Dict[str, Any]] = None
     if venue == "binance":
-        params = [f"{sym}@ticker" for sym in native]
-        params += [f"{sym}@kline_{iv}" for sym in native for iv in BINANCE_WS_INTERVALS.values()]
-        payload = {"method": "SUBSCRIBE", "params": params, "id": 1}
+        payload = {"method": "SUBSCRIBE", "params": binance_stream_params(native), "id": 1}
 
     def _stopped() -> bool:
         if stop is None:
