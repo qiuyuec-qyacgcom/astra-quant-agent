@@ -575,6 +575,21 @@ class DataQualityTests(_Base, unittest.TestCase):
              "vol24h": "1"}]}})
         self.assertEqual(pkg["data_quality"], "invalid")
 
+    def test_string_zero_bid_ask_falls_back_to_price_and_stays_valid(self):
+        """★ 2026-10 回归：适配器把买卖价拼成字符串 `"0"` 时，旧写法
+        `float(t.get("bidPx") or price)` **兜不住**（非空字符串是 truthy）
+        ⇒ bidPx/askPx 落成 0.0 ⇒ data_quality 恒 invalid。
+
+        币安 `/fapi/v1/ticker/24hr` **本身不含买卖价**（需 bookTicker 另取），
+        该端点缺失/限流时正是这条路径。
+        """
+        pkg = self._run(http={"/market/ticker": {"code": "0", "data": [
+            {"last": "100", "bidPx": "0", "askPx": "0", "open24h": "95",
+             "vol24h": "1"}]}})
+        self.assertGreater(pkg["bidPx"], 0, "买卖价缺失必须回退现价，不得落 0")
+        self.assertGreaterEqual(pkg["askPx"], pkg["bidPx"])
+        self.assertEqual(pkg["data_quality"], "valid")
+
     def test_too_few_rows_makes_it_invalid(self):
         pkg = self._run(candles={"15m": _candles(11), "1H": _candles(24),
                                  "4H": _candles(16)})

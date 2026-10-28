@@ -180,8 +180,16 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
             t = fetch_ticker(inst_id, venue=venue)
             if isinstance(t, dict) and t.get("last") is not None:
                 pkg["price"] = float(t.get("last", 0))
-                pkg["bidPx"] = float(t.get("bidPx", pkg["price"]) or pkg["price"])
-                pkg["askPx"] = float(t.get("askPx", pkg["price"]) or pkg["price"])
+                # ★ 2026-10：旧写法 `float(t.get("bidPx") or price)` 兜不住 **字符串 "0"**
+                #   （非空字符串在 Python 里是 truthy）⇒ bidPx/askPx 会落成 0.0，
+                #   直接让 `data_quality` 恒 invalid（六条判据要求 bidPx>0 且 askPx>=bidPx）。
+                #   币安 `/ticker/24hr` 本身不含买卖价，bookTicker 缺失时正是这条路径踩雷。
+                # 只做「缺失 → 用现价兜底」；**不修正** ask<bid（那是脏数据信号，
+                # 必须让六条判据把它判成 invalid，绝不能被兜底掩盖）。
+                _bid = float(t.get("bidPx") or 0.0)
+                _ask = float(t.get("askPx") or 0.0)
+                pkg["bidPx"] = _bid if _bid > 0 else pkg["price"]
+                pkg["askPx"] = _ask if _ask > 0 else pkg["price"]
                 op = float(t.get("open24h", 0) or 0)
                 pkg["chg24h"] = round(((pkg["price"] - op) / op * 100) if op > 0 else 0, 2)
                 pkg["vol24h"] = round(float(t.get("vol24h", 0) or 0), 2)
