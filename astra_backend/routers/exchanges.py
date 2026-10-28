@@ -441,6 +441,12 @@ def admin_multi_exchange_update(payload: MultiExchangeUpdate,
             _pb_flag = ("ASTRA_BINANCE_DEMO_EXECUTION"
                         if _pb_mode in {"demo", "sandbox", "testnet"} else "ASTRA_BINANCE_EXECUTION")
             fn_update_env({_pb_flag: "1"})
+            try:
+                # 多所设置页切到币安：同样立刻起 WS 采集（无需重启后端）。
+                from astra_backend.ws_stream_worker import notify_venue_changed
+                notify_venue_changed()
+            except Exception as exc:
+                print(f"[binance_ws] warn 切所信号发送失败（不影响保存）: {type(exc).__name__}: {exc}")
     if payload.routing_mode is not None:
         from astra_backend.exchanges import routing_policy
         if not routing_policy.save_routing_mode(payload.routing_mode):

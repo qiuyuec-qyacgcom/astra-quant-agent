@@ -148,6 +148,13 @@ async def lifespan(_: FastAPI):
         start_dashboard_background_worker()
     except Exception:
         pass
+    try:
+        # 币安 WS 常驻采集（`ASTRA_BINANCE_WS=1` 才启动；默认关闭不影响既有部署）。
+        # 开了之后 ticker/K线走 WS（零 REST 权重），快照过期仍自动回退 REST。
+        from astra_backend.ws_stream_worker import start_binance_stream_worker
+        start_binance_stream_worker()
+    except Exception as exc:      # noqa: BLE001 - 采集起不来不得影响 API 启动
+        print(f"[binance_ws] warn 启动失败（已忽略，回退 REST）: {type(exc).__name__}: {exc}")
     yield
     try:
         from astra_backend.dashboard_cache import stop_dashboard_background_worker

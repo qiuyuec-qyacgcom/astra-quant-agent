@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -34,6 +36,69 @@ OKX_PUBLIC_HOSTS = [
 # 惰性实例化：只在真正走币安时才 import/构造，避免 OKX 路径引入币安依赖开销。
 _BINANCE_EXCHANGE = None
 _BINANCE_EXCHANGE_LOCK = threading.Lock()
+
+# ── 币安 WebSocket 行情快照（常驻采集进程写、本模块读）──────────────────────
+# 目的：把 ticker / K 线从 REST 轮询搬到 WS —— **WS 不消耗 2400 权重/分钟的额度**
+# （只受限连接数与消息频率），这是币安官方对 -1003 的建议。
+# 快照缺失/过期/版本不认 ⇒ 自动回退 REST（fail-open：流断了也不至于没数据）。
+_WS_SNAPSHOT_FILE = str(Path(__file__).resolve().parents[1] / "data" / "binance_ws_stream.json")
+_WS_TICKER_TTL_S = float(os.getenv("ASTRA_BINANCE_WS_TICKER_TTL", "30") or 30.0)
+_WS_CANDLE_TTL_S = float(os.getenv("ASTRA_BINANCE_WS_CANDLE_TTL", "90") or 90.0)
+
+
+def _fmt_ws(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _ws_snapshot(max_age_s: float) -> Dict[str, Any]:
+    """读 WS 行情快照；不存在/损坏/过期/版本不认 → `{}`（调用方回退 REST）。"""
+    try:
+        from .market_stream import load_market_snapshot
+    except ImportError:                       # 从 scripts 目录直接执行时
+        try:
+            from market_stream import load_market_snapshot
+        except ImportError:
+            return {}
+    snap = load_market_snapshot(_WS_SNAPSHOT_FILE)
+    if not snap:
+        return {}
+    try:
+        written = int(snap.get("written_at_ms") or 0)
+    except (TypeError, ValueError):
+        return {}
+    if written <= 0 or (time.time() * 1000 - written) > max_age_s * 1000:
+        return {}
+    return snap
+
+
+def _ws_ticker(inst_id: str) -> Optional[Dict[str, Any]]:
+    """WS 快照里的 ticker → OKX 同形状（无则 None ⇒ 回退 REST）。"""
+    snap = _ws_snapshot(_WS_TICKER_TTL_S)
+    row = ((snap.get("tickers") or {}).get(inst_id)) if snap else None
+    if not isinstance(row, dict) or row.get("last") in (None, ""):
+        return None
+    return {
+        "instId": inst_id,
+        "last": _fmt_ws(row.get("last")),
+        "bidPx": _fmt_ws(row.get("bid")),
+        "askPx": _fmt_ws(row.get("ask")),
+        "open24h": _fmt_ws(row.get("open24h")),
+        "vol24h": _fmt_ws(row.get("vol24h")),
+        "ts": _fmt_ws(row.get("exchange_ms")),
+    }
+
+
+def _ws_candles(inst_id: str, bar: str, limit: int) -> List[List[str]]:
+    """WS 快照里的 K 线（newest-first 9 列）；**不足 limit 根就不给**，让调用方回退 REST。"""
+    need = max(1, int(limit))
+    snap = _ws_snapshot(_WS_CANDLE_TTL_S)
+    series = (((snap.get("klines") or {}).get(inst_id) or {}).get(bar)) if snap else None
+    if not isinstance(series, list):
+        return []
+    rows = [row for row in series if isinstance(row, list) and len(row) >= 9]
+    if len(rows) < need:
+        return []
+    return rows[:need]
 
 
 def _normalize_venue(venue: Optional[str]) -> Optional[str]:
@@ -263,6 +328,10 @@ def fetch_ticker(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None
     """
     v = _normalize_venue(venue)
     if v == "binance":
+        # WS 优先（零权重）；快照缺失/过期才回退 REST。
+        ws_row = _ws_ticker(inst_id)
+        if ws_row is not None:
+            return ws_row
         try:
             row = _binance_exchange().ticker(inst_id)
             return row if isinstance(row, dict) else None
@@ -539,6 +608,10 @@ def fetch_candles(
         except (TypeError, ValueError):
             limit = 45
         limit = max(1, min(limit, 1500))
+        # WS 优先（零权重）；不够 limit 根/快照过期 ⇒ 回退 REST。
+        ws_rows = _ws_candles(inst_id, bar, limit)
+        if ws_rows:
+            return closed_okx_candles(ws_rows)[:limit] if closed_only else ws_rows
         try:
             rows = _binance_exchange().candles(inst_id, bar=bar, limit=limit)
         except Exception as exc:

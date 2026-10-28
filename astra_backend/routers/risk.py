@@ -464,6 +464,12 @@ def admin_set_venue_selection(
         clear_instances()
     except Exception:
         pass
+    try:
+        # 切所即联动币安 WS 采集：切到币安立刻起流（零 REST 权重），切走立刻停。
+        from astra_backend.ws_stream_worker import notify_venue_changed
+        notify_venue_changed()
+    except Exception as exc:
+        print(f"[binance_ws] warn 切所信号发送失败（不影响切换）: {type(exc).__name__}: {exc}")
 
     audit_record("venue.selection.switch", "success", {
         "actor": actor["username"],

@@ -43,20 +43,36 @@ _BUFFER_MAXLEN = 256
 
 VENUE_ENDPOINTS: Dict[str, str] = {
     "okx": "wss://ws.okx.com:8443/ws/v5/public",
+    # 币安 USDⓈ-M：裸 socket + SUBSCRIBE 帧（单连接最多 1024 个 stream）。
+    # WS **不消耗 REST 权重**，只受连接/消息频率限制（300 连接/5min、10 msg/s）——
+    # 这正是币安官方对 -1003 的建议："Please use the websocket ... avoid polling"。
+    "binance": "wss://fstream.binance.com/ws",
 }
+
+#: 币安 WS 订阅的 K 线周期（内部写法 → 币安流后缀）。与决策链实际消费的三档对齐。
+BINANCE_WS_INTERVALS: Dict[str, str] = {"15m": "15m", "1H": "1h", "4H": "4h"}
+
+#: 行情快照（tickers + klines）的独立版本号——与既有“健康账本”v1 契约解耦，
+#: 加字段只升这个，不会让老的 `load_snapshot()`（健康）失效。
+MARKET_SCHEMA_VERSION = 1
 
 __all__ = [
     "SCHEMA_VERSION",
+    "MARKET_SCHEMA_VERSION",
     "VENUE_ENDPOINTS",
+    "BINANCE_WS_INTERVALS",
     "TickBuffer",
     "StreamHealth",
+    "MarketState",
     "parse_frame",
     "stream_url",
     "venue_symbol",
     "subscribe_payload",
     "write_snapshot",
     "load_snapshot",
+    "load_market_snapshot",
     "probe",
+    "run_stream",
 ]
 
 
@@ -85,7 +101,27 @@ def venue_symbol(venue: str, symbol: str) -> str:
     quote = parts[1] if len(parts) > 1 else "USDT"
     if venue == "okx":
         return f"{base}-{quote}-SWAP"
+    if venue == "binance":
+        # 币安流名一律小写无分隔：BTCUSDT
+        return f"{base}{quote}".lower()
     raise KeyError(f"未知场所：{venue}")
+
+
+_BINANCE_BAR_TO_INTERNAL = {v: k for k, v in BINANCE_WS_INTERVALS.items()}
+
+
+def _binance_inst(native: Any) -> str:
+    """`BTCUSDT` → `BTC-USDT-SWAP`（与适配器 `_from_symbol` 同口径）。"""
+    raw = str(native or "").strip().upper()
+    if raw.endswith("USDT") and len(raw) > 4:
+        return f"{raw[:-4]}-USDT-SWAP"
+    return raw
+
+
+def _binance_bar(interval: Any) -> str:
+    """币安流后缀 → 内部周期写法（`1h` → `1H`；未知原样返回）。"""
+    key = str(interval or "").strip().lower()
+    return _BINANCE_BAR_TO_INTERNAL.get(key, str(interval or ""))
 
 
 def stream_url(venue: str, symbol: str) -> str:
@@ -97,6 +133,11 @@ def subscribe_payload(venue: str, symbol: str) -> Optional[Dict[str, Any]]:
     """该所的订阅帧。"""
     if venue == "okx":
         return {"op": "subscribe", "args": [{"channel": "tickers", "instId": symbol}]}
+    if venue == "binance":
+        # 一条订阅帧同时拿 ticker + 三档 K 线：后续所有周期都不再打 REST。
+        params = [f"{symbol}@ticker"]
+        params += [f"{symbol}@kline_{iv}" for iv in BINANCE_WS_INTERVALS.values()]
+        return {"method": "SUBSCRIBE", "params": params, "id": 1}
     raise KeyError(f"未知场所：{venue}")
 
 
@@ -156,6 +197,51 @@ def parse_frame(venue: str, raw: Any, *, now_ms: Optional[int] = None) -> Dict[s
                     tick["ask"] = _num(row.get("askPx"))
                     out["ticks"].append(tick)
 
+        elif venue == "binance":
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            # 订阅应答：{"result": null, "id": 1}
+            if "id" in payload and "e" not in payload and "e" not in data:
+                out["control"] = "binance subscribed"
+                return out
+            if payload.get("code") not in (None, 0) or (payload.get("msg") and "e" not in data):
+                return {"ticks": [], "control": None,
+                        "error": f"binance code={payload.get('code')} msg={payload.get('msg')}"}
+            event = str(data.get("e") or "")
+            if event == "24hrTicker":
+                tick = _tick("binance", _binance_inst(data.get("s")), data.get("c"),
+                             kind="ticker", exchange_ms=data.get("E"), now_ms=now_ms)
+                if tick is None:
+                    out["error"] = "binance 24hrTicker 帧里没有可解析的 last"
+                else:
+                    tick["bid"] = _num(data.get("b"))
+                    tick["ask"] = _num(data.get("a"))
+                    tick["open24h"] = _num(data.get("o"))
+                    tick["vol24h"] = _num(data.get("v"))
+                    out["ticks"].append(tick)
+            elif event == "kline":
+                k = data.get("k") if isinstance(data.get("k"), dict) else {}
+                close_px = _num(k.get("c"))
+                if close_px is None:
+                    out["error"] = "binance kline 帧里没有可解析的 close"
+                else:
+                    out["ticks"].append({
+                        "venue": "binance",
+                        "symbol": _binance_inst(k.get("s")),
+                        "kind": "kline",
+                        "bar": _binance_bar(k.get("i")),
+                        "open_ms": int(k.get("t") or 0),
+                        "open": _num(k.get("o")),
+                        "high": _num(k.get("h")),
+                        "low": _num(k.get("l")),
+                        "close": close_px,
+                        "vol": _num(k.get("v")),
+                        "quote_vol": _num(k.get("q")),
+                        "closed": bool(k.get("x")),
+                        "exchange_ms": data.get("E"),
+                        "local_ms": int(now_ms if now_ms is not None else _now_ms()),
+                    })
+            else:
+                out["control"] = f"binance {event or 'unknown'}"
         else:
             return {"ticks": [], "control": None, "error": f"未知场所：{venue}"}
     except Exception as exc:          # 解析器自身异常也必须留痕，绝不上抛
@@ -367,15 +453,198 @@ def probe(*, venues: Sequence[str] = ("okx",),
     return snap
 
 
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+class MarketState:
+    """常驻采集进程的行情状态：tickers + 三档 K 线（都按标的有界）。
+
+    - ticker：每次覆盖（只需最新一条）；
+    - kline：按 **bar 起点** upsert；每个 (标的, 周期) 只留最近 `max_bars` 根，
+      输出 **newest-first 的 9 列**（与 OKX/适配器同形状，确认列在 index 8），
+      让 `market_data_service.fetch_candles()` 可以零改动地直接消费。
+    """
+
+    def __init__(self, max_bars: int = 240) -> None:
+        self._lock = threading.Lock()
+        self._max_bars = max(1, int(max_bars))
+        self._tickers: Dict[str, Dict[str, Any]] = {}
+        self._klines: Dict[str, Dict[str, Dict[int, List[str]]]] = {}
+
+    def update(self, tick: Dict[str, Any]) -> None:
+        kind = str(tick.get("kind") or "")
+        inst = str(tick.get("symbol") or "")
+        if not inst:
+            return
+        with self._lock:
+            if kind == "ticker":
+                self._tickers[inst] = {
+                    "last": tick.get("price"),
+                    "bid": tick.get("bid"),
+                    "ask": tick.get("ask"),
+                    "open24h": tick.get("open24h"),
+                    "vol24h": tick.get("vol24h"),
+                    "exchange_ms": tick.get("exchange_ms"),
+                    "local_ms": tick.get("local_ms"),
+                }
+                return
+            if kind != "kline":
+                return
+            bar = str(tick.get("bar") or "")
+            open_ms = int(tick.get("open_ms") or 0)
+            close_px = tick.get("close")
+            if not bar or open_ms <= 0 or close_px is None:
+                return
+            quote = tick.get("quote_vol")
+            series = self._klines.setdefault(inst, {}).setdefault(bar, {})
+            series[open_ms] = [
+                str(open_ms), _text(tick.get("open")), _text(tick.get("high")),
+                _text(tick.get("low")), _text(close_px), _text(tick.get("vol")),
+                _text(quote), _text(quote), "1" if tick.get("closed") else "0",
+            ]
+            if len(series) > self._max_bars:
+                for old in sorted(series)[: len(series) - self._max_bars]:
+                    series.pop(old, None)
+
+    def ticker(self, inst_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._tickers.get(inst_id)
+            return dict(row) if row else None
+
+    def candles(self, inst_id: str, bar: str, limit: int = 45) -> List[List[str]]:
+        with self._lock:
+            series = ((self._klines.get(inst_id) or {}).get(bar)) or {}
+            keys = sorted(series, reverse=True)[: max(1, int(limit))]
+            return [list(series[k]) for k in keys]
+
+    def snapshot(self, *, now_ms: Optional[int] = None,
+                 health: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        stamp = int(now_ms if now_ms is not None else _now_ms())
+        with self._lock:
+            tickers = {k: dict(v) for k, v in self._tickers.items()}
+            klines = {
+                inst: {bar: [list(series[k]) for k in sorted(series, reverse=True)]
+                       for bar, series in bars.items()}
+                for inst, bars in self._klines.items()
+            }
+        return {
+            "schema_version": MARKET_SCHEMA_VERSION,
+            "written_at_ms": stamp,
+            "venue": "binance",
+            "tickers": tickers,
+            "klines": klines,
+            "health": health or {},
+        }
+
+
+def load_market_snapshot(path: str) -> Dict[str, Any]:
+    """读行情快照；缺失/损坏/**版本不认识**一律 `{}`（调用方据此回退 REST）。"""
+    try:
+        with open(os.fspath(path), "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema_version") != MARKET_SCHEMA_VERSION:
+        return {}
+    return payload
+
+
+def run_stream(*, venue: str = "binance", symbols: Sequence[str],
+               snapshot_path: Optional[str] = None,
+               flush_seconds: float = 2.0, max_bars: int = 240,
+               reconnect_backoff: float = 3.0,
+               connect_factory: Any = None, stop: Any = None,
+               now: Any = _now_ms,
+               max_rounds: Optional[int] = None) -> Dict[str, Any]:
+    """**常驻**采集：连上 → 一次性订阅全部标的(ticker + 三档 K 线) → 收帧 → 定期落快照。
+
+    - 断线自动重连（有界退避）；`stop` 可以是 `threading.Event` 或零参可调用；
+    - 空闲超时（`recv` 的 `TimeoutError`）**不算错误**，只继续等；
+    - 其它异常一律记健康账本 + `note_reconnect`，绝不静默退出；
+    - `connect_factory` / `max_rounds` 供测试注入，绝不真出网。
+    """
+    if connect_factory is None:                      # 延迟导入：import 本模块不拉网络栈
+        from websockets.sync.client import connect as connect_factory  # type: ignore[no-redef]
+
+    health = StreamHealth()
+    state = MarketState(max_bars=max_bars)
+    native = [venue_symbol(venue, s) for s in (symbols or []) if str(s or "").strip()]
+    if not native:
+        return state.snapshot(now_ms=now(), health=health.snapshot(now_ms=now()))
+    url = stream_url(venue, native[0])
+    payload: Optional[Dict[str, Any]] = None
+    if venue == "binance":
+        params = [f"{sym}@ticker" for sym in native]
+        params += [f"{sym}@kline_{iv}" for sym in native for iv in BINANCE_WS_INTERVALS.values()]
+        payload = {"method": "SUBSCRIBE", "params": params, "id": 1}
+
+    def _stopped() -> bool:
+        if stop is None:
+            return False
+        try:
+            return bool(stop.is_set()) if hasattr(stop, "is_set") else bool(stop())
+        except Exception:
+            return False
+
+    rounds = 0
+    while not _stopped():
+        if max_rounds is not None and rounds >= max_rounds:
+            break
+        rounds += 1
+        last_flush = time.monotonic()
+        try:
+            with connect_factory(url, open_timeout=10, close_timeout=3) as ws:
+                if payload is not None:
+                    ws.send(json.dumps(payload))
+                while not _stopped():
+                    try:
+                        raw = ws.recv(timeout=1.0)
+                    except TimeoutError:
+                        raw = None                     # 空闲 = 正常，继续等
+                    if raw is not None:
+                        parsed = parse_frame(venue, raw, now_ms=now())
+                        for tick in parsed["ticks"]:
+                            state.update(tick)
+                        health.note_frame(venue, ticks=len(parsed["ticks"]),
+                                          error=parsed["error"], now_ms=now())
+                    if snapshot_path and (time.monotonic() - last_flush) >= flush_seconds:
+                        write_snapshot(snapshot_path,
+                                       state.snapshot(now_ms=now(),
+                                                      health=health.snapshot(now_ms=now())))
+                        last_flush = time.monotonic()
+        except Exception as exc:
+            health.note_error(venue, f"{type(exc).__name__}: {exc}", now_ms=now())
+            health.note_reconnect(venue)
+            if _stopped():
+                break
+            time.sleep(min(30.0, max(0.5, float(reconnect_backoff))))
+    snap = state.snapshot(now_ms=now(), health=health.snapshot(now_ms=now()))
+    if snapshot_path:
+        write_snapshot(snapshot_path, snap)
+    return snap
+
+
 def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="ASTRA 公共行情流只读探测（不常驻、不下单）")
-    parser.add_argument("--probe", action="store_true", help="连接 OKX 公共流收若干秒")
+    parser.add_argument("--probe", action="store_true", help="连接公共流收若干秒（只读探测）")
+    parser.add_argument("--run", action="store_true",
+                        help="常驻采集：订阅 --symbols 的 ticker + 15m/1H/4H K 线，落 --snapshot")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--symbol", default="BTC-USDT-SWAP")
+    parser.add_argument("--symbols", default="", help="逗号分隔的规范标的（OKX 形态）")
     parser.add_argument("--venues", default="okx")
     parser.add_argument("--snapshot", default="")
+    parser.add_argument("--flush", type=float, default=2.0)
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.run:
+        syms = [s.strip() for s in (args.symbols or args.symbol).split(",") if s.strip()]
+        print(json.dumps(
+            run_stream(venue=args.venues.strip() or "binance", symbols=syms,
+                       snapshot_path=args.snapshot or None, flush_seconds=args.flush),
+            ensure_ascii=False, indent=2))
+        return 0
     if not args.probe:
         parser.print_help()
         return 0
