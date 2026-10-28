@@ -438,8 +438,12 @@ class StreamHealth:
             }
 
 
-def write_snapshot(path: str, payload: Dict[str, Any]) -> bool:
-    """原子写快照（tmp + `os.replace`）；**绝不抛异常**，失败返回 False。"""
+def write_snapshot(path: str, payload: Dict[str, Any], *, compact: bool = False) -> bool:
+    """原子写快照（tmp + `os.replace`）；**绝不抛异常**，失败返回 False。
+
+    `compact=True` 用无缩进 JSON —— 行情快照（含 240 根 K 线 × 多标的）用缩进会膨胀
+    2~3 倍，而它**每 2 秒被多个进程解析**，体积直接影响读侧延迟。
+    """
     try:
         target = os.fspath(path)
         parent = os.path.dirname(target)
@@ -448,7 +452,10 @@ def write_snapshot(path: str, payload: Dict[str, Any]) -> bool:
         fd, tmp = tempfile.mkstemp(dir=parent or ".", prefix=".ms-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2)
+                if compact:
+                    json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+                else:
+                    json.dump(payload, fh, ensure_ascii=False, indent=2)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, target)
@@ -743,7 +750,8 @@ def run_stream(*, venue: str = "binance", symbols: Sequence[str],
                     if snapshot_path and (time.monotonic() - last_flush) >= flush_seconds:
                         write_snapshot(snapshot_path,
                                        state.snapshot(now_ms=now(),
-                                                      health=health.snapshot(now_ms=now())))
+                                                      health=health.snapshot(now_ms=now())),
+                                       compact=True)
                         last_flush = time.monotonic()
         except Exception as exc:
             health.note_error(venue, f"{type(exc).__name__}: {exc}", now_ms=now())
@@ -753,7 +761,7 @@ def run_stream(*, venue: str = "binance", symbols: Sequence[str],
             time.sleep(min(30.0, max(0.5, float(reconnect_backoff))))
     snap = state.snapshot(now_ms=now(), health=health.snapshot(now_ms=now()))
     if snapshot_path:
-        write_snapshot(snapshot_path, snap)
+        write_snapshot(snapshot_path, snap, compact=True)
     return snap
 
 

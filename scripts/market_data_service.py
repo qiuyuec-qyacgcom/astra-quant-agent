@@ -50,16 +50,32 @@ def _fmt_ws(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+_WS_SNAPSHOT_CACHE: Dict[str, Any] = {"key": None, "snap": {}}
+
+
 def _ws_snapshot(max_age_s: float) -> Dict[str, Any]:
-    """读 WS 行情快照；不存在/损坏/过期/版本不认 → `{}`（调用方回退 REST）。"""
+    """读 WS 行情快照；不存在/损坏/过期/版本不认 → `{}`（调用方回退 REST）。
+
+    ★ 按 `(mtime_ns, size)` **缓存解析结果**：快照含 240 根 K 线 × 多标的 + 20 档深度，
+    每 2 秒刷新一次；若每次取数都 `json.load`，单次就是几 MB 的反序列化，
+    下单前锚价、因子引擎逐币取数都会被它拖慢。这里只在**文件真变了**时解析一次。
+    """
     try:
-        from .market_stream import load_market_snapshot
-    except ImportError:                       # 从 scripts 目录直接执行时
+        stat = os.stat(_WS_SNAPSHOT_FILE)
+    except OSError:
+        return {}
+    stat_key = (stat.st_mtime_ns, stat.st_size)
+    if _WS_SNAPSHOT_CACHE.get("key") != stat_key:
         try:
-            from market_stream import load_market_snapshot
-        except ImportError:
-            return {}
-    snap = load_market_snapshot(_WS_SNAPSHOT_FILE)
+            from .market_stream import load_market_snapshot
+        except ImportError:                   # 从 scripts 目录直接执行时
+            try:
+                from market_stream import load_market_snapshot
+            except ImportError:
+                return {}
+        _WS_SNAPSHOT_CACHE["key"] = stat_key
+        _WS_SNAPSHOT_CACHE["snap"] = load_market_snapshot(_WS_SNAPSHOT_FILE) or {}
+    snap = _WS_SNAPSHOT_CACHE.get("snap") or {}
     if not snap:
         return {}
     try:
@@ -350,17 +366,24 @@ def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Op
 # 1. Ticker & Bulk Tickers
 # ---------------------------------------------------------------------------
 
-def fetch_ticker(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def fetch_ticker(inst_id: str, timeout: float = 3.5, venue: Optional[str] = None,
+                 live: bool = False) -> Optional[Dict[str, Any]]:
     """Fetch one instrument ticker: www→aws 双域 REST 直连，失败返回 None。
 
     venue="binance" 时走币安公开行情（返回结构已与 OKX 对齐），其余走 OKX。
+
+    `live=True`：**强制实时 REST**，不读 WS 快照。下单锚价必须用它——
+    WS 快照最多可能旧 1 秒，而穿价闸（默认 0.5%）是拿锚价做比较的，
+    剧烈波动时旧锚价会把合法的「回踩挂单」误判成穿价幻觉而拒单。
+    一次调用权重 2，下单是 15 分钟级事件，代价可忽略。
     """
     v = _normalize_venue(venue)
     if v == "binance":
-        # WS 优先（零权重）；快照缺失/过期才回退 REST。
-        ws_row = _ws_ticker(inst_id)
-        if ws_row is not None:
-            return ws_row
+        # WS 优先（零权重）；`live=True` 或快照缺失/过期才回退 REST。
+        if not live:
+            ws_row = _ws_ticker(inst_id)
+            if ws_row is not None:
+                return ws_row
         try:
             row = _binance_exchange().ticker(inst_id)
             return row if isinstance(row, dict) else None

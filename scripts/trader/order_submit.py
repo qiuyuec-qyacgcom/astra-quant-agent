@@ -213,7 +213,10 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
     try:
         # 双所改造：现价锚定按目标所取——旧实现 `fetch_ticker(inst_id)` 恒走 OKX，
         # 币安独有标的（OKX 无此币）会拿不到现价 → 市价单被「现价不可用」误拒。
-        _tick_last_raw = (fetch_ticker(inst_id, venue=target_venue) or {}).get("last")
+        # ★ `live=True`：锚价**必须实时**。WS 快照最多旧 1 秒，而下方穿价闸（默认
+        #   0.5%）是拿锚价做比较的——剧烈波动时旧锚价会把合法的回踩挂单误判成
+        #   「穿价幻觉」而拒单。一次调用权重 2，下单是 15 分钟级事件，代价可忽略。
+        _tick_last_raw = (fetch_ticker(inst_id, venue=target_venue, live=True) or {}).get("last")
         if _tick_last_raw:
             _anchor_last = float(_tick_last_raw)
     except Exception as _ae:

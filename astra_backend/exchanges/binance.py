@@ -307,7 +307,10 @@ class BinanceExchange:
                 -1003,
                 f"Binance IP still banned for {int(_remaining)}s（本地熔断，已停止继续请求）",
             )
-        _throttle_request()
+        # 限流只对**读**生效：下单/撤单/改保护腿是延迟敏感路径（且走的是币安独立的
+        # 订单频率限额，不在 2400 权重池里），不能被 0.1s 间隔拖慢。
+        if not mutate:
+            _throttle_request()
         try:
             response = self.session.request(
                 method,
