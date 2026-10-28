@@ -444,6 +444,13 @@ def fetch_binance_long_short_ratio(ccy: str) -> dict:
     """
     c = ccy.upper()
     symbol = f"{c}USDT"
+    # 封禁熔断：裸 urllib 不走适配器，封禁期内继续请求会延长封禁。
+    try:
+        from astra_backend.exchanges.binance import _ban_remaining_seconds
+        if _ban_remaining_seconds() > 0:
+            return None
+    except Exception:
+        pass
     url = ("https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
            f"?symbol={symbol}&period=1h&limit=1")
     for attempt in range(2):

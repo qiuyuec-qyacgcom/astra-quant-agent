@@ -358,16 +358,31 @@ def admin_multi_exchange_status(x_astra_admin_token: str | None = Header(default
         health["venues"]["binance"] = {}
     binance_h = health["venues"]["binance"]
     binance_h["testnet"] = bool(okx_env.simulated)
+    # ★ 2026-10：旧实现**每次调用都现场诊断** `/fapi/v3/account`（权重 5）——页面一刷新
+    #   就多打一次，是持续烧权重的元凶之一。改为「无结果 / 超过 180s」才诊断。
+    _bin_stale = True
     try:
-        from astra_backend.exchanges.diagnostics import diagnose_venue_connection
-        binance_diag = diagnose_venue_connection("binance", okx_env.mode, timeout=2.5)
-        if binance_diag.get("latency_ms"):
-            binance_h["avg_ms"] = binance_diag["latency_ms"]
-        binance_h["connected"] = bool(binance_diag.get("ok"))
-        binance_h["mode"] = binance_diag.get("mode")
+        from datetime import datetime as _dt, timezone as _tz
+        _bin_at = str(binance_h.get("updated_utc") or "")
+        if _bin_at:
+            _bin_dt = _dt.fromisoformat(_bin_at.replace(" ", "T")).replace(tzinfo=_tz.utc)
+            _bin_stale = (_dt.now(_tz.utc) - _bin_dt).total_seconds() > 180
+        if binance_h.get("connected") is None:
+            _bin_stale = True
     except Exception:
-        # 币安诊断失败不阻断 OKX 主流程；保持已读到的旧值（若有）
-        pass
+        _bin_stale = True
+    if _bin_stale:
+        try:
+            from astra_backend.exchanges.diagnostics import diagnose_venue_connection
+            binance_diag = diagnose_venue_connection("binance", okx_env.mode, timeout=2.5)
+            if binance_diag.get("latency_ms"):
+                binance_h["avg_ms"] = binance_diag["latency_ms"]
+            binance_h["connected"] = bool(binance_diag.get("ok"))
+            binance_h["mode"] = binance_diag.get("mode")
+            binance_h["updated_utc"] = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            # 币安诊断失败不阻断 OKX 主流程；保持已读到的旧值（若有）
+            pass
 
     from astra_backend.exchanges import routing_policy
     pref = routing_policy.load_preferred_venue()

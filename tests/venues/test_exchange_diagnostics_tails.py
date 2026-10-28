@@ -156,5 +156,43 @@ class ExchangeDiagnosticsTailsTests(unittest.TestCase):
         self.assertIn("API Key does not exist", res["message"])
 
 
+class BinanceBanCircuitBreakerTests(unittest.TestCase):
+    """币安封禁期内，诊断探针必须**零出网**。
+
+    背景（2026-10 实测）：诊断探针绕过适配器直接 urlopen，不受限流/熔断约束；
+    封禁期内继续请求会让币安**延长封禁**（07:52 → 10:43 就是这么来的）。
+    """
+
+    def tearDown(self):
+        from astra_backend.exchanges import binance as _b
+        _b._BANNED_UNTIL_MS = 0
+
+    def test_banned_binance_returns_without_any_request(self):
+        import time
+        from astra_backend.exchanges import binance as _b
+        from astra_backend.exchanges.diagnostics import diagnose_venue_connection
+
+        _b._BANNED_UNTIL_MS = int((time.time() + 300) * 1000)
+        with patch("urllib.request.urlopen",
+                   side_effect=AssertionError("封禁期内不得出网")):
+            out = diagnose_venue_connection("binance", "live")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["mode"], "banned")
+        self.assertIn("封禁", out["message"])
+
+    def test_injected_http_client_bypasses_the_breaker(self):
+        """单元测试用的 `http_client` 注入路径不受熔断影响（否则测试无法封闭）。"""
+        import time
+        from astra_backend.exchanges import binance as _b
+        from astra_backend.exchanges.diagnostics import diagnose_venue_connection
+
+        _b._BANNED_UNTIL_MS = int((time.time() + 300) * 1000)
+        client = MagicMock(return_value=(200, {"totalWalletBalance": "1"}, {}))
+        out = diagnose_venue_connection("binance", "live",
+                                        api_key="k", secret_key="s", http_client=client)
+        self.assertTrue(out["ok"])
+        client.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

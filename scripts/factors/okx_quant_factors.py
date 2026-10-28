@@ -187,6 +187,13 @@ def _binance_get(path: str, params: Optional[Dict[str, Any]] = None,
         hit = _cache_get(cache_key, ttl)
         if hit is not None:
             return hit
+    # 封禁熔断：本函数是**裸 urllib**（绕过适配器限流），封禁期内继续请求会延长封禁。
+    try:
+        from astra_backend.exchanges.binance import _ban_remaining_seconds
+        if _ban_remaining_seconds() > 0:
+            return None
+    except Exception:
+        pass
     from urllib.parse import urlencode
     url = _BINANCE_FAPI + path + (("?" + urlencode(params)) if params else "")
     for _ in range(2):

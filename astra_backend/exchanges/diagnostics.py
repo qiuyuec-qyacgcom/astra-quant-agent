@@ -108,6 +108,27 @@ def diagnose_venue_connection(
 
     has_credentials = bool(ak and sk)
 
+    # ★ 2026-10：诊断探针**绕过适配器**直接 urlopen，因此必须复用适配器的封禁状态。
+    #   否则封禁期间每个探针仍继续打币安，而币安对「封禁期内继续请求」会**延长封禁**
+    #   —— 这正是封禁从 07:52 一路延到 10:43 的成因。
+    if http_client is None:
+        try:
+            from .binance import _ban_remaining_seconds
+            _ban_left = float(_ban_remaining_seconds())
+        except Exception:
+            _ban_left = 0.0
+        if _ban_left > 0:
+            return {
+                "ok": False,
+                "venue": v,
+                "environment": env,
+                "authenticated": False,
+                "mode": "banned",
+                "latency_ms": None,
+                "message": f"{v.upper()} IP 仍被封禁 {int(_ban_left)}s（本地熔断，未发起请求）",
+                "details": {"banned_remaining_s": int(_ban_left)},
+            }
+
     # 1. 零凭证情况：回退为公共端点网络连通性测试
     if not has_credentials:
         return _diagnose_public_ping(v, env, caller, timeout)

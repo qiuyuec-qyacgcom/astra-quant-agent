@@ -102,6 +102,13 @@ _BINANCE_FAPI = "https://fapi.binance.com"
 
 
 def _bn_get(path: str, params: Dict[str, Any], timeout: float) -> Any:
+    # 封禁熔断：裸 urllib 不走适配器，封禁期内继续请求会延长封禁。
+    try:
+        from astra_backend.exchanges.binance import _ban_remaining_seconds
+        if _ban_remaining_seconds() > 0:
+            return None
+    except Exception:
+        pass
     from urllib.parse import urlencode
     url = _BINANCE_FAPI + path + "?" + urlencode(params)
     req = urllib.request.Request(url, headers=_HEADERS)
