@@ -18,8 +18,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import math
+import os
 import re
 import secrets
+import threading
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
@@ -48,6 +50,55 @@ ORDER_MAX_AGE_MS = 15 * 60 * 1000
 UNKNOWN_MUTATE_CODES = {-1000, -1006, -1007}
 CLIENT_ID_RE = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
 INST_RE = re.compile(r"^([A-Z0-9]+)-USDT-SWAP$")
+
+# ── 客户端限流 + 封禁熔断（2026-10 实测）────────────────────────────────────
+# 币安 -1003：`Way too many requests; IP(x) banned until <ms>.`
+# 旧实现：既无客户端间隔、也无封禁记忆 ⇒ 一旦被封，**每轮周期仍继续打满**，
+# 结果是主脑在相位 1 直接 abort（`unable to verify exchange positions`），
+# 决策文件永不更新。这里补两道闸：
+#   1) 进程内最小请求间隔（默认 0.1s ≈ 600/min，远低于 2400/min）；
+#   2) 封禁熔断：解析 `banned until <ms>`，到期前**直接拒绝发请求**（不再烧配额）。
+_MIN_REQUEST_INTERVAL = max(0.0, float(os.getenv("ASTRA_BINANCE_MIN_INTERVAL", "0.1") or 0.0))
+_THROTTLE_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
+_BAN_LOCK = threading.Lock()
+_BANNED_UNTIL_MS = 0
+_BAN_PATTERN = re.compile(r"banned until\s+(\d{10,19})", re.IGNORECASE)
+
+
+def _throttle_request() -> None:
+    """全局最小请求间隔（进程内串行化）。"""
+    global _LAST_REQUEST_AT
+    if _MIN_REQUEST_INTERVAL <= 0:
+        return
+    with _THROTTLE_LOCK:
+        wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _LAST_REQUEST_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_REQUEST_AT = time.monotonic()
+
+
+def _ban_remaining_seconds() -> float:
+    """距封禁解除剩余秒数（0 = 未封禁）。"""
+    with _BAN_LOCK:
+        if _BANNED_UNTIL_MS <= 0:
+            return 0.0
+        return max(0.0, (_BANNED_UNTIL_MS - time.time() * 1000) / 1000.0)
+
+
+def _note_ban(message: str) -> None:
+    """从 -1003 文案解析 `banned until <ms>`，记录/延长封禁截止时刻。"""
+    global _BANNED_UNTIL_MS
+    match = _BAN_PATTERN.search(str(message or ""))
+    if not match:
+        return
+    try:
+        until = int(match.group(1))
+    except (TypeError, ValueError):
+        return
+    with _BAN_LOCK:
+        if until > _BANNED_UNTIL_MS:
+            _BANNED_UNTIL_MS = until
 GROUP_RE = re.compile(r"^R20G([0-9a-f]{12})([A-Z]{2})$")
 BAR_INTERVALS = {
     "1m": "1m",
@@ -249,6 +300,14 @@ class BinanceExchange:
             query = urlencode(payload)
             headers = {}
         url = self._base_url() + path + (f"?{query}" if query else "")
+        # 封禁熔断：IP 仍被封期间直接拒绝发请求（不烧配额、不把封禁越拖越长）
+        _remaining = _ban_remaining_seconds()
+        if _remaining > 0:
+            raise BinanceAPIError(
+                -1003,
+                f"Binance IP still banned for {int(_remaining)}s（本地熔断，已停止继续请求）",
+            )
+        _throttle_request()
         try:
             response = self.session.request(
                 method,
@@ -264,6 +323,8 @@ class BinanceExchange:
             raise RuntimeError(message) from exc
         status = int(getattr(response, "status_code", 0) or 0)
         if status == 429 and not signed and not mutate and retry_429:
+            # 429 体里可能已带 `banned until <ms>`：先记账，重试会被上面的熔断直接拦下。
+            _note_ban(getattr(response, "text", "") or "")
             retry_after = getattr(response, "headers", {}) or {}
             raw_wait = retry_after.get("Retry-After") or retry_after.get("retry-after") or 1
             try:
@@ -291,6 +352,9 @@ class BinanceExchange:
         if isinstance(payload_json, dict) and isinstance(payload_json.get("code"), int) and payload_json["code"] < 0:
             message = _sanitize(payload_json.get("msg") or "Binance request failed", self._api_key(), self._secret())
             code = int(payload_json["code"])
+            if code == -1003:
+                # IP 限流封禁：记录截止时刻，后续请求由熔断直接拒绝
+                _note_ban(message)
             if signed and code == -1021 and retry_time:
                 self._sync_time_offset(force=True)
                 return self._request(

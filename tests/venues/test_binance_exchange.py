@@ -924,7 +924,9 @@ class BinanceExchangeTests(unittest.TestCase):
             rows = self._exchange().candles(INST, "15m", 24)
         self.assertEqual(rows[0][4], "9")
         self.assertEqual(state["n"], 2)
-        slept.assert_called_once()
+        # 429 的退避必须按 Retry-After 发生。客户端限流（_throttle_request）也会调用
+        # time.sleep ⇒ 不能再断言「恰好一次」，改为断言这次重试的退避参数。
+        slept.assert_any_call(0.2)
 
 
     def test_symbol_filters_use_exact_match_not_first_row(self):

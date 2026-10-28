@@ -2,6 +2,7 @@
 Web Dashboard Application Module
 """
 from __future__ import annotations
+import copy
 from typing import Any
 from astra_backend.time_utils import beijing_text
 from astra_backend.dashboard_payload.collect import (  # noqa: E402
@@ -216,6 +217,48 @@ SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="dashboard_
 _BG_WORKER_THREAD = None
 _BG_WORKER_RUNNING = False
 
+# ── 币安账户读 TTL 缓存（2026-10：-1003 封 IP 的主因）────────────────────
+# 仪表盘缓存每 2 秒重算一次。若每次都打币安私有三读：
+#   /fapi/v3/account(权重 5) + /fapi/v3/positionRisk(5) + /fapi/v1/openOrders(40)
+#   = 50 权重/次 ⇒ 30 次/分 ⇒ 1500 权重/分钟
+# 叠加因子引擎（约 450/分钟）与 K 线轮询，必然越过币安 2400 权重/分钟上限 ⇒
+# -1003「IP banned」。账户/持仓/挂单对**面板展示**只需秒级新鲜，故按 TTL 复用；
+# 交易侧不走这条路径（它读自己的适配器实例，需要实时）。
+_BINANCE_ACCT_TTL = max(1.0, float(os.getenv("ASTRA_BINANCE_ACCOUNT_TTL", "15") or 15.0))
+_BINANCE_ACCT_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached_binance_read(key: str, fn):
+    now = time.monotonic()
+    hit = _BINANCE_ACCT_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _BINANCE_ACCT_TTL:
+        return copy.deepcopy(hit[1])
+    value = fn()
+    _BINANCE_ACCT_CACHE[key] = (now, value)
+    return copy.deepcopy(value)
+
+
+class _CachedBinanceExchange:
+    """把币安账户三读按 TTL 缓存（仅面板路径使用，避免打爆权重）。"""
+
+    def __init__(self, exchange) -> None:
+        self._ex = exchange
+
+    def balance(self):
+        return _cached_binance_read("balance", self._ex.balance)
+
+    def positions(self, *args, **kwargs):
+        return _cached_binance_read("positions", lambda: self._ex.positions(*args, **kwargs))
+
+    def open_orders(self, *args, **kwargs):
+        return _cached_binance_read("open_orders", lambda: self._ex.open_orders(*args, **kwargs))
+
+
+class _CachedBinanceAdapter:
+    def __init__(self, adapter) -> None:
+        self.exchange = _CachedBinanceExchange(getattr(adapter, "exchange", adapter))
+
+
 def _dashboard_background_worker_loop():
     global _BG_WORKER_RUNNING
     # Initial small pause so server boots cleanly
@@ -292,7 +335,7 @@ def update_cache_cycle():
         try:
             from astra_backend.exchanges.registry import get_adapter
             from scripts.okx_runtime import current_environment
-            _bn_adapter = get_adapter("binance", current_environment().mode)
+            _bn_adapter = _CachedBinanceAdapter(get_adapter("binance", current_environment().mode))
         except Exception as exc:
             source_errors.append(f"binance adapter: {exc}")
         try:
