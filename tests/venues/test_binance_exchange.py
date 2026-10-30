@@ -227,6 +227,65 @@ def install_defaults(session: FakeSession, *, hedge: bool = True, positions=None
     return state
 
 
+class TradFiPerpSpecTests(unittest.TestCase):
+    """2026-10-31 实盘：`[INTW] 币安保护单缺失且补挂失败: Instrument is not a USDT
+    perpetual contract`。
+
+    INTWUSDT 是币安 USDⓈ-M 的 **TradFi 永续**（跟踪 2× INTC ETF），但 exchangeInfo
+    里 `contractType` / `quoteAsset` 未必是教科书式 `PERPETUAL` / `USDT`。开仓闸
+    （必须真永续）不能松；但**给已存在的持仓挂止盈止损 / 平仓**必须放行 ——
+    拒绝的后果是余仓只剩本地机械止损。
+    """
+
+    @staticmethod
+    def _row(**over):
+        row = {
+            "symbol": "INTWUSDT", "contractType": "PERPETUAL_DELIVERING",
+            "quoteAsset": "USDT", "marginAsset": "USDT", "status": "TRADING",
+            "baseAsset": "INTW", "underlyingType": "INDEX",
+            "filters": [
+                {"filterType": "LOT_SIZE", "stepSize": "0.01", "minQty": "0.01"},
+                {"filterType": "PRICE_FILTER", "tickSize": "0.01", "minPrice": "0.01"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            ],
+        }
+        row.update(over)
+        return row
+
+    def _exchange(self, row):
+        session = FakeSession()
+        session.on("GET", "/fapi/v1/exchangeInfo", {"symbols": [row]})
+        return BinanceExchange(FakeEnv("live"), session=session)
+
+    def test_protection_and_close_paths_align_even_if_contract_type_is_odd(self):
+        ex = self._exchange(self._row())
+        self.assertEqual(ex._align_qty("INTW-USDT-SWAP", "1.239", relaxed=True), "1.23")
+        self.assertEqual(ex._align_price("INTW-USDT-SWAP", "30.649", relaxed=True), "30.64")
+
+    def test_entry_path_still_refuses_a_non_perpetual(self):
+        ex = self._exchange(self._row())
+        with self.assertRaises(ValueError) as ctx:
+            ex._align_qty("INTW-USDT-SWAP", "1")          # 严格档（开仓用）
+        self.assertIn("contractType='PERPETUAL_DELIVERING'", str(ctx.exception),
+                      "报错必须带出实际字段值，否则无法排障")
+
+    def test_missing_quote_asset_falls_back_to_margin_asset(self):
+        ex = self._exchange(self._row(quoteAsset=""))
+        self.assertEqual(ex._align_qty("INTW-USDT-SWAP", "2", relaxed=True), "2")
+
+    def test_still_refuses_when_the_contract_is_not_usd_margined(self):
+        ex = self._exchange(self._row(quoteAsset="USDC", marginAsset="USDC"))
+        with self.assertRaises(ValueError):
+            ex._align_qty("INTW-USDT-SWAP", "2", relaxed=True)
+
+    def test_relaxed_lookup_does_not_poison_the_entry_gate(self):
+        """放宽档缓存必须与开仓档隔离（否则一次保护调用会把开仓闸悄悄放开）。"""
+        ex = self._exchange(self._row())
+        self.assertEqual(ex._align_qty("INTW-USDT-SWAP", "2", relaxed=True), "2")
+        with self.assertRaises(ValueError):
+            ex._align_qty("INTW-USDT-SWAP", "2")
+
+
 class BinanceExchangeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.session = FakeSession()

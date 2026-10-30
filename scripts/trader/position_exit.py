@@ -372,9 +372,15 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         _bn_ok, _bn_detail = _binance_protection_state(
             binance_rest, inst_id, _pos_side,
             tp_px=_tp2_px or float(t["takeProfitPx"]), sl_px=hard_stop_px, pos_sz=pos_sz)
+        # 同一异常**只在首次/换样时吼一声**：不可修复的保护缺失（例如合约在
+        # exchangeInfo 里字段不全）会每 15 分钟原样复现，逐轮刷同一条动作行
+        # 只会淹没真正的动作。状态一直留在 `cloudProtection` 里可查。
+        _prev_prot = t.get("cloudProtection") if isinstance(t.get("cloudProtection"), dict) else {}
+        _prev_detail = str(_prev_prot.get("detail") or "")
+        _prev_ok = bool(_prev_prot.get("ok", True))
         t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": _bn_detail,
-                               "venue": "binance"}
-        if not _bn_ok:
+                               "ok": bool(_bn_ok), "venue": "binance"}
+        if not _bn_ok and (_bn_detail != _prev_detail or _prev_ok):
             executed_actions.append(
                 f"[{name}] ⚠️ 币安保护单体检异常：{_bn_detail}")
 

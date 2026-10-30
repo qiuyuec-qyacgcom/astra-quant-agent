@@ -544,6 +544,21 @@ class CrossVenueExitRoutingTest(unittest.TestCase):
         self.assertIn("场所未接入执行面", why)
         self.assertEqual(rig.close_calls, [], "未登记场所绝对不下发平仓指令")
 
+    def test_repeated_identical_protection_failure_is_not_announced_every_cycle(self):
+        """不可修复的保护缺失只吼一次（状态仍留在 cloudProtection 里可查）。"""
+        rig = _Rig()
+        rig._pos = _pos(venue="binance")
+        key, trackers = rig.trackers(_f())
+        kwargs = rig.kwargs()
+        manage_position_tp_and_trailing(
+            _f(), rig._pos, trackers, "2026-09-21 12:00:00", rig.actions, **kwargs)
+        manage_position_tp_and_trailing(
+            _f(), rig._pos, trackers, "2026-09-21 12:15:00", rig.actions, **kwargs)
+        warns = [a for a in rig.actions if "币安保护单体检异常" in a]
+        self.assertEqual(len(warns), 1, f"同一异常不得每轮刷屏：{rig.actions}")
+        self.assertFalse(trackers[key]["cloudProtection"]["ok"],
+                         "不吼 ≠ 已恢复：状态必须如实留在追踪器里")
+
     def test_binance_position_is_never_force_closed_over_missing_protection(self):
         """币安保护单读不到 ⇒ 只告警不平仓（可能是用户手动开的仓）。"""
         rig = _Rig()

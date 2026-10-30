@@ -175,6 +175,21 @@ def _host_for(mode: str) -> str:
     raise ValueError("Unsupported Binance environment")
 
 
+def _not_perp_detail(symbol: str, row: dict[str, Any]) -> str:
+    """合约分类不符时的**可排障**文案：把 exchangeInfo 的实际字段值带出来。
+
+    只报 "Instrument is not a USDT perpetual contract" 时，运维无从判断是
+    「真不是永续」还是「某个新/TradFi 合约定段缺失」，只能靠猜（2026-10-31
+    INTWUSDT 即此形态）。
+    """
+    return (
+        "Instrument is not a USDT perpetual contract"
+        f" (symbol={row.get('symbol') or symbol}, contractType={row.get('contractType')!r},"
+        f" quoteAsset={row.get('quoteAsset')!r}, marginAsset={row.get('marginAsset')!r},"
+        f" status={row.get('status')!r}, underlyingType={row.get('underlyingType')!r})"
+    )
+
+
 def _to_symbol(inst_id: str) -> str:
     match = INST_RE.fullmatch(str(inst_id or "").strip().upper())
     if not match:
@@ -418,9 +433,19 @@ class BinanceExchange:
             raise RuntimeError("Binance exchangeInfo returned duplicate rows for the requested symbol")
         return matches[0]
 
-    def _parse_symbol_filters(self, inst_id: str, symbol: str, row: dict[str, Any]) -> dict[str, Any]:
-        if row.get("contractType") != "PERPETUAL" or row.get("quoteAsset") != "USDT":
-            raise ValueError("Instrument is not a USDT perpetual contract")
+    def _parse_symbol_filters(self, inst_id: str, symbol: str, row: dict[str, Any],
+                             *, relaxed: bool = False) -> dict[str, Any]:
+        if relaxed:
+            # **保护/平仓路径**（2026-10-31）：只要求「可交易的 USDⓈ 合约」。
+            # TradFi 永续（如 INTWUSDT，跟踪 2× INTC ETF）与部分新上合约在
+            # exchangeInfo 里未必同时给齐 `contractType=PERPETUAL` / `quoteAsset=USDT`，
+            # 但它们是真实可交易合约 —— 对**已存在的持仓**挂止盈止损或平仓不能因此拒绝，
+            # 拒绝的后果就是余仓没有交易所侧保护（只剩本地机械止损）。
+            quote = str(row.get("marginAsset") or row.get("quoteAsset") or "").upper()
+            if str(row.get("status") or "") != "TRADING" or quote != "USDT":
+                raise ValueError(_not_perp_detail(symbol, row))
+        elif row.get("contractType") != "PERPETUAL" or row.get("quoteAsset") != "USDT":
+            raise ValueError(_not_perp_detail(symbol, row))
         raw_filters = row.get("filters")
         if not isinstance(raw_filters, list):
             raise RuntimeError("Binance symbol filters are malformed")
@@ -451,20 +476,24 @@ class BinanceExchange:
             "maxPrice": str(price.get("maxPrice") or "0"),
         }
 
-    def _symbol_filters(self, inst_id: str) -> dict[str, Any]:
-        if inst_id in self._filters:
-            return self._filters[inst_id]
+    def _symbol_filters(self, inst_id: str, *, relaxed: bool = False) -> dict[str, Any]:
+        # 严格/放宽两套缓存分开存：严格档是**开仓**闸（不许被放宽结果污染）。
+        key = inst_id if not relaxed else f"{inst_id}::relaxed"
+        if key in self._filters:
+            return self._filters[key]
         symbol = _to_symbol(inst_id)
         info = self._public("/fapi/v1/exchangeInfo", {"symbol": symbol})
         rows = info.get("symbols") if isinstance(info, dict) else None
         if not isinstance(rows, list) or not rows:
             raise RuntimeError("Binance exchangeInfo is unavailable")
-        parsed = self._parse_symbol_filters(inst_id, symbol, self._exact_symbol_row(rows, symbol))
-        self._filters[inst_id] = parsed
+        parsed = self._parse_symbol_filters(inst_id, symbol,
+                                            self._exact_symbol_row(rows, symbol),
+                                            relaxed=relaxed)
+        self._filters[key] = parsed
         return parsed
 
-    def _align_price(self, inst_id: str, price: Any) -> str:
-        meta = self._symbol_filters(inst_id)
+    def _align_price(self, inst_id: str, price: Any, *, relaxed: bool = False) -> str:
+        meta = self._symbol_filters(inst_id, relaxed=relaxed)
         tick = _decimal(meta["tickSz"])
         value = _floor_step(_decimal(price), tick)
         minimum = _decimal(meta["minPrice"])
@@ -472,8 +501,9 @@ class BinanceExchange:
             raise ValueError("Price is below the exchange tick")
         return _text(value)
 
-    def _align_qty(self, inst_id: str, size: Any, price: Any | None = None) -> str:
-        meta = self._symbol_filters(inst_id)
+    def _align_qty(self, inst_id: str, size: Any, price: Any | None = None,
+                   *, relaxed: bool = False) -> str:
+        meta = self._symbol_filters(inst_id, relaxed=relaxed)
         step = _decimal(meta["lotSz"])
         minimum = _decimal(meta["minSz"])
         quantity = _floor_step(_decimal(size), step)
@@ -1389,7 +1419,9 @@ class BinanceExchange:
             raise RuntimeError("No live position to close")
         if qty > live:
             raise RuntimeError("Close quantity exceeds live position")
-        aligned = self._align_qty(inst_id, qty)
+        # 平**已存在**的持仓不需要"必须是 USDT 永续"的开仓闸（TradFi 永续等
+        # 合约在 exchangeInfo 里字段不全，但平仓/保护必须照做）⇒ 走放宽档。
+        aligned = self._align_qty(inst_id, qty, relaxed=True)
         if logical == "net":
             if hedge:
                 raise ValueError("Hedge mode requires long or short position side")
@@ -2080,9 +2112,11 @@ class BinanceExchange:
         if str(pos_side).lower() not in {"long", "short"}:
             raise ValueError("Invalid position direction")
         px_ref = self.ticker(inst_id)["last"]
-        tp = self._align_price(inst_id, tp_px)
-        sl = self._align_price(inst_id, sl_px)
-        qty = self._align_qty(inst_id, size, px_ref)
+        # 保护腿只服务**已存在**的持仓（收盘方向），故用放宽档：不许因合约分类字段
+        # 不全而拒绝给余仓挂止损（那等于让仓位裸奔）。
+        tp = self._align_price(inst_id, tp_px, relaxed=True)
+        sl = self._align_price(inst_id, sl_px, relaxed=True)
+        qty = self._align_qty(inst_id, size, px_ref, relaxed=True)
         self._validate_geometry(str(pos_side).lower(), _decimal(px_ref), _decimal(tp), _decimal(sl))
         owned = self._pending_owned_groups(inst_id)
         if owned is None or owned:
@@ -2115,7 +2149,7 @@ class BinanceExchange:
         }
 
     def amend_stop(self, inst_id: str, algo_id: str, new_sl: Any) -> dict[str, Any]:
-        sl = self._align_price(inst_id, new_sl)
+        sl = self._align_price(inst_id, new_sl, relaxed=True)
         group = str(algo_id)
         owned = self._pending_owned_groups(inst_id)
         if owned is None or group in owned:

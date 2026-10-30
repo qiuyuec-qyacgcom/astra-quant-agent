@@ -1080,6 +1080,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             close_trade_payload=_close_trade_payload,
             TAKER_FEE_RATE=TAKER_FEE_RATE,
             ensure_cloud_position_protection=ensure_cloud_position_protection,
+            binance_rest=_binance_adapter(),
         )
     except Exception as _so_err:
         print(f"[Scale-Out] 分批止盈判定跳过: {_so_err}")

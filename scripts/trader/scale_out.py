@@ -11,6 +11,14 @@
 3. 云端 OCO 覆盖单超额撤销重置（彻底消除原 100% 止损单残留导致的反向开仓）；
 4. 金字塔顺势加仓单向锁（scale_count = 999，互斥锁定，防止边平边加）；
 5. 幂等性守卫（scale_out_phase = 1，单次持仓生命周期内仅执行一次）。
+
+## 场所分派（2026-10-31 币安接入）
+
+- **OKX**：按"张"下 reduce-only 市价单 + 云端 OCO 重挂（双腿方案，另有"腿已成交"收尾分支）；
+- **币安**：按**币数**调 `close_position(quantity=…)`（适配器内部 reduce-only、且校验
+  `quantity ≤ 实时持仓`），余仓保护腿是 `closePosition=true`，故只需把 SL 用
+  `amend_stop` 推进到保本位（TP 不动），缺失时才按余仓重挂一组；
+- **未登记场所**：只读跳过，绝不把它的 instId 交给 OKX/币安任何接口。
 """
 from __future__ import annotations
 
@@ -36,6 +44,50 @@ def _size_precision_of(step: float) -> int:
     return len(s.split(".")[1]) if "." in s else 0
 
 
+def _tag_venue(payload, venue: str):
+    """给台账载荷打上**场所**标（不改已有值）。
+
+    `record_trade(payload, position=…)` 也能标场所，但部分注入面只接受一个位置参数
+    （测试桩 `recorded.append`、旧调用方 lambda）—— 载荷里带 `venue` 是零侵入的做法，
+    且 `ledger_writer` 的 `setdefault` 不会覆盖显式值。
+    """
+    if isinstance(payload, dict):
+        payload.setdefault("venue", venue)
+    return payload
+
+
+def _binance_retarget_protection(binance_rest, inst_id, pos_side, remaining_sz,
+                                 tp_px, sl_px) -> str:
+    """分批止盈后把币安**余仓**的保护腿移到新止损（返回一句动作日志）。
+
+    币安保护腿是配对条件单且 `closePosition=true`（触发即平剩余全部），所以减半后
+    **不需要按数量重挂** —— 只需把 SL 触发价推进到保本位，TP 保持原样：
+    `amend_stop` 会先挂新 SL 腿、确认后再撤旧腿（不留无保护窗口）。
+
+    若同向已无在挂保护腿（被撤/从未挂上），退回 `place_protection` 按余仓重挂一组。
+    """
+    ex = getattr(binance_rest, "exchange", binance_rest)
+    reader = getattr(ex, "protection_orders", None)
+    amend = getattr(ex, "amend_stop", None)
+    placer = getattr(ex, "place_protection", None)
+    live = []
+    if callable(reader):
+        live = [row for row in (reader(inst_id) or [])
+                if isinstance(row, dict)
+                and str(row.get("posSide", "net")).lower() in {pos_side, "net"}
+                and (row.get("algoId") or "")]
+    if live and callable(amend):
+        moved = 0
+        for row in live:
+            amend(inst_id, str(row["algoId"]), sl_px)
+            moved += 1
+        return f"SL 已推进至保本 {sl_px}（{moved} 组条件保护）"
+    if callable(placer):
+        placer(inst_id, pos_side, remaining_sz, tp_px, sl_px)
+        return f"保护腿缺失，已按余仓 {remaining_sz:g} 重挂 TP={tp_px:g}/SL={sl_px:g}"
+    raise RuntimeError("币安适配器未提供保护单读写接口")
+
+
 def execute_scale_out_if_eligible(
     f: Dict[str, Any],
     curr_pos: Dict[str, Any],
@@ -51,6 +103,7 @@ def execute_scale_out_if_eligible(
     close_trade_payload=None,
     TAKER_FEE_RATE: float = 0.0005,
     ensure_cloud_position_protection=None,
+    binance_rest=None,
 ) -> Tuple[bool, str]:
     """若当前持仓达到分批止盈条件，执行半仓市价平仓、保本移损与云端 OCO 重置。"""
     if not SCALE_OUT_ENABLED:
@@ -93,6 +146,9 @@ def execute_scale_out_if_eligible(
 
     is_long = "long" in str(curr_pos.get("side", "")).lower()
     pos_side = "long" if is_long else "short"
+    # 场所须在**腿成交识别之前**确定：那段是 OKX 双腿方案专属（币安保护腿是
+    # closePosition=true 整仓平，没有"半仓腿已成交"的形态）。
+    pos_venue = str(curr_pos.get("venue") or curr_pos.get("exchange") or "okx").lower()
     entry_px = float(curr_pos.get("avgPx", 0.0) or 0.0)
     if entry_px <= 0:
         return False, "持仓均价无效"
@@ -119,8 +175,13 @@ def execute_scale_out_if_eligible(
         entry_sz = float(t.get("entry_sz") or 0.0)
     except (TypeError, ValueError):
         entry_sz = 0.0
-    if entry_sz <= 0:
-        t["entry_sz"] = pos_sz
+    if entry_sz <= 0 or pos_venue != "okx":
+        # 币安（及未登记场所）不做"腿已成交"识别：币安保护腿是 closePosition=true，
+        # 触发即平**整仓**，不存在"半仓腿成交"的形态；把币安 instId 送进
+        # `_finalize_scale_out_after_leg_fill` 还会调用 OKX 专属的保护接口
+        # （2026-09-28 同类事故：拿币安标的去问 OKX）。这里只补记 `entry_sz`。
+        if entry_sz <= 0:
+            t["entry_sz"] = pos_sz
     else:
         expected_remaining = entry_sz * (1.0 - ratio)
         # 容差：腿的尺寸按 minSz 向下夹取，实际成交可能比理论值略小。
@@ -186,7 +247,6 @@ def execute_scale_out_if_eligible(
 
     # 4. 执行定向市价平仓（带有 reduceOnly=True）
     close_side = "sell" if is_long else "buy"
-    pos_venue = str(curr_pos.get("venue") or curr_pos.get("exchange") or "okx").lower()
     
     order_success = False
     order_detail = ""
@@ -213,13 +273,20 @@ def execute_scale_out_if_eligible(
             order_success = False
             order_detail = f"OKX分批平仓异常: {exc}"
     elif pos_venue == "binance":
-        # 币安分批止盈首版未接入：整仓保护（配对条件单 closeAll）已覆盖 TP/SL，
-        # 贸然减半仓会让保护腿与仓位数量不匹配。如实留痕并打标（phase=-1），
-        # 避免每周期重复提示；机械退出（硬止损/棘轮/时间止损）已支持币安。
-        executed_actions.append(
-            f"[{name}] 币安分批止盈未接入（保持整仓保护，本轮不拆分）")
-        t["scale_out_phase"] = -1
-        return False, "币安分批止盈未接入"
+        # 币安：减半仓走 `close_position(quantity=…)` —— 它内部是 reduce-only 市价单
+        # （超额/反向由交易所物理拦下），并要求 quantity ≤ 实时持仓。
+        # `cancel_protection=False`：保护腿是 closePosition=true，减半后对余仓依然有效，
+        # 由第 6 步把 SL 推到保本位即可，不需要先撤再挂（撤挂之间有裸奔窗口）。
+        try:
+            if binance_rest is None:
+                raise RuntimeError("币安适配器不可用（未配置或未开闸）")
+            binance_rest.close_position(
+                inst_id, pos_side, quantity=f"{close_sz:g}", cancel_protection=False)
+            order_success = True
+            order_detail = f"binance reduce-only 市价 {close_sz:g}"
+        except Exception as exc:
+            order_success = False
+            order_detail = f"币安分批平仓异常: {exc}"
     else:
         # 未登记场所的历史持仓：instId 与 OKX 同名，绝不能把它的
         # instId 交给 OKX 直签接口（平的是别人的仓）。只读留痕跳过，不抛异常、不平仓。
@@ -258,6 +325,17 @@ def execute_scale_out_if_eligible(
             )
         except Exception as oco_exc:
             print(f"[Scale-Out] 剩余仓位云端保护更新异常: {oco_exc}")
+    elif pos_venue == "binance":
+        # 币安余仓保护：把 SL 推进到保本位（TP 不动）；若保护腿已被撤/从未挂上，
+        # 按余仓重挂一组。**失败只告警**：本地机械止损每轮仍在跑，不会裸奔。
+        try:
+            _detail = _binance_retarget_protection(
+                binance_rest, inst_id, pos_side, remaining_sz,
+                take_profit_px or cur_px, breakeven_sl)
+            print(f"[Scale-Out] {inst_id} 余仓保护: {_detail}")
+        except Exception as bn_exc:
+            executed_actions.append(
+                f"[{name}] ⚠️ 币安余仓保护更新失败（本地机械止损继续接管）: {bn_exc}")
 
     # 7. 更新本地状态机与账本
     t["scale_out_phase"] = 1
@@ -290,7 +368,7 @@ def execute_scale_out_if_eligible(
     })
 
     if record_trade and close_trade_payload:
-        record_trade(close_trade_payload(
+        record_trade(_tag_venue(close_trade_payload(
             is_long=is_long,
             timestamp_full=timestamp_full,
             name=name,
@@ -301,7 +379,7 @@ def execute_scale_out_if_eligible(
             fee=fee_val,
             pnl=realized_pnl,
             remark=f"浮盈达到 {trigger_threshold:.2f} 触发首批止盈，锁定现金利润，余仓移损保本",
-        ))
+        ), pos_venue))
 
     # ⚠️ 2026-09-30（通知单一事实源）：这里**不再**发布 `trade.closed`。
     #     同一笔分批止盈此前会被**两条独立路径**各发一张卡片：本路径（现场估算，
@@ -441,7 +519,7 @@ def _finalize_scale_out_after_leg_fill(
     })
 
     if record_trade and close_trade_payload:
-        record_trade(close_trade_payload(
+        record_trade(_tag_venue(close_trade_payload(
             is_long=is_long,
             timestamp_full=timestamp_full,
             name=name,
@@ -453,7 +531,7 @@ def _finalize_scale_out_after_leg_fill(
             pnl=realized_pnl,
             remark=(f"TP1={tp1_px:g} 由交易所侧算法腿瞬时成交（非 15 分钟巡检平仓），"
                     f"余仓保本止损 {breakeven_sl}"),
-        ))
+        ), "okx"))
 
     # ⚠️ 2026-09-30（通知单一事实源）：这里**不再**发布 `trade.closed`。
     #     这是本轮真机事故的现场：本路径用 `tp1_px` 近似成交价、且**当时面值取错**
