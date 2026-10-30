@@ -30,6 +30,8 @@
 """
 from __future__ import annotations
 
+from typing import Dict, List
+
 
 def build_state_payload(*, timestamp_full, active_pos_count, max_positions, long_count,
                         short_count, cb_active, cb_reason, executed_actions,
@@ -119,3 +121,57 @@ def venue_position_span(*, okx_count, okx_long, okx_short, binance_count=0,
                 f"｜okx {int(okx_count)} binance {int(binance_count)}")
     return (f"持仓 {int(okx_count)}/{max_positions} "
             f"(多{int(okx_long)}/空{int(okx_short)})｜okx {int(okx_count)}")
+
+
+def split_positions_by_venue(positions) -> Dict[str, List[int]]:
+    """活跃持仓按**场所**拆分笔数/多空数（纯函数，零 IO）。
+
+    口径与 `fetch_positions_and_reconcile` 的计数段逐位一致：只看 `pos > 0`。
+    场所取 `venue`/`exchange`，缺失按 `okx`（OKX 直签行不带 venue 字段）。
+
+    存在理由（2026-10-30 用户报缺陷）：主脑的持仓行来自**本轮执行场所**的运行时，
+    币安档下每一行都带 `venue="binance"`，而巡检通知/AI 提示词把**总数**当成
+    `okx_count` 传入 `venue_position_span` ⇒ 币安仓被印成 `okx 1`，看日志的人
+    以为仓在 OKX。本函数给出真实拆分，供调用点据实拼「持仓构成」。
+    """
+    counts: Dict[str, List[int]] = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            size = float(p.get("pos", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        venue = str(p.get("venue") or p.get("exchange") or "okx").strip().lower() or "okx"
+        slot = counts.setdefault(venue, [0, 0, 0])
+        slot[0] += 1
+        side = str(p.get("posSide", "net")).lower()
+        if "long" in side:
+            slot[1] += 1
+        elif "short" in side:
+            slot[2] += 1
+    return counts
+
+
+def position_span_from_rows(*, rows, max_positions, venue_position_span) -> str:
+    """据**真实持仓行**拼「持仓构成」一行（巡检通知与 AI 提示词同源）。
+
+    OKX 按本所计数；其余场所的活跃行统一计入 `binance` 段（登记执行面只有这两所，
+    历史外所行随执行面一起下线，不会出现在本轮运行时读数里）。
+    `binance` 为 0 时输出与旧版逐字一致（OKX 主所行为不变）。
+    """
+    counts = split_positions_by_venue(rows)
+    okx = counts.get("okx", [0, 0, 0])
+    other = [0, 0, 0]
+    for venue, slot in counts.items():
+        if venue == "okx":
+            continue
+        other[0] += slot[0]
+        other[1] += slot[1]
+        other[2] += slot[2]
+    return venue_position_span(
+        okx_count=okx[0], okx_long=okx[1], okx_short=okx[2],
+        binance_count=other[0], binance_long=other[1], binance_short=other[2],
+        max_positions=max_positions)

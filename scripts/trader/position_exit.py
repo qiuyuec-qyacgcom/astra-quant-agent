@@ -57,6 +57,75 @@ def _is_simulated() -> bool:
         return True
 
 
+def _binance_exchange(binance_rest):
+    """取币安适配器背后能读写保护单的 `BinanceExchange`（桥接类把它挂在 `.exchange`）。"""
+    return getattr(binance_rest, "exchange", binance_rest)
+
+
+def _binance_protection_state(binance_rest, inst_id, pos_side, *,
+                              tp_px, sl_px, pos_sz):
+    """币安侧保护单体检 + 缺失时补挂。返回 `(ok, 说明)`；**任何失败都不平仓**。
+
+    与 OKX 分支的语义差异（刻意）：OKX 的"云端 OCO 覆盖不足"会直接安全平仓，
+    因为它能**确定**自己掌握全量保护；币安侧这里只读条件单列表，读不到/挂不上
+    的可能原因太多（无凭证、限流、挂单在途），把"读不到保护"当成"该平仓"会
+    误平**手动开的仓**（2026-09-28 同类事故的教训）。故失败一律只告警，
+    由本地机械止损（硬止损/棘轮/时间止损）继续接管。
+    """
+    if binance_rest is None:
+        return False, "币安适配器不可用，无法核验交易所侧保护（本地机械止损接管）"
+    ex = _binance_exchange(binance_rest)
+    reader = getattr(ex, "protection_orders", None)
+    rows = []
+    if callable(reader):
+        try:
+            rows = reader(inst_id) or []
+        except Exception as exc:
+            return False, f"币安保护单读取失败（本地机械止损接管）: {exc}"
+    live = [r for r in rows
+            if str(r.get("posSide", "net")).lower() in {pos_side, "net"}
+            and (r.get("slTriggerPx") or "")]
+    if live:
+        return True, f"币安条件保护 {len(live)} 条（SL={live[0].get('slTriggerPx')}）"
+    placer = getattr(ex, "place_protection", None)
+    if not callable(placer):
+        return False, "币安适配器无保护单接口（本地机械止损接管）"
+    try:
+        placer(inst_id, pos_side, pos_sz, tp_px, sl_px)
+    except Exception as exc:
+        return False, f"币安保护单缺失且补挂失败（本地机械止损接管，下周期重试）: {exc}"
+    return True, f"币安保护单缺失，已补挂 TP={tp_px:g}/SL={sl_px:g}"
+
+
+def _sync_exchange_stop(*, pos_venue, binance_rest, sync_cloud_algo_stop,
+                        inst_id, pos_side, sl_px, reason):
+    """把收紧后的止损同步到**交易所侧**条件单（OKX 走云端 OCO，币安走 amend_stop）。"""
+    if pos_venue == "okx":
+        return sync_cloud_algo_stop(inst_id, pos_side, sl_px, reason=reason)
+    if binance_rest is None:
+        return False
+    ex = _binance_exchange(binance_rest)
+    amend = getattr(ex, "amend_stop", None)
+    reader = getattr(ex, "protection_orders", None)
+    if not callable(amend) or not callable(reader):
+        return False
+    try:
+        live = [r for r in (reader(inst_id) or [])
+                if str(r.get("posSide", "net")).lower() in {pos_side, "net"}
+                and (r.get("algoId") or "")]
+    except Exception:
+        return False
+    if not live:
+        return False
+    ok = True
+    for row in live:
+        try:
+            amend(inst_id, str(row.get("algoId")), sl_px)
+        except Exception:
+            ok = False
+    return ok
+
+
 def _purge_after_close(inst_id, purge):
     """机械平仓成功后，剔除主脑指令文件里针对该标的的陈旧指令。
 
@@ -88,6 +157,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     record_trade,
     sync_cloud_algo_stop,
     venue_registry,
+    binance_rest=None,
     ASSET_CLASS_PROFILES,
     TAKER_FEE_RATE,
     TIME_STOP_ATR_BAND,
@@ -125,15 +195,16 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     entry_px = float(curr_pos["avgPx"])
     pos_key = f"{inst_id}_{curr_pos['side']}"
     pos_venue = str(curr_pos.get("venue") or curr_pos.get("exchange") or "okx").lower()
-    # ⚠️ 只读守卫：已移除场所的历史持仓可能仍留在台账里。它的
-    # instId 与 OKX 同名，**绝不能**把它交给任何 OKX 直签接口 ——
-    # `close_position_confirmed` 不传 venue 就默认 okx，会把同名标的在 OKX 的仓
-    # 平掉（平的是别人的仓，2026-09-28 实盘事故）。故非 OKX 一律留痕跳过，
-    # 不撤台账行、不下发任何交易所指令、更不抛异常。
-    if pos_venue != "okx":
+    # ⚠️ 场所闸（2026-10-30 修订）：OKX 与**币安**都已接入平仓确认
+    # （`close_position_confirmed` 的 binance 分支先撤保护单再 reduce-only 平仓），
+    # 故两所都跑机械退出 —— 币安档下不再"只读跳过"（那会让持仓失去止损保护）。
+    # 未登记场所仍只读跳过：它的 instId 与 OKX 同名，**绝不能**交给 OKX 直签接口
+    # （`close_position_confirmed` 不传 venue 就默认 okx，会把同名标的在 OKX 的仓
+    # 平掉，2026-09-28 实盘事故）。跳过时仍留痕、不下发任何交易所指令、不抛异常。
+    if pos_venue not in ("okx", "binance"):
         executed_actions.append(
-            f"[{f['name']}] 非 OKX 场所({pos_venue})历史持仓，只读跳过机械退出（不下发任何交易所指令）")
-        return False, f"非 OKX 场所({pos_venue})，只读跳过"
+            f"[{f['name']}] 场所未接入执行面({pos_venue})，只读跳过机械退出（不下发任何交易所指令）")
+        return False, f"场所未接入执行面({pos_venue})，只读跳过"
 
     now_ts = int(time.time())
     if pos_key not in trackers:
@@ -245,11 +316,11 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         t["takeProfitPx"] = round(entry_px + default_tp_dist if is_long else entry_px - default_tp_dist, prec)
     _pos_side = "long" if is_long else "short"
     # ⚠️ 云 OCO 核验（`okx_rest.pending_algo_orders` / `place_algo_oco`）是
-    # **OKX 直签链专属**，本模块只对 OKX 持仓调用（非 OKX 持仓已在上方只读守卫处
-    # 留痕返回，永不把外所 instId 交给 OKX 接口）。
+    # **OKX 直签链专属**；币安侧是另一套（`protection_orders` / `place_protection`
+    # / `amend_stop`），由下方分支按场所分派 —— 绝不把币安 instId 交给 OKX 接口。
     # 危险点：`close_position_confirmed` **不传 venue 就默认 okx**，
     # 若把外所持仓的 instId 交给它，"保护失效退出"会把同名标的在 OKX 的仓平掉
-    # —— 平的是别人的仓（2026-09-28 实盘事故）。
+    # —— 平的是别人的仓（2026-09-28 实盘事故）。本函数所有平仓调用都带 venue。
     # 分批参数：只有**尚未分批**且 TP1 与 TP2 几何合法时才要求拆双腿
     # （腿挂在错误一侧会被 OKX 拒或立刻触发，见 scripts/trader/tp1.py 的守卫）。
     _tp2_px = float(t.get("takeProfitPx") or 0.0)
@@ -261,39 +332,51 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
             _split_enabled = tp1_geometry_ok(_tp1_px, _tp2_px, cur_px, is_long)
         except Exception:
             _split_enabled = False
-    _pos_min = curr_pos.get("minSz")
-    _leg_min_sz = float(_pos_min if _pos_min else (f.get("minSz", 0.01) or 0.01))
-    protected, protection_detail = ensure_cloud_position_protection(
-        inst_id, _pos_side, pos_sz, _tp2_px or float(t["takeProfitPx"]), hard_stop_px,
-        tp1_px=_tp1_px if _split_enabled else None,
-        scale_out_ratio=SCALE_OUT_RATIO,
-        leg_min_sz=_leg_min_sz,
-        prec=2,
-        px_prec=int(f.get("precision", 2) or 2),
-        legs_state=t,
-        simulated=pos_venue == "okx" and _is_simulated(),
-        split_enabled=_split_enabled,
-    )
-    if not protected:
-        closed, close_detail = close_position_confirmed(
-            inst_id, _pos_side, pos_sz, venue=pos_venue)
-        if not closed:
-            executed_actions.append(f"[{name}] 🚨 云端 OCO 缺失且安全退出失败: {protection_detail}; {close_detail}")
-            return False, "保护与退出均失败"
-        pnl_val = curr_pos["upl"]
-        executed_actions.append(f"[{name}] 🧯 云端 OCO 无法确认，已安全平仓: {protection_detail}")
-        record_trade(_close_trade_payload(
-            is_long=is_long, timestamp_full=timestamp_full, name=name,
-            action_type="保护失效退出", side_suffix="保护失效退出",
-            pos_sz=pos_sz, cur_px=cur_px,
-            fee=_close_fee(pos_sz, ct_val, cur_px, TAKER_FEE_RATE), pnl=pnl_val,
-            remark=f"云端 OCO 无法达到全仓覆盖，交易所确认安全平仓：{protection_detail}",
-        ), position=curr_pos)
-        add_stop_cooldown(inst_id, _pos_side, "云端保护失效")
-        trackers.pop(pos_key, None)
-        _purge_after_close(inst_id, purge_ai_position_instructions)
-        return True, "保护失效安全退出"
-    t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": protection_detail}
+    if pos_venue == "okx":
+        _pos_min = curr_pos.get("minSz")
+        _leg_min_sz = float(_pos_min if _pos_min else (f.get("minSz", 0.01) or 0.01))
+        protected, protection_detail = ensure_cloud_position_protection(
+            inst_id, _pos_side, pos_sz, _tp2_px or float(t["takeProfitPx"]), hard_stop_px,
+            tp1_px=_tp1_px if _split_enabled else None,
+            scale_out_ratio=SCALE_OUT_RATIO,
+            leg_min_sz=_leg_min_sz,
+            prec=2,
+            px_prec=int(f.get("precision", 2) or 2),
+            legs_state=t,
+            simulated=_is_simulated(),
+            split_enabled=_split_enabled,
+        )
+        if not protected:
+            closed, close_detail = close_position_confirmed(
+                inst_id, _pos_side, pos_sz, venue=pos_venue)
+            if not closed:
+                executed_actions.append(f"[{name}] 🚨 云端 OCO 缺失且安全退出失败: {protection_detail}; {close_detail}")
+                return False, "保护与退出均失败"
+            pnl_val = curr_pos["upl"]
+            executed_actions.append(f"[{name}] 🧯 云端 OCO 无法确认，已安全平仓: {protection_detail}")
+            record_trade(_close_trade_payload(
+                is_long=is_long, timestamp_full=timestamp_full, name=name,
+                action_type="保护失效退出", side_suffix="保护失效退出",
+                pos_sz=pos_sz, cur_px=cur_px,
+                fee=_close_fee(pos_sz, ct_val, cur_px, TAKER_FEE_RATE), pnl=pnl_val,
+                remark=f"云端 OCO 无法达到全仓覆盖，交易所确认安全平仓：{protection_detail}",
+            ), position=curr_pos)
+            add_stop_cooldown(inst_id, _pos_side, "云端保护失效")
+            trackers.pop(pos_key, None)
+            _purge_after_close(inst_id, purge_ai_position_instructions)
+            return True, "保护失效安全退出"
+        t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": protection_detail}
+    else:
+        # 币安：保护腿在下单时由 `place_protected_*` 原子挂好。这里**只体检 + 补挂**，
+        # 失败不平仓（可能是用户手动开的仓；本地机械止损会继续接管并按需平仓）。
+        _bn_ok, _bn_detail = _binance_protection_state(
+            binance_rest, inst_id, _pos_side,
+            tp_px=_tp2_px or float(t["takeProfitPx"]), sl_px=hard_stop_px, pos_sz=pos_sz)
+        t["cloudProtection"] = {"verifiedAt": timestamp_full, "detail": _bn_detail,
+                               "venue": "binance"}
+        if not _bn_ok:
+            executed_actions.append(
+                f"[{name}] ⚠️ 币安保护单体检异常：{_bn_detail}")
 
     pos_regime = str(t.get("market_regime") or f.get("market_regime") or "UNKNOWN")
     is_chop_pos = (pos_regime in ("CHOP", "CHOP_RANGE"))
@@ -347,14 +430,18 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         # If dynamic floor stop ratcheted up, commit and sync to cloud OCO
         if dynamic_floor_sl > old_sl and old_sl > 0:
             t["trailingStopPx"] = dynamic_floor_sl
-            cloud_ok = sync_cloud_algo_stop(inst_id, "long", dynamic_floor_sl, reason=t["stage_desc"])
+            cloud_ok = _sync_exchange_stop(
+                pos_venue=pos_venue, binance_rest=binance_rest,
+                sync_cloud_algo_stop=sync_cloud_algo_stop,
+                inst_id=inst_id, pos_side="long",
+                sl_px=dynamic_floor_sl, reason=t["stage_desc"])
             if not cloud_ok:
-                # 云端 OCO 修正失败：本地棘轮已推进但云端止损仍停在旧价，
-                # 必须显式告警（而非静默忽略），否则形成"本地乐观、云端滞后"的状态分叉，
+                # 交易所侧修正失败：本地棘轮已推进但交易所止损仍停在旧价，
+                # 必须显式告警（而非静默忽略），否则形成"本地乐观、交易所滞后"的状态分叉，
                 # 行情反向时按旧止损平仓、损失大于本地预期。
                 executed_actions.append(
-                    f"[{name}] ⚠️ 云端止损修正失败（本地已推进至 {dynamic_floor_sl}，云端仍为 {old_sl}），下周期将重试")
-                print(f"[Cloud OCO Sync Failed] {inst_id} long: 本地 {dynamic_floor_sl} / 云端未确认，下周期重试")
+                    f"[{name}] ⚠️ {pos_venue.upper()} 止损修正失败（本地已推进至 {dynamic_floor_sl}，交易所仍为 {old_sl}），下周期将重试")
+                print(f"[Stop Sync Failed] {inst_id} long@{pos_venue}: 本地 {dynamic_floor_sl} / 交易所未确认，下周期重试")
         else:
             t["trailingStopPx"] = dynamic_floor_sl
 
@@ -411,13 +498,17 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         # If dynamic floor stop ratcheted down (tightened for short), commit and sync to cloud OCO
         if dynamic_floor_sl < old_sl and old_sl > 0:
             t["trailingStopPx"] = dynamic_floor_sl
-            cloud_ok = sync_cloud_algo_stop(inst_id, "short", dynamic_floor_sl, reason=t["stage_desc"])
+            cloud_ok = _sync_exchange_stop(
+                pos_venue=pos_venue, binance_rest=binance_rest,
+                sync_cloud_algo_stop=sync_cloud_algo_stop,
+                inst_id=inst_id, pos_side="short",
+                sl_px=dynamic_floor_sl, reason=t["stage_desc"])
             if not cloud_ok:
-                # 云端 OCO 修正失败：本地棘轮已推进但云端止损仍停在旧价，
-                # 必须显式告警（而非静默忽略），否则形成"本地乐观、云端滞后"的状态分叉。
+                # 交易所侧修正失败：本地棘轮已推进但交易所止损仍停在旧价，
+                # 必须显式告警（而非静默忽略），否则形成"本地乐观、交易所滞后"的状态分叉。
                 executed_actions.append(
-                    f"[{name}] ⚠️ 云端止损修正失败（本地已推进至 {dynamic_floor_sl}，云端仍为 {old_sl}），下周期将重试")
-                print(f"[Cloud OCO Sync Failed] {inst_id} short: 本地 {dynamic_floor_sl} / 云端未确认，下周期重试")
+                    f"[{name}] ⚠️ {pos_venue.upper()} 止损修正失败（本地已推进至 {dynamic_floor_sl}，交易所仍为 {old_sl}），下周期将重试")
+                print(f"[Stop Sync Failed] {inst_id} short@{pos_venue}: 本地 {dynamic_floor_sl} / 交易所未确认，下周期重试")
         else:
             t["trailingStopPx"] = dynamic_floor_sl
 

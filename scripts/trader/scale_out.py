@@ -212,12 +212,20 @@ def execute_scale_out_if_eligible(
         except Exception as exc:
             order_success = False
             order_detail = f"OKX分批平仓异常: {exc}"
+    elif pos_venue == "binance":
+        # 币安分批止盈首版未接入：整仓保护（配对条件单 closeAll）已覆盖 TP/SL，
+        # 贸然减半仓会让保护腿与仓位数量不匹配。如实留痕并打标（phase=-1），
+        # 避免每周期重复提示；机械退出（硬止损/棘轮/时间止损）已支持币安。
+        executed_actions.append(
+            f"[{name}] 币安分批止盈未接入（保持整仓保护，本轮不拆分）")
+        t["scale_out_phase"] = -1
+        return False, "币安分批止盈未接入"
     else:
-        # 已移除场所的历史持仓：instId 与 OKX 同名，绝不能把它的
+        # 未登记场所的历史持仓：instId 与 OKX 同名，绝不能把它的
         # instId 交给 OKX 直签接口（平的是别人的仓）。只读留痕跳过，不抛异常、不平仓。
         executed_actions.append(
-            f"[{name}] 非 OKX 场所({pos_venue})历史持仓，只读跳过分批止盈（不下发任何交易所指令）")
-        return False, f"非 OKX 场所({pos_venue})，只读跳过"
+            f"[{name}] 场所未接入执行面({pos_venue})，只读跳过分批止盈（不下发任何交易所指令）")
+        return False, f"场所未接入执行面({pos_venue})，只读跳过"
 
     if not order_success:
         executed_actions.append(f"[{name}] ⚠️ 分批止盈市价平仓提交失败: {order_detail}")

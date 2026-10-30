@@ -133,15 +133,28 @@ def _ws_depth(inst_id: str) -> Optional[Dict[str, Any]]:
     return {"bids": bids, "asks": asks}
 
 
-def _ws_candles(inst_id: str, bar: str, limit: int) -> List[List[str]]:
-    """WS 快照里的 K 线（newest-first 9 列）；**不足 limit 根就不给**，让调用方回退 REST。"""
+#: 决策链「数据质量」六条判据的最少 K 线根数（与 `scripts/brain/packages.py` 的
+#: `required_market_data` 逐条对齐）。WS 快照攒够这个数就有继续决策的价值，
+#: 不必等满整段 limit 根 —— 币安 1H/4H 要等 24h/64h 才够 limit，那时 REST 一旦
+#: 不可用（-1003 封禁/限流）整包就成了"数据质量 invalid"。
+_MIN_DECISION_BARS = {"15m": 12, "1H": 8, "4H": 6, "1h": 8, "4h": 6}
+
+
+def _ws_candles(inst_id: str, bar: str, limit: int, *,
+                min_rows: Optional[int] = None) -> List[List[str]]:
+    """WS 快照里的 K 线（newest-first 9 列）。
+
+    默认**不足 limit 根就不给**（让调用方回退 REST，保证指标用的是完整历史）；
+    `min_rows` 显式放宽时，只要够这个下限就返回（REST 不可用时的兜底档）。
+    """
     need = max(1, int(limit))
+    floor = need if min_rows is None else max(1, int(min_rows))
     snap = _ws_snapshot(_WS_CANDLE_TTL_S)
     series = (((snap.get("klines") or {}).get(inst_id) or {}).get(bar)) if snap else None
     if not isinstance(series, list):
         return []
     rows = [row for row in series if isinstance(row, list) and len(row) >= 9]
-    if len(rows) < need:
+    if len(rows) < floor:
         return []
     return rows[:need]
 
@@ -668,13 +681,25 @@ def fetch_candles(
         ws_rows = _ws_candles(inst_id, bar, limit)
         if ws_rows:
             return closed_okx_candles(ws_rows)[:limit] if closed_only else ws_rows
+        rows: List[List[str]] = []
         try:
             rows = _binance_exchange().candles(inst_id, bar=bar, limit=limit)
         except Exception as exc:
             logger.debug("Binance candles failed for %s: %s", inst_id, exc)
-            return []
+            # 静默 `return []` 会让"币安 K 线取不到"伪装成"数据质量 invalid" ——
+            # 必须进失败账（/metrics 可见），否则排障只剩猜测。
+            note_failure("binance_candles", exc)
+            rows = []
         if not isinstance(rows, list):
-            return []
+            rows = []
+        if not rows:
+            # REST 不可用（-1003 封禁/限流/网络）时的**最后一档**：WS 快照里已有
+            # 够判据用的根数就先用它，别把"币安 K 线空"直接变成整包 invalid。
+            _floor = _MIN_DECISION_BARS.get(str(bar), 1)
+            rows = _ws_candles(inst_id, bar, limit, min_rows=_floor)
+            if rows:
+                print(f"[binance candles] warn {inst_id} {bar} REST 不可用，"
+                      f"改用 WS 快照 {len(rows)} 根（判据下限 {_floor}）")
         # 币安 candles() 已 newest-first 且 confirm 列已算好；closed_only 时过滤未收盘
         if closed_only:
             return closed_okx_candles(rows)[:limit]

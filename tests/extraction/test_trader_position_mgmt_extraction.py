@@ -342,16 +342,20 @@ class ParityTest(unittest.TestCase):
         self.assertEqual(g_env[0], [], "未知持仓绝不得触发平仓")
 
     def test_known_position_survives_a_removed_venue_row_in_history(self):
-        """只读容错：历史台账里残留的外所行（`venue` 已下线）只读跳过，不下发任何指令。"""
+        """只读容错：历史台账里残留的**未登记场所**行只读跳过，不下发任何指令。
+
+        2026-10-30：币安已接入执行面（CLOSE_MARKET/UPDATE_SL 走币安自己的接口），
+        故本用例的"已下线场所"改用 gate —— 它才是仍然只读的那一类。
+        """
         h = _Harness({"instructions": [
             {"instId": "XRP-USDT-SWAP", "action": "CLOSE_MARKET", "confidence": 99, "reason": "x"}],
         }, {"XRP-USDT-SWAP": {"posSide": "short", "pos": 3, "markPx": 2.0,
-                              "venue": "binance"}})
+                              "venue": "gate"}})
         raw = h.run(position_mgmt.execute_ai_position_management)
         self.addCleanup(h.cleanup)
         self.assertEqual(len(raw), 1)
         self.assertIn("只读跳过", raw[0])
-        self.assertEqual(len(h.close_calls), 0, "外所历史持仓不下发平仓指令")
+        self.assertEqual(len(h.close_calls), 0, "未登记场所历史持仓不下发平仓指令")
 
     def test_unknown_position_update_sl_is_reported_not_silent(self):
         """UPDATE_SL 同样（且更危险：AI 以为收紧了止损，实际什么都没发生）。"""

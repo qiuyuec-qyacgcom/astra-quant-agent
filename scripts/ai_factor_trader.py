@@ -123,6 +123,7 @@ from scripts.trader.data_shape import (validate_intents_file,
                                        validate_trackers_file)
 from scripts.trader.cycle_snapshot import (
     build_state_payload,
+    position_span_from_rows,
     venue_position_span,
 )
 from scripts.trader.notifications import (
@@ -1095,6 +1096,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         record_trade=record_trade,
         sync_cloud_algo_stop=sync_cloud_algo_stop,
         venue_registry=venue_registry,
+        binance_rest=_binance_adapter(),
         ASSET_CLASS_PROFILES=ASSET_CLASS_PROFILES,
         TAKER_FEE_RATE=TAKER_FEE_RATE,
         TIME_STOP_ATR_BAND=TIME_STOP_ATR_BAND,
@@ -1122,6 +1124,7 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
         venue_registry=venue_registry,
         current_environment=current_environment,
         record_trade=record_trade,
+        binance_rest=_binance_adapter(),
     )
 
 # =============================================================================
@@ -1352,6 +1355,13 @@ def execute_portfolio():
         return None
     (active_pos_count, all_positions, entries_blocked, long_count, pending_inst_ids, real_pos_dict, reserved_long_count, reserved_short_count, reserved_slot_count, short_count, usdt_available) = _phase1
 
+    # 持仓构成一行**按场所据实拆分**（2026-10-30 用户报缺陷）：`active_pos_count` 是
+    # 本轮执行场所运行时的全量计数，币安档下把它当 okx_count 用会把币安仓印成
+    # `okx 1`；巡检通知与 AI 提示词共用这一份口径（`position_span_from_rows` 纯函数）。
+    position_span = position_span_from_rows(
+        rows=all_positions, max_positions=MAX_CONCURRENT_POSITIONS,
+        venue_position_span=venue_position_span)
+
     # 2. Parallel fetch for the configured crypto universe
     all_factors, executed_actions, trackers = fetch_universe_and_manage_positions(
         all_positions=all_positions,
@@ -1391,7 +1401,8 @@ def execute_portfolio():
         read_cycle_health=read_cycle_health,
         real_pos_dict=real_pos_dict,
         save_trackers=save_trackers,
-        session_restricted=session_restricted    )
+        session_restricted=session_restricted,
+        position_span=position_span    )
 
     # 交易时段窗口外（manage_only）：`brain_cache` 必为空 ⇒ 入场扫描只会逐标的打印
     # "本轮无有效新鲜 AI 决策，禁止开仓"然后 continue。既然一个仓位都开不出来，
@@ -1500,7 +1511,8 @@ def execute_portfolio():
         _run_captured=_run_captured,
         build_state_payload=build_state_payload,
         evaluate_asset_signal=evaluate_asset_signal,
-        os=os    )
+        os=os,
+        position_span=position_span    )
 
     # 6. 周期披露汇总（第 50/51 刀）：每轮必须留下**一条可检索**的"跳过/未核验"行，
     #    并把同一份载荷原子落盘给后端 /metrics（跨进程可观测：读不到 ≠ 没有）

@@ -595,6 +595,20 @@ class DataQualityTests(_Base, unittest.TestCase):
                                  "4H": _candles(16)})
         self.assertEqual(pkg["data_quality"], "invalid")
 
+    def test_invalid_carries_the_exact_missing_item(self):
+        """2026-10-30：invalid 必须点出**缺哪一项/缺几根**（否则提示词无从排障）。"""
+        pkg = self._run(candles={"15m": _candles(11), "1H": _candles(24),
+                                 "4H": _candles(0)})
+        self.assertEqual(pkg["data_quality"], "invalid")
+        self.assertIn("15m K线不足(11/12)", pkg["data_quality_reason"])
+        self.assertIn("4H K线不足(0/6)", pkg["data_quality_reason"])
+        self.assertNotIn("1H", pkg["data_quality_reason"], "够数的档位不得出现在原因里")
+
+    def test_valid_has_an_empty_reason(self):
+        pkg = self._run()
+        self.assertEqual(pkg["data_quality"], "valid")
+        self.assertEqual(pkg["data_quality_reason"], "")
+
     def test_empty_everything_is_invalid_but_still_returns(self):
         pkg = self._run(candles={"15m": [], "1H": [], "4H": []},
                         http={"/market/ticker": OSError("x")})

@@ -38,10 +38,46 @@ import time
 
 
 
+def _binance_amend_stop(binance_rest, inst_id, pos_side, new_sl):
+    """把币安该持仓的**全部**同向条件止损改到 `new_sl`。返回 `(ok, 旧止损, 说明)`。
+
+    与 OKX 分支逐条 amend 的纪律一致（双腿保护时只改一条会留下旧止损的腿，
+    覆盖率统计照样"100%"）：读 `protection_orders` → 逐条 `amend_stop`，
+    任何一条失败即整体判失败且**不回写真源**。
+    """
+    if binance_rest is None:
+        return False, 0.0, "币安适配器不可用（未配置或未开闸）"
+    ex = getattr(binance_rest, "exchange", binance_rest)
+    reader = getattr(ex, "protection_orders", None)
+    amend = getattr(ex, "amend_stop", None)
+    if not callable(reader) or not callable(amend):
+        return False, 0.0, "币安适配器未提供保护单读写接口"
+    try:
+        rows = reader(inst_id) or []
+    except Exception as exc:
+        return False, 0.0, f"保护单查询异常: {exc}"
+    live = [r for r in rows
+            if str(r.get("posSide", "net")).lower() in {pos_side, "net"}
+            and (r.get("algoId") or "")]
+    if not live:
+        return False, 0.0, "未找到真实条件止损单"
+    old_sl = float(live[0].get("slTriggerPx") or 0.0)
+    failed = []
+    for row in live:
+        try:
+            amend(inst_id, str(row.get("algoId")), new_sl)
+        except Exception:
+            failed.append(str(row.get("algoId") or ""))
+    if failed:
+        return False, old_sl, f"部分保护单修正失败: {','.join(failed)}"
+    return True, old_sl, ""
+
+
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions, *,
                                  ai_position_management_file, ai_tightens_stop,
                                  close_position_confirmed, okx_rest, venue_registry,
-                                 current_environment, record_trade=None):
+                                 current_environment, record_trade=None,
+                                 binance_rest=None):
     """Execute only fresh, high-confidence and risk-reducing AI position instructions."""
     if not os.path.exists(ai_position_management_file):
         return
@@ -85,9 +121,10 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
         pos_side = str(position.get("posSide", "net")).lower()
         pos_venue = str(position.get("venue") or position.get("exchange") or "okx").lower()
         name = inst_id.replace("-USDT-SWAP", "")
-        if pos_venue != "okx":
+        if pos_venue not in ("okx", "binance"):
+            # 未登记场所的历史持仓：instId 与 OKX 同名，任何指令都不能交给 OKX 接口。
             executed_actions.append(
-                f"[{name}] 非 OKX 场所({pos_venue})历史持仓，只读跳过AI持仓管理（不下发任何交易所指令）")
+                f"[{name}] 场所未接入执行面({pos_venue})，只读跳过AI持仓管理（不下发任何交易所指令）")
             continue
         current_px = float(position.get("markPx", position.get("last", 0)) or 0)
 
@@ -149,32 +186,41 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
 
             amend_ok = False
             old_sl = 0.0
-            try:
-                algo_orders = okx_rest.pending_algo_orders(inst_id)
-            except Exception as exc:
-                executed_actions.append(f"[{name}] 云端止损收紧失败，原保护单保持不变（查询异常：{exc}）")
-                continue
-            # 第一百八十六刀：同 cloud_protection —— 净持仓账户的云端单 `posSide` 是
-            # `"net"`，精确相等会永远找不到 ⇒ 只会打印"未找到真实云端止损单"，
-            # 云端止损上移静默不生效。统一为 net 容错。
-            # ⚠️ 2026-09-29：双腿方案下一个持仓挂着 [TP1 腿, 余仓腿] 两条保护单，
-            # 旧实现用 `next(...)` **只挑一条** amend ⇒ 另一条腿保留旧止损
-            # （覆盖率统计照样说 100%，人从面板上看不出来）。此处改为**逐条** amend。
-            live_algos = [o for o in algo_orders
-                          if str(o.get("state", "")).lower() == "live"
-                          and str(o.get("posSide", "net")).lower() in {pos_side, "net"}
-                          and o.get("slTriggerPx")]
-            if not live_algos:
-                executed_actions.append(f"[{name}] 未找到真实云端止损单，无法更新")
-                continue
-            old_sl = float(live_algos[0].get("slTriggerPx", 0) or 0)
-            failed_legs = []
-            for _leg in live_algos:
+            if pos_venue == "binance":
+                # 币安走自己的条件单接口（绝不用 okx_rest 去改同名标的的 OKX 单）。
+                amend_ok, old_sl, _bn_detail = _binance_amend_stop(
+                    binance_rest, inst_id, pos_side, new_sl)
+                if not amend_ok:
+                    executed_actions.append(
+                        f"[{name}] 币安止损收紧失败，原保护单保持不变（{_bn_detail}）")
+                    continue
+            else:
                 try:
-                    okx_rest.amend_algo_sl(_leg["algoId"], new_sl, inst_id=inst_id, new_sl_ord_px="-1")
-                except Exception:
-                    failed_legs.append(str(_leg.get("algoId") or ""))
-            amend_ok = not failed_legs
+                    algo_orders = okx_rest.pending_algo_orders(inst_id)
+                except Exception as exc:
+                    executed_actions.append(f"[{name}] 云端止损收紧失败，原保护单保持不变（查询异常：{exc}）")
+                    continue
+                # 第一百八十六刀：同 cloud_protection —— 净持仓账户的云端单 `posSide` 是
+                # `"net"`，精确相等会永远找不到 ⇒ 只会打印"未找到真实云端止损单"，
+                # 云端止损上移静默不生效。统一为 net 容错。
+                # ⚠️ 2026-09-29：双腿方案下一个持仓挂着 [TP1 腿, 余仓腿] 两条保护单，
+                # 旧实现用 `next(...)` **只挑一条** amend ⇒ 另一条腿保留旧止损
+                # （覆盖率统计照样说 100%，人从面板上看不出来）。此处改为**逐条** amend。
+                live_algos = [o for o in algo_orders
+                              if str(o.get("state", "")).lower() == "live"
+                              and str(o.get("posSide", "net")).lower() in {pos_side, "net"}
+                              and o.get("slTriggerPx")]
+                if not live_algos:
+                    executed_actions.append(f"[{name}] 未找到真实云端止损单，无法更新")
+                    continue
+                old_sl = float(live_algos[0].get("slTriggerPx", 0) or 0)
+                failed_legs = []
+                for _leg in live_algos:
+                    try:
+                        okx_rest.amend_algo_sl(_leg["algoId"], new_sl, inst_id=inst_id, new_sl_ord_px="-1")
+                    except Exception:
+                        failed_legs.append(str(_leg.get("algoId") or ""))
+                amend_ok = not failed_legs
 
             if amend_ok:
                 executed_actions.append(f"[{name}] 云端止损收紧至 {new_sl} ({pos_venue.upper()}): {reason}")
@@ -190,6 +236,12 @@ def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, exec
                 executed_actions.append(f"[{name}] 云端止损更新失败，原保护单保持不变")
 
         elif action == "UPDATE_TP":
+            if pos_venue == "binance":
+                # 币安侧的条件止盈由配对保护单承载，改价需重建整组保护腿；
+                # 首版不做（宁可如实拒绝，也不动半水平保护）。
+                executed_actions.append(
+                    f"[{name}] 币安暂不支持调整止盈（整仓保护保持不变），如需改价请用 CLOSE_MARKET")
+                continue
             # 持仓中调整止盈（2026-09-29）。三条纪律缺一不可：
             #   ① 认腿靠建仓登记的 leg_algo_ids（不靠比价猜，改错腿 = 半仓错价成交）；
             #   ② 分批已发生 ⇒ 只允许改 tp2（tp1 那一半已经落袋）；

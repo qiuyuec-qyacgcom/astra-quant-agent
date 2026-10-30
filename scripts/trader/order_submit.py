@@ -29,6 +29,27 @@ from typing import Any, Dict, Optional, Tuple
 
 
 
+def _binance_min_notional(binance_rest, inst_id: str) -> float:
+    """币安该合约的**最小下单名义额**（USDT）。
+
+    交易所侧硬约束（USDⓈ-M 缺省 5U）：`notional < 5` 会被 -4164 拒绝
+    「Order's notional must be no smaller than 5」。本地必须在发单前拦住 ——
+    否则同一条 AI 决策每 15 分钟被拒一次，日志刷同一行、周期白跑。
+
+    规格读不到时按缺省 5U 判定（宁可提前拒单并给出可执行文案，也不把
+    "读不到"当成"没有下限"）。
+    """
+    floor = 0.0
+    try:
+        rows = binance_rest.instruments(inst_id) if binance_rest is not None else []
+        for row in rows or []:
+            floor = float(row.get("minNotional") or 0.0)
+            break
+    except Exception as exc:
+        print(f"[名义额闸] warn {inst_id} 币安合约规格读取失败，按缺省 5U 判定: {exc}")
+    return floor if floor > 0 else 5.0
+
+
 def _shared_venue_entry_gate(*, venue: str, asset: str, action: str,
                              margin_unclamped: float, leverage: float,
                              confidence: float, current_environment) -> Tuple[bool, str]:
@@ -448,9 +469,20 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
         _lev = _num("leverage")
         if target_venue == "binance":
             # 币安币本位：qty = margin × leverage / price（ct_val 恒为 1，min_sz 为币数）。
-            # 币数对齐 step / minNotional 由 BinanceExchange._align_qty 内部处理。
+            # 币数对齐 step 由 BinanceExchange._align_qty 内部处理，但**名义额下限必须
+            # 在这里先拦**（2026-10-30 实盘缺陷）：市价档在适配器内不做名义额校验
+            # （历史上传 price=None 跳过），`margin×lever < 5U` 的单会一路打到交易所
+            # 被 -4164 拒，且失败不进冷却 ⇒ 每周期重算重试同一条失败日志。
             if _m > 0 and _lev > 0 and effective_px > 0:
                 _bin_qty = (_m * _lev) / effective_px
+                _bin_notional = _m * _lev
+                _bin_floor = _binance_min_notional(binance_rest, inst_id)
+                if _bin_notional < _bin_floor - 1e-9:
+                    release_signal_reservation(_reservation, "币安名义额低于交易所最小")
+                    return False, (f"{inst_id} 按保证金 {_m:.2f}U × {_lev:g}x 折算名义额 "
+                                   f"{_bin_notional:.2f}U 低于币安最小下单名义 "
+                                   f"{_bin_floor:.2f}U —— 请提高单笔保证金/杠杆，"
+                                   f"或改用其他标的")
                 _size_from_margin = _bin_qty
                 size = _bin_qty
         else:
@@ -478,8 +510,11 @@ def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: f
                 return False, "币安适配器不可用（未配置或未开闸）"
             _bin_size = f"{size:g}" if isinstance(size, (int, float)) else str(size)
             if ord_type == "market":
+                # `px_ref` 让适配器用**同一个**锚价做 minNotional 复验（绝不二次取价，
+                # 两次读价可能错位，把刚过闸的单在边界又判成不足额）。
                 placed = binance_rest.place_protected_market_order(
-                    inst_id, side, pos_side, _bin_size, effective_tp, effective_sl)
+                    inst_id, side, pos_side, _bin_size, effective_tp, effective_sl,
+                    px_ref=effective_px)
             else:
                 placed = binance_rest.place_protected_limit_order(
                     inst_id, side, pos_side, _bin_size, effective_px, effective_tp, effective_sl)

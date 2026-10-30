@@ -229,6 +229,29 @@ class MarketDataServicePrefersSnapshotTests(unittest.TestCase):
                 rows = mds.fetch_candles("BTC-USDT-SWAP", bar="1H", limit=10, venue="binance")
             self.assertEqual(len(rows), 1, "快照不足 limit 根必须回退 REST")
 
+    def test_rest_failure_falls_back_to_the_partial_ws_series(self):
+        """REST 被封/限流时，WS 里够**判据下限**就别让整包变成"数据质量 invalid"。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = self._snapshot(td, written_ms=int(mds.time.time() * 1000), candles_n=12)
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange") as fake, \
+                 patch.object(mds, "note_failure") as failure:
+                fake.return_value.candles.side_effect = RuntimeError("IP banned (-1003)")
+                rows = mds.fetch_candles("BTC-USDT-SWAP", bar="1H", limit=24, venue="binance")
+            self.assertEqual(len(rows), 12, "应改用 WS 快照里够判据的 12 根")
+            self.assertTrue(failure.called, "REST 取数失败必须进失败账（否则只剩猜）")
+
+    def test_rest_failure_without_enough_ws_rows_still_returns_empty(self):
+        """WS 也不够 1H 的 8 根下限 ⇒ 仍返回空（不许拿 3 根冒充完整历史）。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = self._snapshot(td, written_ms=int(mds.time.time() * 1000), candles_n=3)
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange") as fake, \
+                 patch.object(mds, "note_failure"):
+                fake.return_value.candles.side_effect = RuntimeError("banned")
+                rows = mds.fetch_candles("BTC-USDT-SWAP", bar="1H", limit=24, venue="binance")
+            self.assertEqual(rows, [])
+
     def test_sufficient_candles_served_from_snapshot(self):
         with tempfile.TemporaryDirectory() as td:
             path = self._snapshot(td, written_ms=int(mds.time.time() * 1000), candles_n=6)
@@ -237,6 +260,89 @@ class MarketDataServicePrefersSnapshotTests(unittest.TestCase):
                               side_effect=AssertionError("不得回退 REST")):
                 rows = mds.fetch_candles("BTC-USDT-SWAP", bar="1H", limit=4, venue="binance")
             self.assertEqual(len(rows), 4)
+
+
+class SeedHistoryTests(unittest.TestCase):
+    """开流前的 REST 播种（2026-10-30）：WS 从连上那刻才攒 K 线，1H/4H 热身期太长。
+
+    不播种的后果是决策链在热身期只能回退 REST，而币安 REST 一旦被封/限流，
+    整包就成「数据质量 invalid」（用户报的正是这个形态）。
+    """
+
+    @staticmethod
+    def _rows(n, step_ms=900_000):
+        return [[str(1_000_000 + i * step_ms), "1", "2", "0.5", "1.5", "10",
+                 "15", "15", "1"] for i in range(n)]
+
+    def test_seed_history_fills_all_three_intervals(self):
+        state = ms.MarketState(max_bars=240)
+        seen = []
+
+        def fetch(inst, bar, limit):
+            seen.append((inst, bar, limit))
+            return self._rows(limit)
+
+        report = ms.seed_history(state, symbols=["BTC-USDT-SWAP"], venue="binance",
+                                 limit=120, fetch=fetch)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["symbols"], 1)
+        self.assertEqual(report["rows"], 360, "三档 × 120 根")
+        self.assertEqual([b for _i, b, _l in seen], ["15m", "1H", "4H"])
+        snap = state.snapshot()
+        self.assertEqual(len(snap["klines"]["BTC-USDT-SWAP"]["15m"]), 120)
+        self.assertEqual(len(snap["klines"]["BTC-USDT-SWAP"]["4H"]), 120)
+
+    def test_seeded_snapshot_is_consumable_without_rest(self):
+        """播种写进快照后，`fetch_candles(venue=binance)` 严格档应直接命中快照。"""
+        state = ms.MarketState(max_bars=240)
+        ms.seed_history(state, symbols=["BTC-USDT-SWAP"], venue="binance", limit=60,
+                        fetch=lambda i, b, l: self._rows(l))
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "ws.json")
+            self.assertTrue(ms.write_snapshot(path, state.snapshot(), compact=True))
+            with patch.object(mds, "_WS_SNAPSHOT_FILE", path), \
+                 patch.object(mds, "_binance_exchange",
+                              side_effect=AssertionError("播种够数就不该回退 REST")):
+                rows = mds.fetch_candles("BTC-USDT-SWAP", bar="1H", limit=24,
+                                         venue="binance")
+        self.assertEqual(len(rows), 24)
+
+    def test_one_failing_interval_does_not_lose_the_others(self):
+        state = ms.MarketState(max_bars=240)
+
+        def fetch(inst, bar, limit):
+            if bar == "4H":
+                raise RuntimeError("IP banned (-1003)")
+            return self._rows(limit)
+
+        report = ms.seed_history(state, symbols=["BTC-USDT-SWAP"], venue="binance",
+                                 limit=40, fetch=fetch)
+        self.assertEqual(report["symbols"], 1, "仍算成功标的（另两档已播）")
+        self.assertEqual(len(report["errors"]), 1)
+        self.assertIn("4H", report["errors"][0])
+        snap = state.snapshot()
+        self.assertEqual(len(snap["klines"]["BTC-USDT-SWAP"]["15m"]), 40)
+        self.assertEqual(snap["klines"]["BTC-USDT-SWAP"].get("4H"), None)
+
+    def test_seed_is_a_noop_for_non_binance(self):
+        fetcher = ms._seed_fetch("okx")
+        self.assertEqual(fetcher("BTC-USDT-SWAP", "15m", 10), [])
+
+    def test_run_stream_seeds_before_connecting(self):
+        frames = [json.dumps({"result": None, "id": 1})]
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "ws.json")
+            snap = ms.run_stream(
+                venue="binance", symbols=["BTC-USDT-SWAP"], snapshot_path=path,
+                connect_factory=lambda url, **kw: _FakeWS(frames),
+                max_rounds=1, reconnect_backoff=0.01, flush_seconds=0.0,
+                now=lambda: 1_700_000_000_000,
+                seed=True, seed_limit=30,
+                seed_fetch=lambda i, b, l: self._rows(l))
+            self.assertEqual(len(snap["klines"]["BTC-USDT-SWAP"]["15m"]), 30,
+                             "播种结果必须在首帧之前就在快照里")
+            on_disk = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.assertIn("BTC-USDT-SWAP", on_disk["klines"])
 
 
 class DeepStreamTests(unittest.TestCase):

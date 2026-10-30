@@ -229,6 +229,23 @@ class BinanceExchange:
     def _base_url(self) -> str:
         return _host_for(str(getattr(self.env, "mode", "")).lower())
 
+    def _public_market_base(self) -> str:
+        """**公共行情**基址：恒走实盘域名（与资金档无关）。
+
+        2026-10-30 用户报「币安与 OKX 共有的标的，实时决策推演提示 数据质量 invalid，
+        OKX 侧正常」：根因是资金档为 demo 时，这里的 K线/ticker/exchangeInfo 全都走
+        `demo-fapi`（测试网独立撮合、符号与 K 线历史都与实盘不同），而 **WS 行情流
+        （`market_stream`）与因子引擎（`factors/okx_quant_factors.py::_BINANCE_FAPI`）
+        早就用的是实盘公开接口**。于是同一包数据一半实盘一半测试网：WS 攒够根数时
+        valid，回退 REST 就整包 invalid（OKX 模拟盘本就是实盘行情，故不受影响）。
+
+        币安官方口径同此：公开行情不区分资金档，只有**签名/交易**接口才需要
+        按档切 `fapi` / `demo-fapi`。需要指向别的网关时用
+        `ASTRA_BINANCE_PUBLIC_HOST` 显式覆盖（仅用于自建代理/离线联调）。
+        """
+        override = str(os.getenv("ASTRA_BINANCE_PUBLIC_HOST", "") or "").strip().rstrip("/")
+        return override or LIVE_HOST
+
     def _api_key(self) -> str:
         return str(getattr(self.env, "api_key", "") or "")
 
@@ -247,7 +264,9 @@ class BinanceExchange:
             return
         start_ms = int(time.time() * 1000)
         try:
-            row = self._public("/fapi/v1/time")
+            # ⚠️ 时间同步必须问**签名用的那台**（`_base_url`），不能走公共行情域名：
+            # 两档服务器的时钟偏差不同，拿实盘时间去签 demo 请求会 -1021。
+            row = self._request("GET", "/fapi/v1/time", signed=False)
         except Exception:
             self._time_synced_at = now
             return
@@ -277,6 +296,7 @@ class BinanceExchange:
         client_id: str = "",
         retry_429: bool = True,
         retry_time: bool = True,
+        base: str | None = None,
     ) -> Any:
         method = method.upper()
         payload: dict[str, str] = {}
@@ -299,7 +319,7 @@ class BinanceExchange:
         else:
             query = urlencode(payload)
             headers = {}
-        url = self._base_url() + path + (f"?{query}" if query else "")
+        url = (base or self._base_url()) + path + (f"?{query}" if query else "")
         # 封禁熔断：IP 仍被封期间直接拒绝发请求（不烧配额、不把封禁越拖越长）
         _remaining = _ban_remaining_seconds()
         if _remaining > 0:
@@ -336,7 +356,8 @@ class BinanceExchange:
                 delay = 1.0
             time.sleep(delay)
             return self._request(
-                method, path, params, signed=False, mutate=False, client_id=client_id, retry_429=False
+                method, path, params, signed=False, mutate=False, client_id=client_id,
+                retry_429=False, base=base,
             )
         if 300 <= status < 400:
             raise RuntimeError("Binance redirected; refusing to follow credentials")
@@ -362,7 +383,7 @@ class BinanceExchange:
                 self._sync_time_offset(force=True)
                 return self._request(
                     method, path, params, signed=True, mutate=mutate, client_id=client_id,
-                    retry_429=retry_429, retry_time=False,
+                    retry_429=retry_429, retry_time=False, base=base,
                 )
             if mutate and (code in UNKNOWN_MUTATE_CODES or status >= 500):
                 raise UncertainSubmission(message, client_id)
@@ -374,7 +395,8 @@ class BinanceExchange:
         return payload_json
 
     def _public(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return self._request("GET", path, params, signed=False)
+        # 公共行情恒走实盘域名（见 `_public_market_base` 的 2026-10-30 事故说明）。
+        return self._request("GET", path, params, signed=False, base=self._public_market_base())
 
     def _private(self, method: str, path: str, params: dict[str, Any] | None = None, *, mutate: bool = False, client_id: str = "") -> Any:
         return self._request(method, path, params, signed=True, mutate=mutate, client_id=client_id)
@@ -865,7 +887,7 @@ class BinanceExchange:
             result.reverse()
             return result
 
-        return get_or_fetch(self._base_url(), inst_id, bar, limit, load)
+        return get_or_fetch(self._public_market_base(), inst_id, bar, limit, load)
 
     def orderbook(self, inst_id: str, sz: int = 5) -> dict[str, Any]:
         symbol = _to_symbol(inst_id)
@@ -1860,15 +1882,21 @@ class BinanceExchange:
         size: Any,
         tp_px: Any,
         sl_px: Any,
+        *,
+        px_ref: Any = None,
     ) -> dict[str, Any]:
         """市价单入场（复用同一套 durable pending 状态机）。
 
         与限价单唯一区别：entry 单发 ``type="MARKET"``，不带 ``price``/``timeInForce``，
-        数量对齐 step（``_align_qty(..., price=None)`` 跳过硬 notional 校验）。
+        数量对齐 step。**名义额下限照样校验**：市价单没有 entry price，改用参考现价
+        （``px_ref``，缺省现取 ticker）换算 —— 旧实现传 ``price=None`` 把
+        ``minNotional`` 校验整段跳过，于是 ``margin×lever < 5U`` 的单每周期都被
+        交易所 -4164 拒一次（"Order's notional must be no smaller than 5"）。
         TP/SL 仍走独立算法单保护腿，由同一状态机原子下发。
         """
         return self._place_protected_order(
-            inst_id, side, pos_side, size, None, tp_px, sl_px, ord_type="MARKET")
+            inst_id, side, pos_side, size, None, tp_px, sl_px,
+            ord_type="MARKET", market_px_ref=px_ref)
 
     def _place_protected_order(
         self,
@@ -1881,6 +1909,7 @@ class BinanceExchange:
         sl_px: Any,
         *,
         ord_type: str,
+        market_px_ref: Any = None,
     ) -> dict[str, Any]:
         is_market = str(ord_type).upper() == "MARKET"
         self._entry_side(side, pos_side)
@@ -1888,7 +1917,18 @@ class BinanceExchange:
         px = None if is_market else self._align_price(inst_id, price)
         tp = self._align_price(inst_id, tp_px)
         sl = self._align_price(inst_id, sl_px)
-        qty = self._align_qty(inst_id, size, None if is_market else px)
+        # 市价单也要过 minNotional：用参考现价换算名义额（上游市价重锚时通常已持有
+        # 现价，取不到才回退一次公开 ticker）。取价失败不阻断 —— 宁可由交易所兜底，
+        # 也不让"行情抖动"变成拒单理由（与旧行为一致的那一段）。
+        _qty_px = px
+        if is_market:
+            _qty_px = market_px_ref
+            if _qty_px is None:
+                try:
+                    _qty_px = self.ticker(inst_id)["last"]
+                except Exception:
+                    _qty_px = None
+        qty = self._align_qty(inst_id, size, _qty_px)
         if is_market:
             # 市价单无 entry price：TP/SL 相对现价的几何关系已由上游 order_submit
             # 用现价重锚后验证过，此处仅做方向一致性 sanity 校验（多单 SL<TP、空单 SL>TP）。
@@ -2471,10 +2511,10 @@ class BinanceTradingAdapter(BinancePublicAdapter):
 
     def place_protected_market_order(
         self, inst_id: str, side: str, pos_side: str,
-        size: Any, tp_px: Any, sl_px: Any,
+        size: Any, tp_px: Any, sl_px: Any, px_ref: Any = None,
     ) -> dict[str, Any]:
         return self._ex.place_protected_market_order(
-            inst_id, side, pos_side, size, tp_px, sl_px)
+            inst_id, side, pos_side, size, tp_px, sl_px, px_ref=px_ref)
 
     def close_position(self, inst_id: str, pos_side: str, **kw) -> dict[str, Any]:
         return self._ex.close_position(inst_id, pos_side, **kw)

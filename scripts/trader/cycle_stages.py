@@ -121,7 +121,8 @@ def persist_state_and_sync_ledger(*,
         _run_captured,
         build_state_payload,
         evaluate_asset_signal,
-        os):
+        os,
+        position_span: str = ""):
     state_payload = build_state_payload(
         timestamp_full=timestamp_full, active_pos_count=active_pos_count,
         max_positions=MAX_CONCURRENT_POSITIONS, long_count=long_count,
@@ -148,10 +149,13 @@ def persist_state_and_sync_ledger(*,
         except Exception as e:
             print(f"[Ledger Sync Warning] {e}")
 
-    position_span = venue_position_span(okx_count=active_pos_count, okx_long=long_count,
-                                        okx_short=short_count,
-                                        max_positions=MAX_CONCURRENT_POSITIONS)
-    log_entry = f"[{timestamp_full}] ⚡ AstraQuant v{__version__} 巡检完成 | {position_span} | 动作: {', '.join(executed_actions) if executed_actions else '无开平仓操作'}\n"
+    # ⚠️ 场所标签必须**据实**（2026-10-30 用户报缺陷）：调用点用真实持仓行
+    # （`position_span_from_rows`）算好传入，币安档下才不会被印成 `okx 1`。
+    # 未传（旧调用点/测试）时退回旧口径，行为逐字不变。
+    _span = position_span or venue_position_span(
+        okx_count=active_pos_count, okx_long=long_count,
+        okx_short=short_count, max_positions=MAX_CONCURRENT_POSITIONS)
+    log_entry = f"[{timestamp_full}] ⚡ AstraQuant v{__version__} 巡检完成 | {_span} | 动作: {', '.join(executed_actions) if executed_actions else '无开平仓操作'}\n"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(log_entry)
     print(log_entry.strip())
@@ -349,7 +353,8 @@ def scan_risk_gates_and_ai_brain(*,
         read_cycle_health,
         real_pos_dict,
         save_trackers,
-        session_restricted=False):
+        session_restricted=False,
+        position_span: str = ""):
     """相位 4 前段：熔断判定 + 单标的保证金上限自适应 + 主脑批量扫描 + 池可信闸。
 
     段内不动控制流（无 return/break）：`executed_actions` 由**原地 append** 回传
@@ -371,9 +376,10 @@ def scan_risk_gates_and_ai_brain(*,
     # One LLM call covers the full instrument universe and all active positions.
     if not cb_active and execute_batch_ai_brain_cycle and not session_restricted:
         try:
-            pos_desc = "当前系统总" + venue_position_span(
+            # 与巡检通知同源：真实持仓行按场所拆分的「持仓构成」（未传则退回旧口径）。
+            pos_desc = "当前系统总" + (position_span or venue_position_span(
                 okx_count=active_pos_count, okx_long=long_count, okx_short=short_count,
-                max_positions=MAX_CONCURRENT_POSITIONS)
+                max_positions=MAX_CONCURRENT_POSITIONS))
             # 持仓全景装配（阶段 4·B3 第三十一刀：迁至 scripts/trader/position_universe.py）
             active_pos_list = _collect_okx_position_payloads(all_factors, trackers)
             brain_cache = execute_batch_ai_brain_cycle(pos_desc, active_pos_list, usdt_available=usdt_available) or {}

@@ -69,6 +69,7 @@ __all__ = [
     "stream_url",
     "venue_symbol",
     "subscribe_payload",
+    "seed_history",
     "write_snapshot",
     "load_snapshot",
     "load_market_snapshot",
@@ -623,6 +624,42 @@ class MarketState:
                 for old in sorted(series)[: len(series) - self._max_bars]:
                     series.pop(old, None)
 
+    def seed_candles(self, inst_id: str, bar: str, rows: Sequence[Sequence[Any]]) -> int:
+        """用 REST 历史 K 线给某 (标的, 周期) **播种**；返回写入根数（按 open_ms upsert）。
+
+        为什么需要（2026-10-30）：WS 只从**连上那一刻**开始攒 K 线 —— 决策链要求
+        1H≥8 根、4H≥6 根（`fetch_candles` 的严格档还要 24/16 根），4H 要等 64 小时
+        才够，这段"热身期"取数侧只能回退 REST；币安 REST 一旦被封/限流，整包就成
+        「数据质量 invalid」。开流前播种一次，15m/1H/4H 立刻可用，之后靠 WS 增量维护。
+
+        实时帧仍会覆盖同一 open_ms 的行（`update` 用同一个 key），故播种不会把
+        "正在形成的最后一根"固化住。
+        """
+        if not inst_id or not bar:
+            return 0
+        added = 0
+        with self._lock:
+            series = self._klines.setdefault(inst_id, {}).setdefault(bar, {})
+            for row in rows or []:
+                if not isinstance(row, (list, tuple)) or len(row) < 9:
+                    continue
+                try:
+                    open_ms = int(row[0])
+                except (TypeError, ValueError):
+                    continue
+                if open_ms <= 0:
+                    continue
+                quote = _text(row[7])
+                series[open_ms] = [
+                    str(open_ms), _text(row[1]), _text(row[2]), _text(row[3]),
+                    _text(row[4]), _text(row[5]), quote, quote, _text(row[8]),
+                ]
+                added += 1
+            if len(series) > self._max_bars:
+                for old in sorted(series)[: len(series) - self._max_bars]:
+                    series.pop(old, None)
+        return added
+
     def ticker(self, inst_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._tickers.get(inst_id)
@@ -691,26 +728,95 @@ def load_market_snapshot(path: str) -> Dict[str, Any]:
     return payload
 
 
+def _seed_fetch(venue: str):
+    """默认播种取数：币安**公开 REST** 的 K 线（不递归走 WS 快照，避免自我依赖）。"""
+    def _fetch(inst_id: str, bar: str, limit: int):
+        if str(venue or "").strip().lower() != "binance":
+            return []
+        # ⚠️ 双拼写铁律：本模块可能以 `scripts.market_stream` 或顶层 `market_stream` 身份
+        # 被导入，而 `market_data_service` 也有两种拼写 —— 必须**复用进程里已加载的那个
+        # 实例**，否则会凭空造出第二份 `_BINANCE_EXCHANGE` / 快照解析缓存。
+        mds = sys.modules.get("market_data_service") or sys.modules.get("scripts.market_data_service")
+        if mds is None:                           # 还没人导入过：按本模块的导入身份取同族
+            try:
+                from . import market_data_service as mds      # type: ignore[no-redef]
+            except ImportError:                   # 从 scripts 目录直接执行时
+                import market_data_service as mds            # type: ignore[no-redef]
+        return mds._binance_exchange().candles(inst_id, bar=bar, limit=limit) or []
+    return _fetch
+
+
+def seed_history(state: MarketState, *, symbols: Sequence[str], venue: str = "binance",
+                 limit: int = 240, fetch: Any = None,
+                 intervals: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """用 REST 历史 K 线给 `state` 播种（`run_stream(seed=True)` 在连 WS 前调用）。
+
+    返回 `{"rows": 写入根数, "symbols": 成功标的数, "errors": [说明...]}`。
+    **任何失败都只记账**（进 `errors`），绝不让播种失败拖垮采集器 —— 缺的部分
+    仍由"WS 增量 + 取数侧 REST 回退"兜着，行为不比播种前差。
+    """
+    bars = list(intervals or BINANCE_WS_INTERVALS.keys())
+    fetcher = fetch or _seed_fetch(venue)
+    rows_total = 0
+    ok_symbols = 0
+    errors: List[str] = []
+    for raw_symbol in symbols or []:
+        inst = str(raw_symbol or "").strip().upper()
+        if not inst:
+            continue
+        got_any = False
+        for bar in bars:
+            try:
+                rows = fetcher(inst, bar, int(limit)) or []
+            except Exception as exc:
+                errors.append(f"{inst} {bar}: {type(exc).__name__}: {exc}")
+                continue
+            written = state.seed_candles(inst, bar, rows)
+            if written:
+                rows_total += written
+                got_any = True
+        if got_any:
+            ok_symbols += 1
+    return {"rows": rows_total, "symbols": ok_symbols, "errors": errors}
+
+
 def run_stream(*, venue: str = "binance", symbols: Sequence[str],
                snapshot_path: Optional[str] = None,
                flush_seconds: float = 2.0, max_bars: int = 240,
                reconnect_backoff: float = 3.0,
                connect_factory: Any = None, stop: Any = None,
                now: Any = _now_ms,
-               max_rounds: Optional[int] = None) -> Dict[str, Any]:
+               max_rounds: Optional[int] = None,
+               seed: bool = False, seed_limit: Optional[int] = None,
+               seed_fetch: Any = None) -> Dict[str, Any]:
     """**常驻**采集：连上 → 一次性订阅全部标的(ticker + 三档 K 线) → 收帧 → 定期落快照。
 
     - 断线自动重连（有界退避）；`stop` 可以是 `threading.Event` 或零参可调用；
     - 空闲超时（`recv` 的 `TimeoutError`）**不算错误**，只继续等；
     - 其它异常一律记健康账本 + `note_reconnect`，绝不静默退出；
-    - `connect_factory` / `max_rounds` 供测试注入，绝不真出网。
+    - `seed=True`：连 WS **之前**先用 REST 历史 K 线播种（否则 1H/4H 要等
+      24h/64h 才够决策链根数，热身期只能靠 REST 回退；2026-10-30）；
+    - `connect_factory` / `max_rounds` / `seed_fetch` 供测试注入，绝不真出网。
     """
     if connect_factory is None:                      # 延迟导入：import 本模块不拉网络栈
         from websockets.sync.client import connect as connect_factory  # type: ignore[no-redef]
 
     health = StreamHealth()
     state = MarketState(max_bars=max_bars)
-    native = [venue_symbol(venue, s) for s in (symbols or []) if str(s or "").strip()]
+    canonical = [str(s or "").strip() for s in (symbols or []) if str(s or "").strip()]
+    native = [venue_symbol(venue, s) for s in canonical]
+    if seed and canonical:
+        _seeded = seed_history(state, symbols=canonical, venue=venue,
+                               limit=int(seed_limit or max_bars), fetch=seed_fetch)
+        for _err in _seeded["errors"][:5]:
+            health.note_error(venue, f"seed {_err}", now_ms=now())
+        print(f"[market_stream] seed {venue}: {_seeded['symbols']} 标的 / "
+              f"{_seeded['rows']} 根"
+              + (f"，{len(_seeded['errors'])} 档失败" if _seeded["errors"] else ""))
+        if snapshot_path:                     # 播种结果立刻可见（不等首次 flush）
+            write_snapshot(snapshot_path,
+                           state.snapshot(now_ms=now(), health=health.snapshot(now_ms=now())),
+                           compact=True)
     if not native:
         return state.snapshot(now_ms=now(), health=health.snapshot(now_ms=now()))
     url = stream_url(venue, native[0])

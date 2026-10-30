@@ -146,6 +146,37 @@ class _Rig:
         return key, {key: tracker}
 
 
+class BinanceStopSyncTest(unittest.TestCase):
+    """币安持仓的棘轮收紧必须落到**币安自己的**条件单上（不许走 OKX 云端 OCO）。"""
+
+    class _Ex:
+        def __init__(self):
+            self.amends = []
+
+        def protection_orders(self, inst_id):
+            return [{"algoId": "A1", "posSide": "long", "slTriggerPx": "69000"}]
+
+        def amend_stop(self, inst_id, algo_id, new_sl):
+            self.amends.append((inst_id, algo_id, new_sl))
+
+    class _Bn:
+        def __init__(self, ex):
+            self.exchange = ex
+
+    def test_ratchet_tightening_goes_to_the_binance_condition_orders(self):
+        ex = self._Ex()
+        rig = _Rig(floor=70500.0, stage_desc="🔒 锁利一档", old_sl=69000.0,
+                   high_water=70500.0)
+        rig._pos = _pos(venue="binance")
+        _key, trackers = rig.trackers(_f())
+        manage_position_tp_and_trailing(
+            _f(), rig._pos, trackers, "2026-09-21 12:00:00", rig.actions,
+            **rig.kwargs(), binance_rest=self._Bn(ex))
+        self.assertEqual(ex.amends, [("BTC-USDT-SWAP", "A1", 70500.0)],
+                         "收紧后的止损必须改到币安条件单")
+        self.assertEqual(rig.synced, [], "币安持仓绝不许走 OKX 的云端 OCO 同步")
+
+
 class ExitFailureBranchTest(unittest.TestCase):
     def _run(self, rig, f=None):
         f = f or _f()
@@ -494,13 +525,34 @@ class CrossVenueExitRoutingTest(unittest.TestCase):
             f, rig._pos, trackers, "2026-09-21 12:00:00", rig.actions, **rig.kwargs())
         return ok, detail, trackers, key
 
-    def test_a_non_okx_position_is_safely_skipped_without_issuing_orders(self):
+    def test_a_binance_position_runs_the_mechanical_exit_on_its_own_venue(self):
+        """2026-10-30：币安接入机械退出 —— 币安档下不再"只读跳过"（那会裸奔）。"""
         rig = _Rig(hard_stop=True)
         rig._pos = _pos(venue="binance")
         ok, why, _, _ = self._run(rig)
+        self.assertTrue(ok)
+        self.assertEqual(why, "已硬止损")
+        self.assertTrue(rig.close_calls, "币安持仓必须走机械退出")
+        _a, kw = rig.close_calls[0]
+        self.assertEqual(kw.get("venue"), "binance", "平仓必须显式指定币安，绝不默认 OKX")
+
+    def test_an_unregistered_venue_is_still_skipped_without_issuing_orders(self):
+        rig = _Rig(hard_stop=True)
+        rig._pos = _pos(venue="gate")
+        ok, why, _, _ = self._run(rig)
         self.assertFalse(ok)
-        self.assertIn("非 OKX 场所", why)
-        self.assertEqual(rig.close_calls, [], "已下架场所绝对不下发平仓指令")
+        self.assertIn("场所未接入执行面", why)
+        self.assertEqual(rig.close_calls, [], "未登记场所绝对不下发平仓指令")
+
+    def test_binance_position_is_never_force_closed_over_missing_protection(self):
+        """币安保护单读不到 ⇒ 只告警不平仓（可能是用户手动开的仓）。"""
+        rig = _Rig()
+        rig._pos = _pos(venue="binance")
+        ok, _why, _, _ = self._run(rig)
+        self.assertFalse(ok)
+        self.assertEqual(rig.close_calls, [], "读不到币安保护单不得市价平仓")
+        self.assertTrue(any("币安保护单体检异常" in a for a in rig.actions), rig.actions)
+        self.assertEqual(rig.protect_calls, [], "币安路径不得调用 OKX 的云 OCO 核验")
 
     def test_an_okx_position_still_uses_the_okx_paths(self):
         """OKX 路径逐位不变。"""

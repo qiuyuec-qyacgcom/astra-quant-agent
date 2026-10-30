@@ -273,6 +273,36 @@ class BinanceExchangeTests(unittest.TestCase):
         self.assertNotIn("demo-fapi", live_call["url"])
         self.assertEqual(live_call["headers"].get("X-MBX-APIKEY"), "testkey")
 
+    def test_public_market_data_ignores_the_funding_environment(self):
+        """★ 2026-10-30：公共行情（K线/ticker/exchangeInfo）恒走**实盘域名**。
+
+        demo 档若按档切到 demo-fapi，拿到的是币安测试网的稀疏 K 线/有限符号 ⇒
+        主脑数据包被判「数据质量 invalid」，而 WS 行情流与因子引擎本来就走实盘，
+        同一包数据一半实盘一半测试网（用户 2026-10-30 报的正是这个）。
+        签名/交易接口仍必须按档位（时钟与账户都在那一侧）。
+        """
+        from astra_backend.exchanges.candle_cache import clear
+        clear()
+        install_defaults(self.session, hedge=True)
+        self.session.on("GET", "/fapi/v1/klines", [
+            [1_700_000_000_000, "1", "2", "0.5", "1.5", "10",
+             1_700_000_900_000, "15"]])
+        ex = self._exchange()          # FakeEnv 默认 mode="demo"
+        ex.candles(INST, "15m", 5)
+        ex.ticker(INST)
+        ex.instruments(INST)
+        for path in ("/fapi/v1/klines", "/fapi/v1/ticker/24hr",
+                     "/fapi/v1/ticker/bookTicker", "/fapi/v1/exchangeInfo"):
+            calls = _calls(self.session, "GET", path)
+            self.assertTrue(calls, f"{path} 应有请求")
+            for call in calls:
+                self.assertTrue(call["url"].startswith(LIVE_HOST),
+                                f"公共行情 {path} 不得走测试网：{call['url']}")
+        ex.balance()                   # 签名接口
+        account = _calls(self.session, "GET", "/fapi/v3/account")[0]
+        self.assertTrue(account["url"].startswith(DEMO_HOST),
+                        "签名/交易接口必须仍按资金档走 demo-fapi")
+
     def test_signed_timestamp_follows_binance_server_time(self):
         install_defaults(self.session, hedge=True)
         frozen = 1_700_000_000.0
@@ -883,7 +913,14 @@ class BinanceExchangeTests(unittest.TestCase):
         self.assertEqual(rows[0]["entryOrderIds"], ["8", "10"])
         self.assertNotIn("11", rows[0]["entryOrderIds"])
 
-    def test_candles_cache_does_not_leak_across_demo_and_live(self):
+    def test_candles_are_deliberately_shared_across_demo_and_live(self):
+        """★ 2026-10-30：公共行情恒走**实盘域名** ⇒ 两档读的是同一份 K 线。
+
+        旧行为（demo 读 demo-fapi、live 读 fapi）正是本轮修的缺陷：demo 档拿到的是
+        币安**测试网**的稀疏 K 线（符号/历史都不同），于是「数据质量 invalid」，
+        而 WS 行情流与因子引擎本来就走实盘 —— 同一包数据一半实盘一半测试网。
+        缓存共享因此是**正确**语义，不是泄漏。
+        """
         from astra_backend.exchanges.candle_cache import clear
         clear()
         now = 1_700_000_000_000
@@ -900,7 +937,9 @@ class BinanceExchangeTests(unittest.TestCase):
         demo_rows = demo.candles(INST, "15m", 24)
         live_rows = live.candles(INST, "15m", 24)
         self.assertEqual(demo_rows[0][4], "101")
-        self.assertEqual(live_rows[0][4], "202")
+        self.assertEqual(live_rows[0][4], "101", "live 档命中同一份实盘缓存，不再另取")
+        self.assertEqual(_calls(live_session, "GET", "/fapi/v1/klines"), [],
+                         "两档共用实盘行情缓存，live 不该再打一次 REST")
         self.assertEqual(len(_calls(demo_session, "GET", "/fapi/v1/klines")), 1)
         demo.candles(INST, "15m", 24)
         self.assertEqual(len(_calls(demo_session, "GET", "/fapi/v1/klines")), 1)

@@ -291,7 +291,11 @@ class ScaleOutExecutionTests(unittest.TestCase):
             close_trade_payload=self.mock_payload,
         )
         self.assertFalse(ok)
-        self.assertIn("非 OKX 场所", reason)
+        # 2026-10-30：币安机械退出已接入，但**分批止盈**首版未接入 —— 必须如实说明
+        # （而不是旧文案"非 OKX 场所历史持仓"，那会让人以为币安仓无人管）。
+        self.assertIn("币安分批止盈未接入", reason)
+        self.assertEqual(trackers["BTC-USDT-SWAP_long"]["scale_out_phase"], -1,
+                         "已评估但不可拆分要打标，避免每周期重复提示")
 
     def test_gate_scale_out_cancels_old_protective_and_sets_reduce_only(self):
         pos_gate = {
@@ -320,7 +324,7 @@ class ScaleOutExecutionTests(unittest.TestCase):
             close_trade_payload=self.mock_payload,
         )
         self.assertFalse(ok)
-        self.assertIn("非 OKX 场所", reason)
+        self.assertIn("场所未接入执行面", reason)
 
     def test_cycle_parts_scale_out_tp_derivation(self):
         from scripts.brain.cycle_parts import _calculate_scale_out_tp, build_history_record
@@ -408,14 +412,14 @@ class CrossVenueUnitScaleTests(unittest.TestCase):
                "ctVal": 10.0, "minSz": 10.0, "precision": 0}
         ok, reason, adapter, fee = self._run(pos)
         self.assertFalse(ok)
-        self.assertIn("非 OKX 场所", reason)
+        self.assertIn("场所未接入执行面", reason)
 
     def test_binance_uses_coin_units_with_a_contract_value_of_one(self):
         pos = {"side": "long", "avgPx": 0.09615, "pos": 861.0, "venue": "binance",
                "ctVal": 1.0, "minSz": 1.0, "precision": 0}
         ok, reason, adapter, fee = self._run(pos)
         self.assertFalse(ok)
-        self.assertIn("非 OKX 场所", reason)
+        self.assertIn("币安分批止盈未接入", reason)
 
     def test_an_okx_position_still_falls_back_to_the_pool_values(self):
         """没有持仓级覆盖时逐位回落 OKX 口径 —— 不许改变 OKX 路径的行为。"""

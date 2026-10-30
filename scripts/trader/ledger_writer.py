@@ -68,9 +68,14 @@ def record_trade(trade_data, position=None, *, LEDGER_JSON_FILE: str, _atomic_wr
     # 非 dict 输入会在类型保护之前就抛 AttributeError。类型检查必须前置。
     if not isinstance(trade_data, dict):
         return
-    # G10 场所标注：本链路全部为 OKX V5 直签执行，源头补 venue；
-    # setdefault 不覆盖显式值，旧调用方无感。
-    trade_data.setdefault("venue", "okx")
+    # G10 场所标注（2026-10-30 修订）：除了 OKX V5 直签，币安持仓的机械退出与
+    # AI 平仓也走本函数 —— venue 以**持仓行**为准（缺失仍按 okx，旧调用方无感）；
+    # setdefault 不覆盖调用方显式给的值。
+    _pos_venue = "okx"
+    if isinstance(position, dict):
+        _pos_venue = str(position.get("venue") or position.get("exchange")
+                         or "okx").strip().lower() or "okx"
+    trade_data.setdefault("venue", _pos_venue)
     if "policy_version" not in trade_data:
         try:
             from policy_snapshot import generate_policy_snapshot

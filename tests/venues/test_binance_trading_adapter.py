@@ -125,10 +125,12 @@ class BinanceTradingAdapterTest(unittest.TestCase):
     def test_place_protected_market_order_delegates(self):
         self._ex.place_protected_market_order.return_value = {"orderId": "2"}
         ad = self._adapter()
+        # `px_ref` 必须透传：币安市价单的 minNotional 校验要用**同一个**锚价
+        # （2026-10-30：市价档此前跳过名义额校验，被交易所 -4164 拒）。
         r = ad.place_protected_market_order(
-            "BTC-USDT-SWAP", "buy", "long", "0.1", "61000", "59000")
+            "BTC-USDT-SWAP", "buy", "long", "0.1", "61000", "59000", px_ref="60000")
         self._ex.place_protected_market_order.assert_called_once_with(
-            "BTC-USDT-SWAP", "buy", "long", "0.1", "61000", "59000")
+            "BTC-USDT-SWAP", "buy", "long", "0.1", "61000", "59000", px_ref="60000")
         self.assertEqual(r, {"orderId": "2"})
 
     def test_close_position_delegates(self):

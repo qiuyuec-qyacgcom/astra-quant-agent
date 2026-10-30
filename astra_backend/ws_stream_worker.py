@@ -48,6 +48,25 @@ def _enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _seed_enabled() -> bool:
+    """开流前是否用 REST 历史 K 线播种（默认**开启**，`ASTRA_BINANCE_WS_SEED=0` 关闭）。
+
+    为什么要播种：WS 只从连上那刻开始攒 K 线，而决策链要求 15m≥12 / 1H≥8 / 4H≥6 根
+    （4H 得等 64 小时）—— 热身期只能回退 REST，币安 REST 一封就成了「数据质量 invalid」。
+    """
+    raw = str(os.getenv("ASTRA_BINANCE_WS_SEED", "1")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _seed_limit() -> int:
+    """播种根数（默认 240，与 `MarketState.max_bars` 对齐；下限 30 防呆）。"""
+    try:
+        value = int(os.getenv("ASTRA_BINANCE_WS_SEED_LIMIT", "240") or 240)
+    except (TypeError, ValueError):
+        value = 240
+    return max(30, min(value, 1000))
+
+
 def _stream_key() -> Optional[Tuple[str, Tuple[str, ...]]]:
     """当前应订阅的 (venue, symbols)。非币安/空池 → None（不采集）。"""
     try:
@@ -78,7 +97,8 @@ def _spawn(key: Tuple[str, Tuple[str, ...]]) -> Tuple[Any, threading.Thread]:
     def _run() -> None:
         try:
             run_stream(venue=venue, symbols=list(symbols),
-                       snapshot_path=_SNAPSHOT_FILE, stop=stop)
+                       snapshot_path=_SNAPSHOT_FILE, stop=stop,
+                       seed=_seed_enabled(), seed_limit=_seed_limit())
         except Exception as exc:            # 常驻线程绝不因为一次异常退出
             _log(f"warn 采集线程退出: {type(exc).__name__}: {exc}")
 

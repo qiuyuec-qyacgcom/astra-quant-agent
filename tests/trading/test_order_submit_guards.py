@@ -431,3 +431,82 @@ class LongStopPushBackTest(unittest.TestCase):
         _, _, _, kw = rig.okx.orders[0]
         self.assertLess(kw["attach_sl"], kw["px"], f"SL 要被压回入场下方：{kw}")
 
+
+class _BinanceStub:
+    """币安适配器替身：记下单、给规格（minNotional 可调）。"""
+
+    def __init__(self, min_notional="5.0", instruments_raise=False):
+        self.min_notional = min_notional
+        self.instruments_raise = instruments_raise
+        self.market_orders = []
+        self.limit_orders = []
+        self.leverage_calls = []
+
+    def instruments(self, inst_id):
+        if self.instruments_raise:
+            raise RuntimeError("exchangeInfo 不可用")
+        return [{"instId": inst_id, "minNotional": self.min_notional,
+                 "minSz": "0.0001", "lotSz": "0.0001", "ctVal": "1"}]
+
+    def set_leverage(self, inst_id, lever, pos_side=None):
+        self.leverage_calls.append((inst_id, lever, pos_side))
+
+    def place_protected_market_order(self, inst_id, side, pos_side, size,
+                                     tp_px, sl_px, px_ref=None):
+        self.market_orders.append((inst_id, side, pos_side, size, tp_px, sl_px, px_ref))
+        return {"orderId": "bn-market-1"}
+
+    def place_protected_limit_order(self, inst_id, side, pos_side, size,
+                                    price, tp_px, sl_px):
+        self.limit_orders.append((inst_id, side, pos_side, size, price, tp_px, sl_px))
+        return {"orderId": "bn-limit-1"}
+
+
+class _BinanceReg(_Reg):
+    def require_execution(self, venue, environment=None):
+        return True
+
+
+class BinanceMinNotionalTest(unittest.TestCase):
+    """币安市价单的最小名义额（2026-10-30 实盘 `-4164`：notional 必须 ≥ 5U）。
+
+    旧行为：市价档在适配器里传 `price=None` 跳过 minNotional，`margin×lever < 5U`
+    的单一路打到交易所被拒，且每周期重算重试 → 日志刷同一行、周期白跑。
+    """
+
+    def _run(self, *, margin, leverage, bn):
+        rig = Rig(venue="binance")
+        with patch.dict(os.environ, {"ASTRA_ORDER_MODE": "market"}):
+            ok, detail = rig.run(
+                venue_ctx={"notional_usdt": margin * leverage, "margin_usdt": margin,
+                           "leverage": leverage, "ct_val": 1, "min_sz": 0.0001,
+                           "intent_id": "i1"},
+                binance_rest=bn, venue_registry=_BinanceReg())
+        return rig, ok, detail
+
+    def test_below_the_exchange_minimum_is_refused_before_submit(self):
+        bn = _BinanceStub(min_notional="5.0")
+        rig, ok, why = self._run(margin=1, leverage=3, bn=bn)
+        self.assertFalse(ok)
+        self.assertIn("低于币安最小下单名义", why)
+        self.assertIn("5.00U", why)
+        self.assertEqual(bn.market_orders, [], "不得把注定被拒的单打到交易所")
+        self.assertEqual(rig.released, [("res-1", "币安名义额低于交易所最小")],
+                         "拒单必须释放预算预留")
+
+    def test_at_the_minimum_the_order_is_submitted_with_the_same_anchor_price(self):
+        bn = _BinanceStub(min_notional="5.0")
+        rig, ok, oid = self._run(margin=2, leverage=5, bn=bn)   # 名义 10U ≥ 5U
+        self.assertTrue(ok, oid)
+        self.assertEqual(oid, "bn-market-1")
+        self.assertEqual(rig.released, [])
+        _inst, _side, _ps, size, _tp, _sl, px_ref = bn.market_orders[0]
+        self.assertAlmostEqual(float(size), 10.0 / 100000.0)
+        self.assertEqual(float(px_ref), 100000.0, "minNotional 复验必须用同一锚价")
+
+    def test_unreadable_specs_fall_back_to_the_five_usdt_floor(self):
+        from scripts.trader.order_submit import _binance_min_notional
+        self.assertEqual(_binance_min_notional(None, INST), 5.0)
+        self.assertEqual(
+            _binance_min_notional(_BinanceStub(instruments_raise=True), INST), 5.0)
+

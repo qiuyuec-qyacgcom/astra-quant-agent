@@ -24,6 +24,9 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     ccy = item.get("ccy", "")
     headers = {"User-Agent": "Mozilla/5.0"}
     is_binance = (str(venue or "").strip().lower()) == "binance"
+    # 取数失败告警的措辞按场所说实话：OKX 有 www/aws/CLI 三级容灾，币安只有一套
+    # 公开行情（WS 快照优先、REST 兜底）—— 沿用 OKX 的文案会让排障方向跑偏。
+    _candles_src = "币安公开行情(WS/REST)" if is_binance else "www/aws/CLI 三级容灾"
 
     pkg = {
         "instId": inst_id,
@@ -145,7 +148,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                         obv -= vols[i]
                 pkg["obv_flow"] = "BULL_FLOW" if obv > 0 else ("BEAR_FLOW" if obv < 0 else "NEUTRAL")
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（www/aws/CLI 三级容灾均未取回），本包 15M 微观指标降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 15m K线获取失败（{_candles_src} 未取回），本包 15M 微观指标降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 15m K线处理异常: {exc}")
 
@@ -188,7 +191,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                     else:
                         pkg["structure_1h"] = "1H_SWING_CHOP"
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（www/aws/CLI 三级容灾均未取回），1H ATR/RSI/结构字段降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 1H K线获取失败（{_candles_src} 未取回），1H ATR/RSI/结构字段降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 1H K线处理异常: {exc}")
 
@@ -209,7 +212,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
                 else:
                     pkg["macro_4h"] = "4H_MACRO_RANGE (大级别区间震荡)"
         else:
-            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（www/aws/CLI 三级容灾均未取回），4H 宏观结构字段降级缺省")
+            print(f"[AI Brain] ⚠️ {inst_id} 4H K线获取失败（{_candles_src} 未取回），4H 宏观结构字段降级缺省")
     except Exception as exc:
         print(f"[AI Brain] ⚠️ {inst_id} 4H K线处理异常: {exc}")
 
@@ -287,19 +290,30 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         except Exception as exc:
             note_failure("okx_adx_1h", exc)
 
-    required_market_data = (
-        pkg["price"] > 0
-        and pkg["bidPx"] > 0
-        and pkg["askPx"] >= pkg["bidPx"]
-        and len(pkg["recent_15m"]) >= 12
-        and len(pkg["recent_1h"]) >= 8
-        and len(pkg["recent_4h"]) >= 6
-    )
+    # 六条判据**逐条**记账（2026-10-30 用户报「币安侧一律 数据质量 invalid」）：
+    # 只报 invalid 等于没说 —— 看提示词的人无法判断是盘口缺失、还是某档 K 线不足、
+    # 到底是缺几根。故把不满足的条目拼成 `data_quality_reason` 随包下传，
+    # 由提示词渲染（`数据质量: invalid — 15m K线不足(6/12)`）。
+    _missing_market_data = []
+    if pkg["price"] <= 0:
+        _missing_market_data.append("现价缺失")
+    if pkg["bidPx"] <= 0:
+        _missing_market_data.append("买一价缺失")
+    if pkg["askPx"] < pkg["bidPx"]:
+        _missing_market_data.append(f"盘口倒挂(bid={pkg['bidPx']}/ask={pkg['askPx']})")
+    if len(pkg["recent_15m"]) < 12:
+        _missing_market_data.append(f"15m K线不足({len(pkg['recent_15m'])}/12)")
+    if len(pkg["recent_1h"]) < 8:
+        _missing_market_data.append(f"1H K线不足({len(pkg['recent_1h'])}/8)")
+    if len(pkg["recent_4h"]) < 6:
+        _missing_market_data.append(f"4H K线不足({len(pkg['recent_4h'])}/6)")
+    required_market_data = not _missing_market_data
     # 6. 已退役：微积分多周期引擎（2026-10 数理系统退场）。
     #    `pkg["calculus"]` 只保留**显式不可用**的默认占位 —— 键位不动，
     #    供 calculus_snapshot.json / 台账兜底读取链使用；**不再计算任何东西**。
     pkg["quant_factors"] = load_quant_factor_tiers(inst_id, venue=venue)
     pkg["data_quality"] = "valid" if required_market_data else "invalid"
+    pkg["data_quality_reason"] = "、".join(_missing_market_data)
 
     # 标的体制状态（综合 4H 宏观、1H 结构与 1H ADX 趋势强度）
     m4h = str(pkg.get("macro_4h") or "")

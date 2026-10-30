@@ -124,6 +124,12 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
     market_lines = []
     for p in packages:
         quality = p.get("data_quality", "invalid")
+        # 2026-10-30（用户报「币安侧一律 数据质量 invalid」）：只写 invalid 无法排障，
+        # 包里的 `data_quality_reason` 逐条点出缺口（现价/买一价/盘口倒挂/某档 K 线根数），
+        # 这里一并渲染成 `invalid — 15m K线不足(6/12)`。
+        _quality_reason = str(p.get("data_quality_reason") or "").strip()
+        if quality != "valid" and _quality_reason:
+            quality = f"{quality} — {_quality_reason}"
 
         sm = p.get("smart_money", {})
         # ★ 交易侧包里的 `adx_1h`/`atr`/`vol_ratio` 初值是 0.0/0.0/1.0（取数失败时不写）
